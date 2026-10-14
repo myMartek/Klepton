@@ -439,6 +439,28 @@ final class KleptonRendering: ObservableObject {
     }
 }
 
+// The guest renders small (the Render resolution slider); the LINEAR stretch
+// to the eye texture is then replaced by Apple's spatial scaler: same pixels
+// in, sharper picture out. Single frame in/out, no motion data.
+// Read live in the compositor, so the switch applies to the next frame.
+// Off by default; "never chosen" means off (plain linear stretch).
+final class KleptonMetalFX: ObservableObject {
+    static let shared = KleptonMetalFX()
+
+    private static let key = "klepton.metalfxUpscale"
+
+    @Published var enabled: Bool {
+        didSet {
+            UserDefaults.standard.set(enabled, forKey: Self.key)
+            NSLog("[metalfx] spatial upscale: \(enabled ? "on" : "off")")
+        }
+    }
+
+    private init() {
+        enabled = UserDefaults.standard.bool(forKey: Self.key)
+    }
+}
+
 /// "Record what the game waits for": the runtime's account of blocked threads
 /// (KL_TRACE_CONDDUMP — kl_pthread_stuck_diag has what it writes), as a switch
 /// a player can turn on for a game that stops in a loading screen. Off unless
@@ -692,6 +714,7 @@ extension KleptonRendering {
 
 struct RenderingView: View {
     @ObservedObject private var rendering = KleptonRendering.shared
+    @ObservedObject private var metalfx = KleptonMetalFX.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -732,6 +755,9 @@ struct RenderingView: View {
                  + "looking around stutters: a game that saturates the GPU "
                  + "halves the rate head movement is corrected at. Takes "
                  + "effect the next time the app starts.")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("MetalFX upscaling", isOn: $metalfx.enabled)
+            Text("Sharpens the picture when Render resolution is below 100%: the game draws small and the scaler stretches it to eye size. Costs some graphics time. Takes effect on the next frame.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
