@@ -46,6 +46,7 @@
 import SwiftUI
 import CompositorServices
 import Metal
+import MetalFX
 import simd
 import ARKit
 import AVFoundation
@@ -2314,6 +2315,148 @@ final class KleptonCompositor {
         return encoded > 0 ? 1 : 0
     }
 
+private var mfxScalers: [String: any MTLFXSpatialScaler] = [:]
+private var mfxTextures: [String: any MTLTexture] = [:]
+private var mfxUpgraded: [ObjectIdentifier: any MTLTexture] = [:]
+// Last upscale per raw eye texture, and the guest frame it was built for.
+// The composite runs at display rate while a heavy guest only delivers 30-50
+// pictures a second: without this every repeat re-encodes the identical
+// upscale and the scaler's memory traffic contends with the guest's own GPU.
+private var mfxCache: [ObjectIdentifier: any MTLTexture] = [:]
+private var mfxLastFrameValue: UInt64 = 0
+private var mfxLastShape = ""
+private var mfxLastOn = false
+private var mfxSaidSkip = false
+/// Upscaled texture id -> the raw eye size it was built from. The composite
+/// carries the guest's sub-rects into the bigger texture with it (see the
+/// viewport insert in encodeComposite); without the source size the rects
+/// would describe another texture and the grid would drop the crop.
+private var mfxSrc: [ObjectIdentifier: (Int, Int)] = [:]
+/// Cached scaler for one geometry+format, or nil when unsupported.
+private func mfxScaler(inW: Int, inH: Int, outW: Int, outH: Int,
+                       format: MTLPixelFormat, device: any MTLDevice) -> (any MTLFXSpatialScaler)? {
+    guard MTLFXSpatialScalerDescriptor.supportsDevice(device) else { return nil }
+    let key = "\(inW)x\(inH)->\(outW)x\(outH)-\(format.rawValue)"
+    if let s = mfxScalers[key] { return s }
+    let d = MTLFXSpatialScalerDescriptor()
+    d.colorTextureFormat = format
+    d.outputTextureFormat = format
+    d.inputWidth = inW; d.inputHeight = inH
+    d.outputWidth = outW; d.outputHeight = outH
+    d.colorProcessingMode = (format == .rgba16Float) ? .hdr : .perceptual
+    guard let s = d.makeSpatialScaler(device: device) else { return nil }
+    mfxScalers[key] = s
+    return s
+}
+/// Upscales small eye textures to native size on cmd. Frames that must stay
+/// linear (projection-layer path, foveated eye, exotic texture types) leave
+/// mfxUpgraded empty and composite exactly as before. Offset sub-rects are
+/// NOT a reason to skip: both eyes may share one widened texture with a
+/// different window each (symmetric projection) — the rects are carried into
+/// the upscaled texture at the grid site, so the crop still lands.
+private func mfxPrepass(stage: Int, rendered: kl_ovrp_render_pose, haveRendered: Bool,
+                        on cmd: any MTLCommandBuffer) {
+    mfxUpgraded = [:]
+    let on = UserDefaults.standard.bool(forKey: "klepton.metalfxUpscale")
+    if on != mfxLastOn {
+        mfxLastOn = on
+        NSLog(on ? "[metalfx] toggle on — next frames upscale to native size"
+                 : "[metalfx] toggle off — linear path")
+    }
+    guard on else { return }
+    if projLayerCount > 0 { return }
+    let rs = UserDefaults.standard.object(forKey: "klepton.renderScale") as? Double ?? 1.0
+    guard rs > 0.01, rs < 0.999 else { return }
+    if kl_glfb_eye_rate_map() != nil { return }
+    // Same guest frame as the last prepass: the eye textures still hold the
+    // picture the cache was built from, so repopulate the swap map and skip
+    // the encodes. Same "same" the metrics panel uses for fresh vs repeated
+    // pictures (frameValue still equal to last, see the drawable loop).
+    let mfxFence = kl_glfb_gpu_fence_value()
+    let mfxFrame = mfxFence != 0 ? mfxFence : kl_vulkan_frame_serial()
+    if mfxFrame != 0 && mfxFrame == mfxLastFrameValue {
+        for eye in 0..<2 {
+            guard let alloc = eyeSource(eye, stage) else { continue }
+            let id = ObjectIdentifier(alloc.texture)
+            if mfxUpgraded[id] == nil, let hit = mfxCache[id] { mfxUpgraded[id] = hit }
+        }
+        return
+    }
+    mfxLastFrameValue = mfxFrame
+    mfxCache = [:]
+    for eye in 0..<2 {
+        guard let alloc = eyeSource(eye, stage) else { continue }
+        let src = alloc.texture
+        if mfxUpgraded[ObjectIdentifier(src)] != nil { continue } // shared texture: eye 1 reuses eye 0's upscale
+        guard src.textureType == .type2DArray, src.parent == nil else {
+            if !mfxSaidSkip {
+                mfxSaidSkip = true
+                NSLog("[metalfx] eye texture type \(src.textureType.rawValue) parent \(src.parent == nil ? "nil" : "set") arr \(src.arrayLength) — linear path")
+            }
+            continue
+        }
+        var dstW = ((Int(Double(src.width) / rs + 0.5)) + 1) & ~1
+        var dstH = ((Int(Double(src.height) / rs + 0.5)) + 1) & ~1
+        // Cap at the native eye: the slider only takes away, so restoring more
+        // than 100% invents pixels the game never drew. Without this a guest
+        // texture already near native overshoots the panel — measured
+        // 5760x3696 (+31% over the display) with composite GPU 8.6 -> 34.8 ms
+        // and cadence 10 -> 21 ms. Uniform factor, so the aspect never distorts.
+        var cew: Int32 = 0, ceh: Int32 = 0
+        kl_ovrp_eye_texture_size(&cew, &ceh)
+        if cew > 0 && ceh > 0 {
+            let natW = ((Int(Double(cew) / rs + 0.5)) + 1) & ~1
+            let natH = ((Int(Double(ceh) / rs + 0.5)) + 1) & ~1
+            if natW > 0 && natH > 0 && (dstW > natW || dstH > natH) {
+                let k = min(Double(natW) / Double(dstW), Double(natH) / Double(dstH))
+                dstW = max(((Int(Double(dstW) * k + 0.5)) + 1) & ~1, 2)
+                dstH = max(((Int(Double(dstH) * k + 0.5)) + 1) & ~1, 2)
+            }
+        }
+        guard dstW > src.width else { continue }
+        let key = "\(src.width)x\(src.height)->\(dstW)x\(dstH)-\(src.pixelFormat.rawValue)"
+        let dst: any MTLTexture
+        if let t = mfxTextures[key] {
+            dst = t
+        } else {
+            let desc = MTLTextureDescriptor()
+            desc.textureType = .type2DArray
+            desc.pixelFormat = src.pixelFormat
+            desc.width = dstW; desc.height = dstH
+            desc.arrayLength = src.arrayLength
+            desc.mipmapLevelCount = 1
+            desc.usage = [.shaderRead, .shaderWrite]
+            desc.storageMode = .private
+            guard let t = src.device.makeTexture(descriptor: desc) else { continue }
+            mfxTextures[key] = t
+            dst = t
+        }
+        var ok = true
+        for s in 0..<src.arrayLength {
+            guard let sv = src.makeTextureView(pixelFormat: src.pixelFormat, textureType: .type2D,
+                                               levels: 0..<1, slices: s..<s + 1),
+                  let dv = dst.makeTextureView(pixelFormat: dst.pixelFormat, textureType: .type2D,
+                                               levels: 0..<1, slices: s..<s + 1),
+                  let sc = mfxScaler(inW: sv.width, inH: sv.height,
+                                     outW: dv.width, outH: dv.height,
+                                     format: sv.pixelFormat, device: src.device) else { ok = false; break }
+            sc.colorTexture = sv
+            sc.inputContentWidth = sv.width; sc.inputContentHeight = sv.height
+            sc.outputTexture = dv
+            sc.encode(commandBuffer: cmd)
+        }
+        guard ok else { continue }
+        mfxUpgraded[ObjectIdentifier(src)] = dst
+        mfxCache[ObjectIdentifier(src)] = dst
+        mfxSrc[ObjectIdentifier(dst)] = (src.width, src.height)
+        let shape = "\(src.width)x\(src.height)->\(dstW)x\(dstH)"
+        if shape != mfxLastShape {
+            mfxLastShape = shape
+            NSLog("[metalfx] upscaling \(shape) (render scale \(rs))")
+        }
+    }
+}
+
     /// One drawable, every eye it carries. Returns how many eyes got a picture.
     ///
     /// **Both eyes go through ONE render pass now, and that is what foveation
@@ -2334,6 +2477,8 @@ final class KleptonCompositor {
                                  cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                                  rendered: kl_ovrp_render_pose, haveRendered: Bool,
                                  originFromHead: simd_float4x4) -> Int {
+        // MetalFX prepass: small eyes up to native size before sampling.
+        mfxPrepass(stage: stage, rendered: rendered, haveRendered: haveRendered, on: cmd)
         // KL_CP_AMPLIFY=0 — back to ONE RENDER PASS PER EYE, selecting the
         // slice on the attachment, with no rate map and no amplification.
         //
@@ -2482,7 +2627,10 @@ final class KleptonCompositor {
         var visible = 0
         for vi in viewIndices {
             let view = drawable.views[vi]
-            let a = eyeSource(vi, stage)
+            var a = eyeSource(vi, stage)
+            if let au = a, let up = mfxUpgraded[ObjectIdentifier(au.texture)] {
+                a = EyeAllocation(texture: up, slice: au.slice, flipY: au.flipY)
+            }
             // No eye texture yet — the guest is still in _begin, or it has not
             // reached ovrp_SetupEyeTexture2 for this stage. The pass still runs,
             // because the clear above is the point: a drawable that is presented
@@ -2679,6 +2827,22 @@ final class KleptonCompositor {
                 vp1 = SIMD4<Float>(Float(r.0), Float(r.1), Float(r.2), Float(r.3))
                 vpOf = SIMD2<Float>(Float(rendered.viewport_of.0),
                                     Float(rendered.viewport_of.1))
+                // MetalFX: the bound texture is the upscaled copy, so carry the
+                // guest's rects into it — unscaled they describe another
+                // texture and the grid drops the crop.
+                if let s0 = mfxSrc[ObjectIdentifier(bind0)] {
+                    let kx0 = Float(bind0.width) / Float(s0.0), ky0 = Float(bind0.height) / Float(s0.1)
+                    vp0 *= SIMD4<Float>(kx0, ky0, kx0, ky0)
+                    if Int(vpOf.x) == s0.0 && Int(vpOf.y) == s0.1 {
+                        vpOf = SIMD2<Float>(Float(bind0.width), Float(bind0.height))
+                    } else {
+                        vpOf *= SIMD2<Float>(kx0, ky0)
+                    }
+                }
+                if let s1 = mfxSrc[ObjectIdentifier(bind1)] {
+                    let kx1 = Float(bind1.width) / Float(s1.0), ky1 = Float(bind1.height) / Float(s1.1)
+                    vp1 *= SIMD4<Float>(kx1, ky1, kx1, ky1)
+                }
                 // Said once, and said even when it is ZERO — which is the whole
                 // point. `[ovrp] render viewport` is printed by the guest's own
                 // EndFrame4 on the guest's thread, and until this line existed there
