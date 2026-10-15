@@ -627,10 +627,13 @@ static int klvk_park_instances(void) {
         // three host runs created their device and the fourth enumerated
         // another VkPhysicalDevice and ended on "Unable to initialize the
         // Unity Engine Graphics API".
+        // Arizona Sunshine 2 (x5245041552210029) takes the handle answer as
+        // well, so the probe's device has to outlive the probe here too.
         on = kl_env_on("KL_VK_PARK_INSTANCE",
                        t && (strcmp(t, "walkabout") == 0 || strcmp(t, "batman") == 0 ||
                              strcmp(t, "x5269080709783454") == 0 ||
-                             strcmp(t, "x3634830803298285") == 0));
+                             strcmp(t, "x3634830803298285") == 0 ||
+                             strcmp(t, "x5245041552210029") == 0));
     }
     return on;
 }
@@ -4717,6 +4720,19 @@ static VkResult VKAPI_CALL klvk_CreateGraphicsPipelines(VkDevice dev,
 // constant step — over a buffer of zeroes of ours, bound to that binding
 // whenever the pipeline is. The shader reads 0 there, which "undefined" allows.
 // A pipeline that compiled is never touched. Default on for that title only.
+//
+// The same retry takes a second refusal of the same kind: an input the state
+// DOES supply, as 32-bit floats, that the shader reads as int or uint — "Cannot
+// convert attribute from MTLAttributeFormatFloat2 to int4 or uint4". Vulkan
+// calls that undefined too; a Quest's fetch hands the shader the stored bits.
+// Here the attribute is declared with the integer format of the same size,
+// which hands it exactly those bits. Arizona Sunshine 2 (Unity 2022.3,
+// x5245041552210029) had some two thousand of these in a session, in bursts
+// as new things came into view — each a Metal compile thrown away and a draw
+// left out — and is the second title it is on for by default. This half has a
+// switch of its own, KL_VK_VIN_INT (default on for that title only), so Alien's
+// retry stays what was measured there: a pipeline refused for this reason is
+// still left out for it rather than drawn with bits nobody has looked at.
 #define KLVK_VIN_SLOTS 8192u
 #define KLVK_VIN_MAXB  16u
 // By shader module: the input locations it reads as float / int / uint.
@@ -4730,7 +4746,18 @@ static int klvk_vin_on(void) {
     if (on < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        on = kl_env_on("KL_VK_VIN_FILL", t && !strcmp(t, "x24882487241367228"));
+        on = kl_env_on("KL_VK_VIN_FILL", t && (!strcmp(t, "x24882487241367228") ||
+                                              !strcmp(t, "x5245041552210029")));
+    }
+    return on;
+}
+// The float-read-as-integer half of the retry (only asked once KL_VK_VIN_FILL is on).
+static int klvk_vin_int_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_VK_VIN_INT", t && !strcmp(t, "x5245041552210029"));
     }
     return on;
 }
@@ -4849,6 +4876,17 @@ static VkBuffer klvk_vin_zero(klvk_device *d) {
     pthread_mutex_unlock(&g_vin_mu);
     return r;
 }
+// The integer format whose components are the same 32 bits as a float format's
+// (VK_FORMAT_UNDEFINED for any other format): an attribute read as int/uint.
+static VkFormat klvk_vin_int_format(VkFormat f, int sint) {
+    switch (f) {
+    case VK_FORMAT_R32_SFLOAT:          return sint ? VK_FORMAT_R32_SINT : VK_FORMAT_R32_UINT;
+    case VK_FORMAT_R32G32_SFLOAT:       return sint ? VK_FORMAT_R32G32_SINT : VK_FORMAT_R32G32_UINT;
+    case VK_FORMAT_R32G32B32_SFLOAT:    return sint ? VK_FORMAT_R32G32B32_SINT : VK_FORMAT_R32G32B32_UINT;
+    case VK_FORMAT_R32G32B32A32_SFLOAT: return sint ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_UINT;
+    default:                            return VK_FORMAT_UNDEFINED;
+    }
+}
 // One pipeline MoltenVK refused, once more with the inputs it lacks.
 static void klvk_vin_retry(PFN_vkCreateGraphicsPipelines real, VkDevice dev, VkPipelineCache cache,
         const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *alloc, VkPipeline *out) {
@@ -4875,20 +4913,29 @@ static void klvk_vin_retry(PFN_vkCreateGraphicsPipelines real, VkDevice dev, VkP
         if (vi->pVertexAttributeDescriptions[a].location < 32) have |= 1u << vi->pVertexAttributeDescriptions[a].location;
     for (uint32_t b = 0; b < nb; b++)
         if (vi->pVertexBindingDescriptions[b].binding >= slot) slot = vi->pVertexBindingDescriptions[b].binding + 1;
-    uint32_t reads = in.f | in.i | in.u, miss = reads & ~have;
-    if (!known || !miss || slot >= KLVK_VIN_MAXB) {
+    uint32_t reads = in.f | in.i | in.u, miss = reads & ~have, conv = 0;
+    for (uint32_t a = 0; a < na && klvk_vin_int_on(); a++) {
+        uint32_t loc = vi->pVertexAttributeDescriptions[a].location;
+        if (loc < 32 && ((in.i | in.u) >> loc & 1) &&
+            klvk_vin_int_format(vi->pVertexAttributeDescriptions[a].format, 1) != VK_FORMAT_UNDEFINED)
+            conv |= 1u << loc;
+    }
+    if (!known || !(miss | conv) || (miss && slot >= KLVK_VIN_MAXB)) {
         if (__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 16)
             VKI("CreateGraphicsPipelines: a refused pipeline is not one KL_VK_VIN_FILL can help "
                 "(vertex shader %s, reads locations %#x, pipeline supplies %#x over %u binding(s))\n",
                 known ? "known" : "unknown", reads, have, nb);
         return;
     }
-    VkBuffer zero = klvk_vin_zero(dev_find(dev));
+    VkBuffer zero = miss ? klvk_vin_zero(dev_find(dev)) : VK_NULL_HANDLE;
     VkVertexInputBindingDescription *bd = malloc((nb + 1) * sizeof *bd);
     VkVertexInputAttributeDescription *ad = malloc((na + 32) * sizeof *ad);
-    if (!zero || !bd || !ad) { free(bd); free(ad); return; }
+    if ((miss && !zero) || !bd || !ad) { free(bd); free(ad); return; }
     if (nb) memcpy(bd, vi->pVertexBindingDescriptions, nb * sizeof *bd);
     if (na) memcpy(ad, vi->pVertexAttributeDescriptions, na * sizeof *ad);
+    for (uint32_t a = 0; a < na; a++)
+        if (ad[a].location < 32 && (conv >> ad[a].location & 1))
+            ad[a].format = klvk_vin_int_format(ad[a].format, (int)(in.i >> ad[a].location & 1));
     bd[nb] = (VkVertexInputBindingDescription){ .binding = slot, .stride = 0,
                                                 .inputRate = VK_VERTEX_INPUT_RATE_VERTEX };
     uint32_t n = na;
@@ -4900,7 +4947,7 @@ static void klvk_vin_retry(PFN_vkCreateGraphicsPipelines real, VkDevice dev, VkP
     VkPipelineVertexInputStateCreateInfo v2;
     if (vi) v2 = *vi;
     else { memset(&v2, 0, sizeof v2); v2.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO; }
-    v2.vertexBindingDescriptionCount = nb + 1;  v2.pVertexBindingDescriptions = bd;
+    v2.vertexBindingDescriptionCount = nb + (miss ? 1 : 0);  v2.pVertexBindingDescriptions = bd;
     v2.vertexAttributeDescriptionCount = n;     v2.pVertexAttributeDescriptions = ad;
     VkGraphicsPipelineCreateInfo c = *ci;
     c.pVertexInputState = &v2;
@@ -4908,15 +4955,18 @@ static void klvk_vin_retry(PFN_vkCreateGraphicsPipelines real, VkDevice dev, VkP
     VkResult r = real(dev, cache, 1, &c, alloc, &p);
     free(bd); free(ad);
     if (r == VK_SUCCESS && p) {
-        klvk_vin_put(g_vin_pipe, (uint64_t)(uintptr_t)p, slot, 0, 0);
-        __atomic_add_fetch(&g_vin_pipes, 1, __ATOMIC_RELAXED);
+        if (miss) {
+            klvk_vin_put(g_vin_pipe, (uint64_t)(uintptr_t)p, slot, 0, 0);
+            __atomic_add_fetch(&g_vin_pipes, 1, __ATOMIC_RELAXED);
+        }
         *out = p;
     }
     unsigned s = __atomic_fetch_add(&said, 1, __ATOMIC_RELAXED);
     if (s < 8 || (!p && s < 64))
         VKI("CreateGraphicsPipelines: the vertex shader reads locations %#x and the pipeline "
             "supplies %#x — refused by Metal, created again with %#x reading zeroes on "
-            "binding %u: %s (result %d)\n", reads, have, miss, slot, p ? "ok" : "STILL REFUSED", (int)r);
+            "binding %u and %#x read as integers: %s (result %d)\n", reads, have, miss, slot,
+            conv, p ? "ok" : "STILL REFUSED", (int)r);
 }
 // What the recording thread's command buffer has bound, as the guest knows it,
 // and the binding the bound pipeline's zeroes are on (-1: none). The guest does

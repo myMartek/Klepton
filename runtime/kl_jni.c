@@ -1519,6 +1519,7 @@ static const klj_binding *klj_find_binding(const char *cls, const char *name,
     // is the one it was written for, so no other game's lookup changes.
     const klj_binding *own = klj_firebase_binding(cls, name, sig);
     if (!own) own = klj_vivox_binding(cls, name, sig);
+    if (!own) own = klj_vertigo_binding(cls, name, sig);
     if (own) return own;
     // Exact wins outright across EVERY family table, so the answer does not
     // depend on which file a class landed in; a loose match is only ever the
@@ -1648,6 +1649,33 @@ static const klj_binding *klj_resolve_by_name(const char *cls, const char *name,
     return klj_find_by_name("java/lang/Object", name, nmatch);
 }
 
+// The Sentry crash reporter's Java SDK. Arizona Sunshine 2
+// (x5245041552210029) ships sentry-unity, whose Android integration asks the
+// Java side for its hub (Sentry.getCurrentHub) right after the splash, then
+// sets tags, builds Breadcrumbs (writing their fields) and reads SentryLevel
+// constants — each of which aborted the run. There is no Sentry Java SDK
+// running on this host, so every io.sentry call and field read answers
+// zero/NULL/void and a field write is not kept, as an uninitialised SDK does:
+// a NULL hub is what the C# wrapper's `hub?.Call(...)` chains already treat
+// as "Java SDK not enabled". Nothing is sent anywhere.
+// KL_JNI_DROP_SENTRY=0 restores the stop here, =1 tries the drop elsewhere.
+static int klj_drop_sentry(const klj_wanted *w) {
+    if (strncmp(w->cls, "io/sentry/", 10) != 0) return 0;
+    static int drop = -1;
+    if (drop < 0) {
+        const char *t = kl_driver_target_name();
+        drop = kl_env_on("KL_JNI_DROP_SENTRY", t && strcmp(t, "x5245041552210029") == 0);
+    }
+    if (!drop) return 0;
+    static int said;   // the first few name the entries; the rest are noise
+    if (said < 16) {
+        said++;
+        KLJ_LOG("%s.%s%s — Sentry Java SDK, dropped (not running on this host)",
+                w->cls, w->name, w->sig);
+    }
+    return 1;
+}
+
 // Exactly one of `va` / `args` is non-NULL; everything else about a call is
 // identical between the two conventions, so they share this path rather than
 // duplicating the binding lookup and the diagnostics.
@@ -1741,6 +1769,8 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
             return zero;
         }
     }
+
+    if (klj_drop_sentry(w)) return zero;
 
     KLJ_LOG("no host implementation for %s.%s%s", w->cls, w->name, w->sig);
     if (!g_permissive) {
@@ -2189,6 +2219,10 @@ klj_val klj_field_written(void *obj, void *fid) {
     kl_egl_report(stderr);
         kl_fatal_prepare(); abort();
     }
+    // Sentry's Breadcrumbs are filled field by field, one for every event the
+    // game logs, and nothing ever reads them back: kept, they filled this
+    // table in Arizona Sunshine 2's first level and ended the run.
+    if (klj_drop_sentry(w)) return;
     klj_val *slot = klj_find_write(obj, fid);
     if (!slot) {
         if (g_nfield_writes == KLJ_MAX_FIELD_WRITES) {
@@ -2275,6 +2309,7 @@ static klj_val klj_field_value(void *obj, void *fid, char want) {
         if (klj_horizon_message_field(obj, w->cls, w->name, w->sig, &hz)) return hz;
         if (klj_ue4_media_track_field(obj, w->cls, w->name, w->sig, &hz)) return hz;
     }
+    if (klj_drop_sentry(w)) return (klj_val){0};
     KLJ_LOG("no host value for field %s.%s %s", w->cls, w->name, w->sig);
     if (!g_permissive) {
         fprintf(stderr, "[jni] this is a work item — add it to g_fields.\n");

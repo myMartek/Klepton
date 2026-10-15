@@ -55,6 +55,12 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   wrapper; a game with another version otherwise stops at the first entry it
   lacks. Default 1 for `x2582932495064035` (Real VR Fishing, whose files nobody
   here has to read the missing rows out of), else 0 — the stop by name.
+- `KL_JNI_DROP_SENTRY=0|1` — (`runtime/kl_jni.c`) drop the calls into
+  `io/sentry/…` and its field reads and writes, the Sentry crash reporter's
+  Java SDK: they answer zero/NULL/void (writes are not kept), as an SDK that
+  was never started, and the first 16 are named in the log. Default 1 for
+  `x5245041552210029` (Arizona Sunshine 2, whose sentry-unity asks for
+  `Sentry.getCurrentHub` after its splash), else 0 — the stop by name.
 - `KL_MP14_TRACE=1` — (`runtime/jni/kl_jni_ue4.c`) name the first few hundred
   calls a guest makes on UE4's `MediaPlayer14` (position, frame fetch, playing,
   complete, resolution change, start/pause/seek), each with the thread it came
@@ -1549,7 +1555,14 @@ puts the camera on the ground with its hands underneath it.
   "Function requires stage_in attributes but no descriptor was set") is created
   again with those locations reading zeroes from a buffer of the layer's own.
   Pipelines that compile are untouched. Default 1 for `x24882487241367228`
-  (Alien: Rogue Incursion), else 0.
+  (Alien: Rogue Incursion) and `x5245041552210029` (Arizona Sunshine 2), else 0.
+- `KL_VK_VIN_INT=0|1` — (only with `KL_VK_VIN_FILL` on) the same retry also
+  takes a location the state supplies as 32-bit floats but the shader reads as
+  int/uint ("Cannot convert attribute from MTLAttributeFormatFloat2 to int4 or
+  uint4"): it is declared again with the integer format of the same size,
+  which hands the shader the same bits. Default 1 for `x5245041552210029`
+  (Arizona Sunshine 2), else 0 — Alien keeps such a pipeline refused, as it was
+  measured.
 - `KL_VK_SUBPASS_MS_SAMPLE=0|1` — a fragment shader that reads a
   MULTISAMPLED subpass input (OpTypeImage Dim=SubpassData MS=1) with a bare
   subpassLoad — an OpImageRead with no Sample operand, which the spec forbids
@@ -1815,7 +1828,8 @@ puts the camera on the ground with its hands underneath it.
   instead of "unsupported". Nothing here consumes the vectors; the point is that
   the Oculus XR provider in AC Nexus fails its eye-texture creation without
   them and Unity then stops the XR display after one frame. Default 1 for
-  `x5812519008825194`, else 0.
+  `x5812519008825194` and `x5245041552210029` (Arizona Sunshine 2, the same
+  provider), else 0.
 - `KL_PLAT_LANGPACK_LIST=0|1` — answer `ovr_AssetFile_GetList` (and the status
   calls) with the `<tag>.lang` voice packs that are really in the game's OBB
   directory, as installed language packs, instead of an empty list. AC Nexus

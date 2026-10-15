@@ -401,10 +401,15 @@ static int klovrp_adapter_is_phys(void) {
         // to initialize the Unity Engine Graphics API" and UnityPlayer.kill()
         // (on device 2026-10-12; with the handle it creates its device on the
         // Mac host and reaches its privacy notice).
+        // Arizona Sunshine 2 (x5245041552210029, Unity 2022.3.10) is the fifth:
+        // LUID answer, one device walked, "Your device does not match the
+        // hardware requirements", a GLES 2.0 context and a black eye with
+        // every mesh draw skipped while its audio and game ran on.
         on = kl_env_on("KL_OVRP_ADAPTER_PHYS",
                        t && (strcmp(t, "walkabout") == 0 || strcmp(t, "batman") == 0 ||
                              strcmp(t, "x5269080709783454") == 0 ||
-                             strcmp(t, "x3634830803298285") == 0));
+                             strcmp(t, "x3634830803298285") == 0 ||
+                             strcmp(t, "x5245041552210029") == 0));
     }
     return on;
 }
@@ -8020,13 +8025,19 @@ static int klovrp_submit_viewports(const void *layer_submits, int count, int vp[
 // depth bit beside it) because its OculusSettings asset has SpaceWarp on.
 #define KLOVRP_LAYER_FLAG_SPACEWARP 0x100
 // KL_OVRP_SPACEWARP_TEX: hand the provider real motion-vector textures when it
-// asks. Default on for the one target measured; see
+// asks. Default on for the targets measured; see
 // klovrp_GetLayerTextureSpaceWarp for why refusing is not survivable there.
+// Arizona Sunshine 2 (x5245041552210029) has the same provider (eye layer
+// flags 0x1300, the seven-argument call at libOculusXRPlugin+0x13c60): its
+// display was started and stopped within 40 ms, under GLES and Vulkan alike,
+// with only GfxThread_Stop's flush frame ever submitted — a black eye while
+// the game and its audio ran on.
 static int klovrp_spacewarp_tex(void) {
     static int v = -1;
     if (v < 0) {
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_OVRP_SPACEWARP_TEX", t && !strcmp(t, "x5812519008825194"));
+        v = kl_env_on("KL_OVRP_SPACEWARP_TEX", t && (!strcmp(t, "x5812519008825194") ||
+                                                     !strcmp(t, "x5245041552210029")));
     }
     return v;
 }
