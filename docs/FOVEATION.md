@@ -324,6 +324,22 @@ Reads that must stay PHYSICAL keep the original position
   `uint2(gl_FragCoord.xy)` is rewritten to `uint2(kl_fove_phys.xy)`. The
   guest's own texelFetch (spelled `uint2(int2(gl_FragCoord.xy))`) is remapped
   as it should be.
+- **Subpass inputs read in a helper function.** Unreal 4's mobile renderer
+  reads the scene depth (DepthFade, soft-edge translucency) through
+  `VulkanSubpassDepthFetch(texture2d_ms_array<float> …, thread float4&
+  gl_FragCoord, thread uint& gl_ViewIndex)`, a static inline function ABOVE
+  the entry point that does the `.read(uint2(gl_FragCoord.xy), …)` itself.
+  A scan of the entry body alone misses it: the helper then gets the remapped
+  screen position and reads the physical-layout depth at the wrong texel. In
+  Moss that showed as a hard black band in place of the soft shadow in the
+  book's fold, with foveation on only (Moss's eye: a 2-layer x4 MSAA scene, a
+  depth-read subpass, both under one map). So a helper that takes the
+  position as `thread float4& <pos>` and uses it ONLY as `uint2(<pos>.xy)` is
+  passed `kl_fove_phys` at its call sites in the entry body instead; a helper
+  that also uses the position for anything else keeps the remapped one.
+  Moss's Archive level: 22 of 28 patched fragment entry points have such a
+  call (0 were kept physical before). `KL_FOVE_SUBPASS_HELPERS=0` restores the
+  old behaviour as an A/B control.
 - **Multisampled reads of an eye image** at its own pixel
   (`<ms texture>.read(uint2(int2(gl_FragCoord.xy)), sample)`, used by
   Source 2's soft particles on an MSAA eye): physical, see §6.

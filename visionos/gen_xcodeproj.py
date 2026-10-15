@@ -216,8 +216,14 @@ import os as _os
 # The Test switches an installer wants on from the start (KL_TEST_ON below):
 # names of environment variables and nothing else, so that what lands in the
 # project file and in Info.plist cannot be anything but a list of names.
-TEST_ON = ",".join(n for n in re.split(r"[,\s]+", os.environ.get("KLEPTON_TEST_ON", ""))
-                   if re.fullmatch(r"KL_[A-Z0-9_]{1,60}", n))
+# KLEPTON_TEST_ON_EXTRA adds a tester's own names to the installer's: AVP Play
+# sets KLEPTON_TEST_ON itself and drops one from the shell, so a test copy that
+# needs one more switch (e.g. KL_FOVE_SUBPASS_HELPERS) names it here. Unset:
+# the same list as before, byte for byte.
+TEST_ON = ",".join(dict.fromkeys(
+    n for n in re.split(r"[,\s]+", os.environ.get("KLEPTON_TEST_ON", "") + ","
+                        + os.environ.get("KLEPTON_TEST_ON_EXTRA", ""))
+    if re.fullmatch(r"KL_[A-Z0-9_]{1,60}", n)))
 
 # The render scale an installer wants the game to START at (KLEPTON_RENDER_SCALE,
 # a fraction such as 0.75; AVP Play sets it with its MetalFX switch). It replaces

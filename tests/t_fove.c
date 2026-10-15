@@ -193,6 +193,25 @@ int main(void) {
         char *pg = kl_fove_patch_for_test(g);
         CHECK(!pg, "a non-entry-point name was patched");
         free(pg);
+        // UE4's mobile depth fetch (Moss: DepthFade translucency) reads the
+        // subpass input inside a helper that takes the position by reference.
+        // The call must get the PHYSICAL position; a helper that also uses the
+        // position otherwise keeps the remapped one.
+        const char *hs = "static inline __attribute__((always_inline))\n"
+                         "float VulkanSubpassDepthFetch(texture2d_ms_array<float> D, thread float4& gl_FragCoord, thread uint& gl_ViewIndex)\n"
+                         "{\n    return D.read(uint2(gl_FragCoord.xy), gl_ViewIndex, 0).x;\n}\n\n"
+                         "static inline float Other(thread float4& gl_FragCoord)\n{\n    return gl_FragCoord.x + float(uint2(gl_FragCoord.xy).x);\n}\n\n"
+                         "fragment main_00002aac_8392f5e1_out main_00002aac_8392f5e1(float4 gl_FragCoord [[position]], uint gl_ViewIndex [[render_target_array_index]])\n"
+                         "{\n    main_00002aac_8392f5e1_out out = {};\n"
+                         "    float f = VulkanSubpassDepthFetch(s.D, gl_FragCoord, gl_ViewIndex);\n"
+                         "    float o = Other(gl_FragCoord);\n    return out;\n}\n";
+        char *ph = kl_fove_patch_for_test(hs);
+        CHECK(ph && strstr(ph, "float4 kl_fove_phys = gl_FragCoord;") &&
+              strstr(ph, "VulkanSubpassDepthFetch(s.D, kl_fove_phys, gl_ViewIndex)") &&
+              strstr(ph, "Other(gl_FragCoord)") &&
+              strstr(ph, "D.read(uint2(gl_FragCoord.xy), gl_ViewIndex, 0)"),
+              "subpass read in a helper not fed the physical position:\n%s", ph ? ph : "(null)");
+        free(ph);
     }
     // The pending-expand table: buffers released without -commit leave nothing.
     int pb = kl_fove_pend_selftest();

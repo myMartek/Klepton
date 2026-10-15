@@ -47,5 +47,27 @@ for env, want in CASES:
     ok = g["TEST_BUILD"] == want
     failed += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} {env} -> {'test build' if g['TEST_BUILD'] else 'player build'}")
+# KLTestOn: KLEPTON_TEST_ON plus a tester's KLEPTON_TEST_ON_EXTRA (AVP Play sets
+# the first itself), names only, no duplicates; unset EXTRA = the old list.
+t0 = src.index("TEST_ON = ")
+t_block = src[t0:src.index("\n\n", t0)]
+ON_CASES = [
+    ({}, ""),
+    ({"KLEPTON_TEST_ON": "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2"}, "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2"),
+    ({"KLEPTON_TEST_ON_EXTRA": "KL_FOVE_SUBPASS_HELPERS"}, "KL_FOVE_SUBPASS_HELPERS"),
+    ({"KLEPTON_TEST_ON": "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2", "KLEPTON_TEST_ON_EXTRA": "KL_FOVE_SUBPASS_HELPERS"},
+     "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2,KL_FOVE_SUBPASS_HELPERS"),
+    ({"KLEPTON_TEST_ON": "KL_AUDIO_SINK2", "KLEPTON_TEST_ON_EXTRA": "KL_AUDIO_SINK2 rm -rf;x,KL_X"}, "KL_AUDIO_SINK2,KL_X"),
+]
+print("=== KLTestOn: KLEPTON_TEST_ON + KLEPTON_TEST_ON_EXTRA ===")
+for env, want in ON_CASES:
+    for k in ("KLEPTON_TEST_ON", "KLEPTON_TEST_ON_EXTRA"):
+        os.environ.pop(k, None)
+    os.environ.update(env)
+    g = {"re": re, "os": os}
+    exec(t_block, g)
+    ok = g["TEST_ON"] == want
+    failed += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} {env} -> {g['TEST_ON']!r}")
 print("testbuild (gen): " + ("PASS" if not failed else f"FAIL ({failed})"))
 sys.exit(1 if failed else 0)

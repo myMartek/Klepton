@@ -173,6 +173,7 @@ static int g_patch_fc = 1, g_expand = 1, g_idx = 20;
 static int g_msaa, g_expand_fovea = 1;
 static int g_fence_on = 1;           // KL_FOVE_FENCE: order the guest's passes after the expand
 static int g_inter = 1;              // KL_FOVE_INTERMEDIATE: foveate a confirmed eye-size intermediate
+static int g_subp_helpers = 1;       // KL_FOVE_SUBPASS_HELPERS: a helper's subpass read gets the physical position
 static int g_slow;                    // KL_FOVE_SLOW=<n> (debug stress): n busy iterations per MSAA expand fragment
 static const char *g_dump;
 // The double-wide eye's geometry: its extent and both eyes' frustum tangents
@@ -359,6 +360,7 @@ static void kf_read_env(void) {
     if (g_slow < 0) g_slow = 0;
     g_fence_on = kl_env_on("KL_FOVE_FENCE", 1);
     g_inter = kl_env_on("KL_FOVE_INTERMEDIATE", 1);
+    g_subp_helpers = kl_env_on("KL_FOVE_SUBPASS_HELPERS", 1);
     g_on = 1;
 }
 
@@ -504,6 +506,77 @@ static char *kf_patch_msl(const char *s, size_t n) {
     size_t subp_l = strlen(subp);
     int nsub = 0;
     for (const char *p = brace; (p = strstr(p, subp)); p += subp_l) nsub++;
+    // The same emulation inside a HELPER function. Unreal 4's mobile depth
+    // fetch (`VulkanSubpassDepthFetch`, DepthFade / soft-edge translucency in
+    // Moss) is a static inline function above the entry point that takes the
+    // position as `thread float4& <name>` and reads `.read(uint2(<name>.xy), ...)`.
+    // The scan above starts at the entry's brace and never sees it, so the
+    // helper got the REMAPPED (screen) position and read the physical-layout
+    // depth at the wrong texel. A helper whose only uses of <name> are that
+    // spelling is fed the saved physical position at its call sites in the
+    // entry body instead.
+    enum { KF_HC_N = 64 };
+    const char *hc[KF_HC_N];
+    int nhc = 0;
+    size_t name_l = strlen(name);
+    if (g_subp_helpers) {                    // KL_FOVE_SUBPASS_HELPERS=0: the old behaviour (A/B)
+        char par[160];
+        snprintf(par, sizeof par, "thread float4& %s", name);
+        size_t par_l = strlen(par);
+        for (const char *p = s; (p = strstr(p, par)) && p < f; p += par_l) {
+            const char *pe = p + par_l;
+            if (isalnum((unsigned char)*pe) || *pe == '_') continue;
+            // The helper's name: the identifier before the '(' that opens this list.
+            const char *lp = p;
+            int d = 0;
+            while (lp > s && !(lp[-1] == '(' && d == 0)) {
+                if (lp[-1] == ')') d++;
+                else if (lp[-1] == '(') d--;
+                if (lp[-1] == '\n' || lp[-1] == ';' || lp[-1] == '}') break;
+                lp--;
+            }
+            if (lp <= s || lp[-1] != '(') continue;
+            const char *ne = lp - 1, *nb = ne;
+            while (nb > s && (isalnum((unsigned char)nb[-1]) || nb[-1] == '_')) nb--;
+            if (nb == ne || (size_t)(ne - nb) > 120) continue;
+            // Its body: the first '{' after the parameter list, to its match.
+            const char *bo = strchr(pe, '{'), *bc = NULL;
+            if (!bo || bo > f) continue;
+            int bd = 0;
+            for (const char *q = bo; *q && q < f; q++) {
+                if (*q == '{') bd++;
+                else if (*q == '}' && --bd == 0) { bc = q; break; }
+            }
+            if (!bc) continue;
+            int uses = 0, reads = 0;
+            for (const char *q = bo; (q = strstr(q, name)) && q < bc; q += name_l) {
+                if ((q > s && (isalnum((unsigned char)q[-1]) || q[-1] == '_')) ||
+                    isalnum((unsigned char)q[name_l]) || q[name_l] == '_') continue;
+                uses++;
+                if (q - bo >= 6 && !strncmp(q - 6, "uint2(", 6) && !strncmp(q + name_l, ".xy)", 4)) reads++;
+            }
+            if (!reads || reads != uses) continue;
+            // Every call of it in the entry body: the bare <name> argument.
+            char hn[128];
+            size_t hl = (size_t)(ne - nb);
+            memcpy(hn, nb, hl); hn[hl] = 0;
+            for (const char *q = brace; (q = strstr(q, hn)) && nhc < KF_HC_N; q += hl) {
+                if (q[hl] != '(' || isalnum((unsigned char)q[-1]) || q[-1] == '_') continue;
+                int cd = 0;
+                for (const char *a = q + hl; *a; a++) {
+                    if (*a == '(') cd++;
+                    else if (*a == ')' && --cd == 0) break;
+                    else if (cd == 1 && !strncmp(a, name, name_l) && (a[-1] == '(' || a[-1] == ' ' || a[-1] == ',') &&
+                             (a[name_l] == ',' || a[name_l] == ')' || a[name_l] == ' ') && nhc < KF_HC_N)
+                        hc[nhc++] = a;
+                }
+            }
+        }
+        // Copied out in source order below.
+        for (int i = 1; i < nhc; i++)
+            for (int j = i; j > 0 && hc[j - 1] > hc[j]; j--) { const char *t = hc[j]; hc[j] = hc[j - 1]; hc[j - 1] = t; }
+    }
+    nsub += nhc;
     // MSAA eyes (seen first in Half-Life: Alyx): with tiler mode off Valve's
     // translucent shaders read the eye's own multisampled DEPTH (soft
     // particles) and one draw its multisampled COLOUR as textures,
@@ -633,11 +706,19 @@ static char *kf_patch_msl(const char *s, size_t n) {
     memcpy(o + k, arg, (size_t)al); k += (size_t)al;
     memcpy(o + k, s + a, c - a); k += c - a;
     memcpy(o + k, stmt, (size_t)sl); k += (size_t)sl;
-    int mi = 0;
+    int mi = 0, hi = 0;
     for (const char *p = s + c; *p; ) {      // the body, with the subpass (and MSAA eye) reads kept physical
         const char *q = nsub ? strstr(p, subp) : NULL;
         while (mi < nmsr && msr[mi] < p) mi++;
         const char *m = mi < nmsr ? msr[mi] : NULL;
+        while (hi < nhc && hc[hi] < p) hi++;
+        const char *hp = hi < nhc ? hc[hi] : NULL;
+        if (hp && (!q || hp < q) && (!m || hp < m) && (!ret || ret < p || hp < ret)) {
+            memcpy(o + k, p, (size_t)(hp - p)); k += (size_t)(hp - p);
+            k += (size_t)sprintf(o + k, "kl_fove_phys");
+            p = hp + name_l; hi++;
+            continue;
+        }
         if (ret && (!q || ret < q) && (!m || ret < m) && ret >= p) {   // debug grid before `return out;`
             memcpy(o + k, p, (size_t)(ret - p)); k += (size_t)(ret - p);
             memcpy(o + k, grid, gl); k += gl;
@@ -659,8 +740,8 @@ static char *kf_patch_msl(const char *s, size_t n) {
     __atomic_add_fetch(&g_st.patched, 1, __ATOMIC_RELAXED);
     if (nsub) {
         uint64_t m = __atomic_add_fetch(&g_st.subpass, 1, __ATOMIC_RELAXED);
-        if (m <= 4) KFI("shader %016llx: %d subpass-input read(s) kept at the PHYSICAL position\n",
-                        (unsigned long long)h, nsub);
+        if (m <= 4) KFI("shader %016llx: %d subpass-input read(s) kept at the PHYSICAL position (%d through a helper's call)\n",
+                        (unsigned long long)h, nsub, nhc);
     }
     if (nmsr) {
         uint64_t m = __atomic_add_fetch(&g_st.msread, 1, __ATOMIC_RELAXED);

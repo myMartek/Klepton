@@ -3065,6 +3065,27 @@ records are never written):
   every MSL source, as patched. `KL_FOVE_TRACE_ENC=<n>` (debug) —
   the first n Metal render-pass descriptors after an eye is registered
   (textures, types, sample counts, slices, load/store, resolve, array length).
+- `KL_FOVE_SUBPASS_HELPERS=0|1` — default **1** whenever `KL_FOVEATION` is
+  on. A subpass-input read (`tex.read(uint2(gl_FragCoord.xy), …)`, MoltenVK's
+  emulation) must see the PHYSICAL position, because the attachment is in
+  physical layout while the mapped pass runs. Unreal 4's mobile depth fetch makes
+  that read inside a helper above the entry point
+  (`VulkanSubpassDepthFetch(…, thread float4& gl_FragCoord, …)`, used by DepthFade
+  and soft-edge translucency), which the entry-body scan never saw: the helper
+  got the remapped screen position and read the scene depth at the wrong texel.
+  In Moss that turned the soft shadow in the book's fold into a hard black band,
+  with foveation on only. With `1`, a helper whose only uses of the position are
+  `uint2(<pos>.xy)` is passed the saved physical position (`kl_fove_phys`) at
+  its call sites; a helper that uses the position for anything else keeps the
+  remapped one. `0` = the old behaviour (A/B control). Proof line: `[fove]
+  shader …: N subpass-input read(s) kept at the PHYSICAL position (M through a
+  helper's call)`, and in the 10 s line `fragment entry points patched N (K with
+  subpass reads, …)` with K > 0 for Moss (before the fix: 0). **For a test
+  copy** (no launch line on the headset): it is a tester-only Test switch
+  ("Foveation (Vulkan): old depth reads in helper functions"), listed and
+  applied only in a test build (`KLTestBuild`); turn it on from the install with
+  `KLEPTON_TEST_ON_EXTRA=KL_FOVE_SUBPASS_HELPERS` (see "Test switches that are
+  on from the installation" below).
 - `KL_FOVE_FENCE=0|1` — default **1** (confirmed on the headset with
   Half-Life: Alyx). MoltenVK orders its passes with its own
   MTLFences, so without this the guest's next reader of the eye can run
@@ -3888,6 +3909,22 @@ audio path that has shipped: both are linked in, and
   a game's own option *XR prediction* (`KL_XR_PREDICT`); the log line of such a
   switch ends in `(on from the installation)`. `KL_OVRP_ONE_POSE` in the list
   is no longer a switch of its own (it is on by default) and does nothing.
+- `KLEPTON_TEST_ON_EXTRA=<name>[,<name>…]` — more names for the same list,
+  for a tester's own install. AVP Play sets `KLEPTON_TEST_ON` itself (and
+  drops a value from the shell), so a test copy that needs one more switch
+  cannot name it there; `gen_xcodeproj.py` adds the names from this variable
+  to `KLEPTON_TEST_ON`'s (same `KL_…` filter, duplicates dropped) and bakes
+  both into `KLTestOn`. Unset: `KLTestOn` is byte for byte what it was. It does
+  not make a test build by itself. Example (Moss test copy with the old depth
+  reads, as the A/B control for `KL_FOVE_SUBPASS_HELPERS`):
+  `KLEPTON_TEST_ON_EXTRA=KL_FOVE_SUBPASS_HELPERS avpplay install moss --bundle-id
+  <live-id>.test --display-suffix " (Test)" --toolchain <worktree> …`.
+- **Tester-only switches.** An entry marked `testBuildOnly` in
+  `KleptonTestSwitches.entries` is listed and applied only in a test build
+  (`KleptonTestBuild.on`: `KLTestBuild` in Info.plist or `KL_TEST_BUILD=1` at
+  launch); a player's build never shows it and ignores it in `KLTestOn`. The
+  first one is `KL_FOVE_SUBPASS_HELPERS=0` (an A/B control that turns a fix
+  OFF, so it has no place in a player's Test group).
 - `KLEPTON_RENDER_SCALE=<0.5..1.0>` (build/install environment, read by
   `visionos/gen_xcodeproj.py`) — the render scale the game starts at: it
   replaces the target's `render_scale` as `KL_RENDER_SCALE_DEFAULT` /

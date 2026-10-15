@@ -545,6 +545,9 @@ enum KleptonTestSwitches {
         let note: String
         /// Further variables that belong to the same switch.
         var also: [(String, String)] = []
+        /// Only in a test build (KleptonTestBuild): listed and applied there,
+        /// never in a player's build, even when KLTestOn names it.
+        var testBuildOnly = false
         var id: String { env + "=" + value }
         var key: String { "klepton.test." + env + (also.isEmpty ? "" : "." + value) }
     }
@@ -674,7 +677,13 @@ enum KleptonTestSwitches {
                              "GL: auch anisotrope Filterung, DXT und BGRA anbieten"),
                   note: klT("GL games. A Unity game may then filter textures anisotropically: sharper floors at flat angles.",
                             "GL-Spiele. Ein Unity-Spiel filtert Texturen dann womöglich anisotrop: schärfere Böden bei flachem Blick.")),
-        ]
+            Entry(env: "KL_FOVE_SUBPASS_HELPERS", value: "0",
+                  title: klT("Foveation (Vulkan): old depth reads in helper functions",
+                             "Foveation (Vulkan): alte Tiefenzugriffe in Hilfsfunktionen"),
+                  note: klT("Test builds only, the comparison for a fix: Unreal games with foveated rendering read the depth for soft edges at the wrong spot again (Moss: the black stripe in the book's fold). Look at the open book with this on and off.",
+                            "Nur in Testversionen, der Vergleich zu einer Korrektur: Unreal-Spiele mit Foveated Rendering lesen die Tiefe für weiche Kanten wieder an der falschen Stelle (Moss: der schwarze Streifen im Falz des Buchs). Das offene Buch mit und ohne diesen Schalter ansehen."),
+                  testBuildOnly: true),
+        ].filter { !$0.testBuildOnly || KleptonTestBuild.on }
     }
 
     /// Into the environment, before kl_app_configure. Never over the launch
