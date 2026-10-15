@@ -452,7 +452,26 @@ struct PlayerSettingsView: View {
             KleptonControllerSettingsView()
             // Alyx has its own page for the picture (AlyxPanel), with one choice
             // where this has two dials; both at once were two places to set the
-            // same thing. These two stay reachable under Advanced.
+            // same thing. These two stay reachable under Advanced. Its Picture
+            // box holds only MetalFX, with Resolution beside it while it is on:
+            // the size MetalFX enlarges, which was only under Advanced there.
+            if klIsAlyx(), KleptonMetalFX.deviceSupported {
+                GroupBox(klT("Picture", "Bild")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        MetalFXSwitch(title: klT("MetalFX upscaling", "MetalFX-Hochskalieren"), hintFont: .callout,
+                                      resolutionSlider: true)
+                        Text(klT("Sharpens the picture when the resolution is below 100%: Apple's scaler enlarges it instead of a plain stretch. Costs some graphics time. Switching takes effect at once, a new resolution with the next start.",
+                                 "Schärft das Bild, wenn die Auflösung unter 100 % liegt: Apples Scaler vergrößert es statt einer einfachen Streckung. Kostet etwas Grafikzeit. Das Umschalten wirkt sofort, eine neue Auflösung beim nächsten Start."))
+                            .font(.callout).foregroundStyle(.secondary)
+                        if KleptonMetalFX.onFromInstall {
+                            Text(klT("On from the start in this installation: AVP Play's MetalFX setting asked for it.",
+                                     "In dieser Installation von Anfang an eingeschaltet: Die MetalFX-Einstellung von AVP Play hat es so verlangt."))
+                                .font(.callout).foregroundStyle(.orange)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
             if !klIsAlyx() {
             GroupBox(klT("Picture", "Bild")) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -951,7 +970,7 @@ struct BootView: View {
                     // dials of the port itself, and the report of this run.
                     DisclosureGroup(klT("Advanced", "Erweitert")) {
                         VStack(alignment: .leading, spacing: 14) {
-                            GroupBox(klT("Picture, in detail", "Bild, im Einzelnen")) { RenderingView(metalFXSwitch: klIsAlyx()) }
+                            GroupBox(klT("Picture, in detail", "Bild, im Einzelnen")) { RenderingView(metalFXSwitch: false) }
                             DisclosureGroup(klT("Passthrough and chroma key", "Durchsicht und Chroma-Key")) { ChromaView() }
                             DisclosureGroup(klT("Controller alignment", "Ausrichtung der Controller")) { TuningView() }
                             if showMic {

@@ -409,7 +409,7 @@ final class KleptonRendering: ObservableObject {
     /// (KleptonMetalFXPreset.movedByHand).
     var renderScaleByHand: Binding<Double> {
         Binding(get: { self.renderScale },
-                set: { self.renderScale = $0; KleptonMetalFXPreset().movedByHand() })
+                set: KleptonMetalFXPreset().byHand { self.renderScale = $0 })
     }
 
     /// The target's own default (targets.py "render_scale", baked into
@@ -878,9 +878,9 @@ extension KleptonRendering {
 
 struct RenderingView: View {
     /// Whether the MetalFX switch is here. A player's settings page has it under
-    /// Picture › Resolution (PlayerSettingsView), so its Advanced copy of this
-    /// view only points there; the developer window and Alyx, whose page has no
-    /// Picture box, keep the switch here.
+    /// Picture (PlayerSettingsView; Alyx's with Resolution beside it), so its
+    /// Advanced copy of this view only points there; the developer window keeps
+    /// the switch here.
     var metalFXSwitch = true
     @ObservedObject private var rendering = KleptonRendering.shared
 
@@ -926,8 +926,11 @@ struct RenderingView: View {
                 .font(.caption).foregroundStyle(.secondary)
             if !metalFXSwitch {
                 if KleptonMetalFX.deviceSupported {
-                    Text(klT("MetalFX upscaling is under Picture, below Resolution.",
-                             "MetalFX-Hochskalieren steht unter Bild, unter der Auflösung."))
+                    Text(klIsAlyx()
+                         ? klT("MetalFX upscaling is under Picture; while it is on, Resolution is set there too.",
+                               "MetalFX-Hochskalieren steht unter Bild; solange es an ist, wird dort auch die Auflösung gesetzt.")
+                         : klT("MetalFX upscaling is under Picture, below Resolution.",
+                               "MetalFX-Hochskalieren steht unter Bild, unter der Auflösung."))
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else {
@@ -949,10 +952,17 @@ struct RenderingView: View {
 /// (KleptonMetalFX.shared), so a tap of Create and Options shows here at once.
 /// When turning it changes the resolution (switchTo: 75 % on at 100 %, 100 %
 /// back when the switch had lowered it) it says so for a few seconds under it.
+/// With `resolutionSlider`, "Resolution" sits right under it while it is on:
+/// for a page whose own Resolution slider is elsewhere or missing (Alyx), so the
+/// size MetalFX enlarges is set beside it. The same stored value and the same
+/// by-hand path as every other Resolution slider (renderScaleByHand), so moving
+/// it counts as a move of the slider.
 struct MetalFXSwitch: View {
     let title: String
     let hintFont: Font
+    var resolutionSlider = false
     @ObservedObject private var metalfx = KleptonMetalFX.shared
+    @ObservedObject private var rendering = KleptonRendering.shared
     /// The resolution the switch just set, shown for a few seconds.
     @State private var presetShown: Double?
     @State private var presetHide: Task<Void, Never>?
@@ -970,6 +980,17 @@ struct MetalFXSwitch: View {
                     withAnimation { presetShown = nil }
                 }
             }))
+            if resolutionSlider, metalfx.enabled {
+                HStack {
+                    Text(klT("Resolution", "Auflösung"))
+                    Slider(value: rendering.renderScaleByHand, in: KleptonRendering.minRenderScale...1.0, step: 0.05)
+                    Text(String(format: "%.0f%%", rendering.renderScale * 100))
+                        .monospacedDigit().frame(width: 60, alignment: .trailing)
+                }
+                Text(klT("The size the game draws before MetalFX enlarges it. Lower is smoother, higher is sharper. From the next start.",
+                         "Die Größe, in der das Spiel zeichnet, bevor MetalFX sie vergrößert. Niedriger läuft flüssiger, höher ist schärfer. Ab dem nächsten Start."))
+                    .font(hintFont).foregroundStyle(.secondary)
+            }
             if let shown = presetShown {
                 Text(shown < 0.999
                      ? klT("Resolution set to 75% for MetalFX, from the next start",

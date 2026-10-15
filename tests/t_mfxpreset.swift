@@ -88,6 +88,20 @@ struct MetalFXPresetCheck {
             _ = p.switched(on: true, from: 1.0)
             expect("(e) lowered, resolution reset elsewhere to 90%, then off", p.switched(on: false, from: 0.9), nil)
         }
+        // (f) The setter every Resolution slider writes through (byHand: the
+        // Picture box's, Alyx's beside the switch, Advanced's): it stores the
+        // value into the one setting and counts as a move, even back to 75 %.
+        for moved in [0.75, 0.6] {
+            let p = KleptonMetalFXPreset(defaults: freshStore().0)
+            var scale = 1.0
+            let slider = p.byHand { scale = $0 }
+            if let r = p.switched(on: true, from: scale) { scale = r }
+            slider(moved)
+            expect(String(format: "(f) slider beside the switch moved to %.0f%%: stored", moved * 100), scale, moved)
+            expectMark(String(format: "(f) slider beside the switch moved to %.0f%%", moved * 100), p, false)
+            expect(String(format: "(f) lowered, slider beside the switch moved to %.0f%%, then off", moved * 100),
+                   p.switched(on: false, from: scale), nil)
+        }
 
         for name in suites { UserDefaults.standard.removePersistentDomain(forName: name) }
         if failed > 0 { print("mfxpreset: FAIL (\(failed))"); exit(1) }

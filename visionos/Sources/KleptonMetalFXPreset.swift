@@ -41,4 +41,10 @@ struct KleptonMetalFXPreset {
     func movedByHand() {
         defaults.removeObject(forKey: Self.loweredKey)
     }
+
+    /// What every Resolution slider writes through (KleptonRendering
+    /// .renderScaleByHand): stores the value and counts as a move of the slider.
+    func byHand(_ store: @escaping (Double) -> Void) -> (Double) -> Void {
+        { value in store(value); self.movedByHand() }
+    }
 }
