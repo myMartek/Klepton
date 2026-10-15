@@ -4069,13 +4069,15 @@ audio path that has shipped: both are linked in, and
   off (there or with Create + Options) it sets 100 % back only while that mark
   stands; any move of the slider clears it, and a resolution the player chose
   is never changed (`KleptonMetalFXPreset`, `make mfxpreset`). While the game
-  shows the room (a passthrough layer, `kl_ovrp_passthrough_live`) the
-  compositor keeps the linear path and says `[metalfx] paused while the game
-  shows the room`; the panel's MetalFX note reads `paused: MR` and the
-  settings say so under the switch. Apple's scaler writes alpha 1 everywhere,
-  which would cover the room with black. The stored switch, the resolution
-  and the mark stay as they are; upscaling resumes when passthrough ends
-  (`KleptonMetalFXPause`). Unnamed, the switch starts off, as
+  shows the room (a passthrough layer, `kl_ovrp_passthrough_live`) Apple's
+  scaler alone would cover it with black: it writes alpha 1 into every pixel,
+  whatever came in. So after the scaler one draw per eye writes the source's
+  own alpha, sampled bilinearly, back into the copy (`KleptonMetalFXAlpha`,
+  `make mfxalpha`); the log says `[metalfx] the game shows the room
+  (passthrough): upscaling with the picture's alpha put back` and the panel
+  reads `MetalFX on · MR alpha`. With `KL_MFX_MR_PAUSE=1` (below) it keeps the
+  linear path instead. Either way the stored switch, the resolution and the
+  mark stay as they are (`KleptonMetalFXPause`). Unnamed, the switch starts off, as
   before. AVP Play sets it from its setting "MetalFX: switch on upscaling
   automatically when installing". The compositor's `[metalfx] on` line then
   ends in `(on from the installation, KL_METALFX_UPSCALE)`; each place it
@@ -4087,6 +4089,14 @@ audio path that has shipped: both are linked in, and
   each copy when the arrangement changes. The metrics panel (`KL_STATS_CARD`)
   shows *Render* (the size the game draws), *MetalFX* (on / off / linear and
   why), *Path* (engine and composite path) and *Output* (the size after it).
+- `KL_MFX_MR_PAUSE=1` — MetalFX holds off while the game shows the room
+  (passthrough live) instead of putting the picture's alpha back into its
+  copies: the composite takes the linear path, the log says `[metalfx] paused
+  while the game shows the room (passthrough, KL_MFX_MR_PAUSE)` and `[metalfx]
+  passthrough ended — upscaling again`, the panel reads `MetalFX linear ·
+  paused: MR`, and the settings say under the switch that MetalFX pauses —
+  only while passthrough is live. The fallback should the alpha pass show
+  halos or cost too much in a mixed-reality game. Unset or 0: the alpha pass.
 - `KL_METALFX_BUDGET=<full eyes>` — the projection layers' share of MetalFX
   output a frame, in full eye pictures (1..16, default 4). A layer whose
   copies would go past it is drawn linear and said once (`budget` on the

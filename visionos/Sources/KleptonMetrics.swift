@@ -227,7 +227,7 @@ enum KLMetricsPanel {
         // it), and what it is upscaled to. A switch that is on and does nothing says why, in amber.
         if now.upscale >= 0 {
             switch now.upscale {
-            case 2: rows.append(("MetalFX", "on", green))
+            case 2: rows.append(("MetalFX", now.upscaleNote.isEmpty ? "on" : "on · " + now.upscaleNote, green))
             case 1: rows.append(("MetalFX", now.upscaleNote.isEmpty ? "on · linear"
                                                                    : "linear · " + now.upscaleNote, amber))
             default: rows.append(("MetalFX", "off", bright))

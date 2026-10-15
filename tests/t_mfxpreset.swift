@@ -117,17 +117,18 @@ struct MetalFXPresetCheck {
             if !ok { failed += 1 }
         }
 
-        // (h) Mixed reality pauses MetalFX and its end resumes it
-        // (KleptonMetalFXPause), frame by frame, without touching what is
-        // stored: the switch lowered the resolution before the pause, and the
-        // store is the same after pause and resume, so off still gives 100 % back.
+        // (h) With KL_MFX_MR_PAUSE=1, mixed reality pauses MetalFX and its end
+        // resumes it (KleptonMetalFXPause), frame by frame, without touching
+        // what is stored: the switch lowered the resolution before the pause,
+        // and the store is the same after pause and resume, so off still gives
+        // 100 % back.
         do {
             let (store, _) = freshStore()
             let p = KleptonMetalFXPreset(defaults: store)
             let scale = p.switched(on: true, from: 1.0)!
             store.set(true, forKey: "klepton.metalfxUpscale")
             let before = NSDictionary(dictionary: store.dictionaryRepresentation().filter { $0.key.hasPrefix("klepton.") })
-            var pause = KleptonMetalFXPause()
+            var pause = KleptonMetalFXPause(pauseInMR: true)
             typealias Step = (what: String, chosen: Bool, mr: Bool, upscale: Bool, change: KleptonMetalFXPause.Change?)
             let steps: [Step] = [
                 ("on, no MR", true, false, true, nil),
@@ -143,7 +144,7 @@ struct MetalFXPresetCheck {
             ]
             for s in steps {
                 let r = pause.frame(chosen: s.chosen, mixedReality: s.mr)
-                let ok = r.upscale == s.upscale && r.change == s.change
+                let ok = r.upscale == s.upscale && !r.restoreAlpha && r.change == s.change
                 print("  \(ok ? "ok  " : "FAIL") (h) \(s.what): \(r.upscale ? "upscales" : "linear")"
                       + (r.change.map { ", \($0)" } ?? ""))
                 if !ok { failed += 1 }
@@ -154,6 +155,45 @@ struct MetalFXPresetCheck {
             if !same { failed += 1 }
             expectMark("(h) after pause and resume", p, true)
             expect("(h) lowered, paused, resumed, then off", p.switched(on: false, from: scale), 1.0)
+        }
+
+        // (i) By default mixed reality keeps upscaling and puts the alpha back
+        // (KleptonMetalFXAlpha) while it lasts, and nothing stored moves either.
+        do {
+            let (store, _) = freshStore()
+            let p = KleptonMetalFXPreset(defaults: store)
+            let scale = p.switched(on: true, from: 1.0)!
+            store.set(true, forKey: "klepton.metalfxUpscale")
+            let before = NSDictionary(dictionary: store.dictionaryRepresentation().filter { $0.key.hasPrefix("klepton.") })
+            var mr = KleptonMetalFXPause()
+            typealias Step = (what: String, chosen: Bool, mr: Bool, upscale: Bool, alpha: Bool,
+                              change: KleptonMetalFXPause.Change?)
+            let steps: [Step] = [
+                ("on, no MR", true, false, true, false, nil),
+                ("MR starts", true, true, true, true, .alphaOn),
+                ("MR goes on", true, true, true, true, nil),
+                ("MR ends", true, false, true, false, .alphaOff),
+                ("MR again", true, true, true, true, .alphaOn),
+                ("switched off during MR", false, true, false, false, nil),
+                ("off, MR ends", false, false, false, false, nil),
+                ("off, MR starts", false, true, false, false, nil),
+                ("switched on during MR", true, true, true, true, .alphaOn),
+                ("MR ends", true, false, true, false, .alphaOff),
+            ]
+            for s in steps {
+                let r = mr.frame(chosen: s.chosen, mixedReality: s.mr)
+                let ok = r.upscale == s.upscale && r.restoreAlpha == s.alpha && r.change == s.change
+                    && !mr.paused
+                print("  \(ok ? "ok  " : "FAIL") (i) \(s.what): \(r.upscale ? "upscales" : "linear")"
+                      + (r.restoreAlpha ? " + alpha" : "") + (r.change.map { ", \($0)" } ?? ""))
+                if !ok { failed += 1 }
+            }
+            let after = NSDictionary(dictionary: store.dictionaryRepresentation().filter { $0.key.hasPrefix("klepton.") })
+            let same = before.isEqual(after) && before.count == 2
+            print("  \(same ? "ok  " : "FAIL") (i) mixed reality with the alpha pass leaves the stored switch, resolution and mark alone")
+            if !same { failed += 1 }
+            expectMark("(i) after mixed reality", p, true)
+            expect("(i) lowered, mixed reality, then off", p.switched(on: false, from: scale), 1.0)
         }
 
         for name in suites { UserDefaults.standard.removePersistentDomain(forName: name) }

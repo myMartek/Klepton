@@ -65,31 +65,44 @@ struct KleptonPictureControls: Equatable {
     }
 }
 
-// MetalFX held off while the guest is in its own mixed reality
-// (kl_ovrp_passthrough_live). The room shows where the eye picture's alpha says
-// so (kl_reproject.c, kl_eye_sample_alpha and the discard after it), and Apple's
-// spatial scaler writes alpha 1 into every pixel of its output, whatever came in
-// (measured on a Mac, every format the compositor hands it): the upscaled copy
-// covers the room with the black of the game's empty pixels. So while
-// passthrough is live the compositor keeps the linear path, and goes back to
-// upscaling once it ends. Only the compositor's per-frame choice: the stored
-// switch (klepton.metalfxUpscale), the resolution and the mark the switch keeps
-// (KleptonMetalFXPreset) are not touched, so a pause never lowers or restores
-// anything. t_mfxpreset (h).
+// MetalFX while the guest is in its own mixed reality (kl_ovrp_passthrough_live).
+// The room shows where the eye picture's alpha says so (kl_reproject.c,
+// kl_eye_sample_alpha and the discard after it), and Apple's spatial scaler
+// writes alpha 1 into every pixel of its output, whatever came in (measured on
+// a Mac, every format the compositor hands it): the upscaled copy alone would
+// cover the room with the black of the game's empty pixels. So while
+// passthrough is live the compositor either upscales and puts the source's
+// alpha back into the copy (KleptonMetalFXAlpha, the default), or — with
+// KL_MFX_MR_PAUSE=1, `pauseInMR` — keeps the linear path and goes back to
+// upscaling once passthrough ends. Only the compositor's per-frame choice: the
+// stored switch (klepton.metalfxUpscale), the resolution and the mark the
+// switch keeps (KleptonMetalFXPreset) are not touched, so neither way ever
+// lowers or restores anything. t_mfxpreset (h), (i).
 struct KleptonMetalFXPause {
-    enum Change: Equatable { case paused, resumed }
+    enum Change: Equatable { case paused, resumed, alphaOn, alphaOff }
 
-    private(set) var paused = false
+    /// KL_MFX_MR_PAUSE: the linear path during mixed reality instead of the
+    /// alpha pass.
+    let pauseInMR: Bool
+    /// The switch is on and the guest shows the room.
+    private(set) var inMR = false
 
-    /// One frame: whether to upscale, and whether the pause began or ended
-    /// with it (said once in the log). `chosen` is the stored switch
-    /// (KleptonMetalFX.isOn). A switch turned off during a pause ends it
-    /// without a "resumed".
-    mutating func frame(chosen: Bool, mixedReality: Bool) -> (upscale: Bool, change: Change?) {
+    init(pauseInMR: Bool = false) { self.pauseInMR = pauseInMR }
+
+    var paused: Bool { inMR && pauseInMR }
+
+    /// One frame: whether to upscale, whether to put the alpha back after the
+    /// scaler, and whether mixed reality began or ended with it (said once in
+    /// the log). `chosen` is the stored switch (KleptonMetalFX.isOn). A switch
+    /// turned off during mixed reality ends it without a "resumed".
+    mutating func frame(chosen: Bool, mixedReality: Bool)
+        -> (upscale: Bool, restoreAlpha: Bool, change: Change?) {
         let now = chosen && mixedReality
-        defer { paused = now }
-        if now == paused { return (chosen && !now, nil) }
-        if now { return (false, .paused) }
-        return (chosen, chosen ? .resumed : nil)
+        let was = inMR
+        inMR = now
+        let r = (upscale: chosen && !(now && pauseInMR), restoreAlpha: now && !pauseInMR)
+        if now == was { return (r.upscale, r.restoreAlpha, nil) }
+        if now { return (r.upscale, r.restoreAlpha, pauseInMR ? .paused : .alphaOn) }
+        return (r.upscale, r.restoreAlpha, chosen ? (pauseInMR ? .resumed : .alphaOff) : nil)
     }
 }

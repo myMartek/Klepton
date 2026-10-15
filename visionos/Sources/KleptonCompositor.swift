@@ -2415,7 +2415,14 @@ final class KleptonCompositor {
     private var mfxTick: UInt64 = 0
     private var mfxLastShape = ""
     private var mfxLastOn = false
-    private var mfxPause = KleptonMetalFXPause()
+    private var mfxPause = KleptonMetalFXPause(pauseInMR: klEnvOn("KL_MFX_MR_PAUSE", default: false))
+    /// This frame puts the source's alpha back into each copy (mixed reality).
+    private var mfxRestoreAlpha = false
+    private lazy var mfxAlpha: KleptonMetalFXAlpha = {
+        let a = KleptonMetalFXAlpha(device: device)
+        a.onError = { NSLog("[metalfx] \($0)") }
+        return a
+    }()
     private var mfxSaid = Set<String>()
     private var mfxStats = MfxStats()
     private lazy var mfxSupported = MTLFXSpatialScalerDescriptor.supportsDevice(device)
@@ -2602,7 +2609,8 @@ final class KleptonCompositor {
         desc.width = width; desc.height = height
         desc.arrayLength = src.arrayLength
         desc.mipmapLevelCount = 1
-        desc.usage = sc.outputTextureUsage.union(.shaderRead)
+        // .renderTarget for the alpha pass in mixed reality (KleptonMetalFXAlpha).
+        desc.usage = sc.outputTextureUsage.union([.shaderRead, .renderTarget])
         desc.storageMode = .private
         guard let t = device.makeTexture(descriptor: desc) else { return nil }
         t.label = "klepton metalfx \(width)x\(height)"
@@ -2643,20 +2651,30 @@ final class KleptonCompositor {
                 mfxLastShape = ""
             }
         }
-        // Held off while the guest shows the room (KleptonMetalFXPause): the
-        // scaler's output is opaque everywhere and would black it out. The
-        // stored switch stays as it is; upscaling resumes when passthrough ends.
-        let pause = mfxPause.frame(chosen: on, mixedReality: kl_ovrp_passthrough_live() != 0)
-        if let change = pause.change {
-            NSLog(change == .paused
-                  ? "[metalfx] paused while the game shows the room (passthrough): "
-                    + "the scaler writes alpha 1, which would cover the room — linear path"
-                  : "[metalfx] passthrough ended — upscaling again")
-            if change == .paused { mfxCache = nil }
+        // While the guest shows the room (KleptonMetalFXPause) the scaler's
+        // output is opaque everywhere and would black it out: the source's
+        // alpha goes back into each copy after it (KleptonMetalFXAlpha), or with
+        // KL_MFX_MR_PAUSE=1 the linear path holds until passthrough ends. The
+        // stored switch stays as it is either way.
+        let mr = mfxPause.frame(chosen: on, mixedReality: kl_ovrp_passthrough_live() != 0)
+        if let change = mr.change {
+            switch change {
+            case .paused:
+                NSLog("[metalfx] paused while the game shows the room (passthrough, KL_MFX_MR_PAUSE): "
+                      + "the scaler writes alpha 1, which would cover the room — linear path")
+            case .resumed: NSLog("[metalfx] passthrough ended — upscaling again")
+            case .alphaOn:
+                NSLog("[metalfx] the game shows the room (passthrough): upscaling with the "
+                      + "picture's alpha put back after the scaler (MR alpha)")
+            case .alphaOff: NSLog("[metalfx] passthrough ended — upscaling without the alpha pass")
+            }
+            // A copy made for the other way must not be reused.
+            mfxCache = nil
         }
+        mfxRestoreAlpha = mr.restoreAlpha
         mfxStats = MfxStats(state: on ? 1 : 0)
         guard on else { return }
-        guard pause.upscale else { mfxStats.note = "paused: MR"; return }
+        guard mr.upscale else { mfxStats.note = "paused: MR"; return }
         guard mfxSupported else {
             mfxSay("MetalFX spatial scaling is not supported on this device", short: "unsupported")
             return
@@ -2781,6 +2799,11 @@ final class KleptonCompositor {
                 inputs.append(row)
             }
             guard ok else { continue }
+            if mfxRestoreAlpha, let bad = plans.first(where: { mfxAlpha.pipeline(for: $0.source.pixelFormat) == nil }) {
+                mfxSay("no alpha pass for format \(bad.source.pixelFormat.rawValue) in mixed reality",
+                       short: "MR alpha")
+                continue
+            }
             budget -= cost
             for (p, row) in zip(plans, inputs) {
                 guard var t = mfxTargets[p.key] else { continue }
@@ -2790,6 +2813,9 @@ final class KleptonCompositor {
                     t.scaler.inputContentHeight = p.content.h
                     t.scaler.outputTexture = t.outViews[s]
                     t.scaler.encode(commandBuffer: cmd)
+                    if mfxRestoreAlpha {
+                        mfxAlpha.encode(on: cmd, from: input, content: p.content, into: t.outViews[s])
+                    }
                 }
                 t.lastUse = mfxTick
                 mfxTargets[p.key] = t
@@ -2801,7 +2827,7 @@ final class KleptonCompositor {
                     // The first picture upscaled is the one the panel names: the
                     // eye, or the backdrop layer. In the picture's own pixels —
                     // for a foveated one the screen size the copy stands for.
-                    mfxStats = MfxStats(state: 2, note: "",
+                    mfxStats = MfxStats(state: 2, note: mfxRestoreAlpha ? "MR alpha" : "",
                                         outW: Int((Double(p.out.w) * Double(p.source.width) / Double(p.content.w)).rounded()),
                                         outH: Int((Double(p.out.h) * Double(p.source.height) / Double(p.content.h)).rounded()))
                 }

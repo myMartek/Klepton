@@ -710,6 +710,12 @@ enum KleptonTestSwitches {
                              "Leistungsanzeige im Headset von Anfang an einblenden"),
                   note: klT("A small panel just above the middle of the view, like the performance overlay of a Quest: frames a second, pictures that had to be shown twice, GPU and CPU load, memory, heat and picture size, with the last minute as graphs. In every game, holding Create and Options on the controllers together for a second shows it and hides it again; this switch only decides whether it is there when the game starts. Half-Life: Alyx has this as a setting of its own.",
                             "Eine kleine Tafel knapp über der Blickmitte, wie die Leistungsanzeige einer Quest: Bilder pro Sekunde, Bilder, die doppelt gezeigt werden mussten, Auslastung von GPU und CPU, Speicher, Wärme und Bildgröße, dazu die letzte Minute als Verlauf. In jedem Spiel blendet Create und Options an den Controllern, eine Sekunde lang zusammen gehalten, sie ein und wieder aus; dieser Schalter bestimmt nur, ob sie beim Start des Spiels schon zu sehen ist. Half-Life: Alyx hat dafür eine eigene Einstellung.")),
+            // The fallback to KleptonMetalFXAlpha (KleptonMetalFXPause, pauseInMR).
+            Entry(env: "KL_MFX_MR_PAUSE", value: "1",
+                  title: klT("MetalFX: pause in mixed reality",
+                             "MetalFX: in Mixed Reality pausieren"),
+                  note: klT("Games that show the room (BODYCOMBAT, Demeo, TRIANGLE STRATEGY) with MetalFX on. MetalFX now keeps upscaling while the room is visible and puts the picture's transparency back afterwards; with this on it pauses instead while the room is visible, as before. Turn it on if the room goes black or edges get a light or dark fringe.",
+                            "Spiele, die den Raum zeigen (BODYCOMBAT, Demeo, TRIANGLE STRATEGY), mit MetalFX an. MetalFX skaliert jetzt weiter hoch, während der Raum zu sehen ist, und setzt die Transparenz des Bildes danach wieder ein; hiermit pausiert es stattdessen, solange der Raum zu sehen ist, wie bisher. Einschalten, wenn der Raum schwarz wird oder Kanten einen hellen oder dunklen Saum bekommen.")),
             Entry(env: "KL_VK_ANISO", value: "16",
                   title: klT("Textures: 16x anisotropic filtering",
                              "Texturen: 16-fache anisotrope Filterung"),
@@ -987,6 +993,8 @@ struct MetalFXSwitch: View {
     /// The resolution the switch just set, shown for a few seconds.
     @State private var presetShown: Double?
     @State private var presetHide: Task<Void, Never>?
+    /// The compositor's own choice (KleptonCompositor.mfxPause).
+    private static let pausesInMR = klEnvOn("KL_MFX_MR_PAUSE", default: false)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1010,12 +1018,14 @@ struct MetalFXSwitch: View {
                     .font(hintFont).foregroundStyle(.orange)
                     .transition(.opacity)
             }
-            // The compositor's pause (KleptonMetalFXPause): said while the game
-            // shows the room, and always in a game made for it, so the switch
-            // standing on is not read as upscaling. Looked at once a second.
-            if metalfx.enabled {
+            // The compositor's pause (KleptonMetalFXPause, KL_MFX_MR_PAUSE=1):
+            // said only while it is in effect — the game shows the room — so the
+            // switch standing on is not read as upscaling. Without that variable
+            // MetalFX upscales in mixed reality too and there is nothing to say.
+            // Looked at once a second.
+            if metalfx.enabled, Self.pausesInMR {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    if KleptonRendering.targetIsMixedReality || kl_ovrp_passthrough_live() != 0 {
+                    if kl_ovrp_passthrough_live() != 0 {
                         Text(klT("MetalFX is paused while mixed reality is on and resumes by itself after it.",
                                  "MetalFX pausiert, solange Mixed Reality an ist, und läuft danach von selbst weiter."))
                             .font(hintFont).foregroundStyle(.orange)
