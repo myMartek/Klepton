@@ -3219,6 +3219,7 @@ final class KleptonCompositor {
             if fresh {
                 seq = now
                 var s = KLMetricsSample()
+                s.xrPredict = p.on; s.xrPredictUsed = p.used
                 s.fps = m.fps; s.displayHz = m.display_hz
                 s.compiles = m.compiles; s.compilesCached = m.compiles_cached
                 s.gpuBusy = m.gpu_busy; s.gpuGameMs = m.gpu_game_ms; s.gpuCompMs = m.gpu_comp_ms
@@ -3229,7 +3230,6 @@ final class KleptonCompositor {
                 s.memUsedMB = Int(m.mem_used_mb); s.memLeftMB = Int(m.mem_left_mb)
                 s.thermal = ProcessInfo.processInfo.thermalState.rawValue
                 s.eyeW = Int(m.eye_w); s.eyeH = Int(m.eye_h)
-                s.xrPredict = p.on; s.xrPredictUsed = p.used
                 samples.append(s)
                 if samples.count > KLMetricsPanel.history { samples.removeFirst(samples.count - KLMetricsPanel.history) }
             }

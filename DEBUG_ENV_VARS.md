@@ -2195,11 +2195,12 @@ The composite/timewarp pass — one file, compiled by both compositors
   stored: each start begins at this variable's value. A player's build has
   neither the row nor the tap. A build is a test build when it was generated
   with `KLEPTON_DISPLAY_SUFFIX` or `KLEPTON_DISPLAY_OVERRIDE`, a
-  `KLEPTON_BUNDLE_ID` ending in `-test`, `KL_TEST_BUILD` in `KLEPTON_TEST_ON`,
-  or `KLEPTON_TEST_BUILD=1` (baked as `KLTestBuild` in Info.plist), or when it
-  is launched with `KL_TEST_BUILD=1` or a non-empty `KLEPTON_TEST_ON`. A bundle
-  id of its own or the experimental switches alone do not make one: AVP Play
-  sets those for players too.
+  `KLEPTON_BUNDLE_ID` ending in `-test` or `.test` in any case (regex
+  `[-.]test$`), `KL_TEST_BUILD` in `KLEPTON_TEST_ON`, or `KLEPTON_TEST_BUILD=1`
+  (baked as `KLTestBuild` in Info.plist), or when it is launched with exactly
+  `KL_TEST_BUILD=1`. A bundle id of its own or a `KLEPTON_TEST_ON` alone (at
+  build time or at launch) does not make one: AVP Play sets both for players
+  too. `make testbuild` checks both halves of the rule.
 - `KL_XR_POSE_TRACE=1` — once a second, the head each pose entry point answered
   with this frame and the head the guest actually submitted, differenced
   pairwise (worst degrees and metres over the second) with a count of the frames

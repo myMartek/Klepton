@@ -836,9 +836,22 @@ build/t_pinch: tests/t_pinch.swift visionos/Sources/KleptonPinch.swift
 pinch: build/t_pinch
 	./build/t_pinch
 
+# Which builds are test builds (KleptonTestBuild.swift; KLTestBuild, which
+# gen_xcodeproj.py bakes): what only a tester sees, such as the XR head
+# prediction switch on the metrics panel, must never reach a player's build.
+build/t_testbuild: tests/t_testbuild.swift visionos/Sources/KleptonTestBuild.swift
+	@mkdir -p build
+	swiftc -o $@ visionos/Sources/KleptonTestBuild.swift tests/t_testbuild.swift
+
+.PHONY: testbuild
+testbuild: build/t_testbuild
+	./build/t_testbuild
+	python3 tests/t_testbuild_gen.py
+
 .PHONY: metrics-preview
 metrics-preview: build/metrics_preview
-	@./build/metrics_preview 60 build/metrics && echo "  build/metrics-panel.png, build/metrics-line.png"
+	@./build/metrics_preview 60 build/metrics && echo "  build/metrics-panel.png, build/metrics-line.png," \
+	  "build/metrics-panel-player.png, build/metrics-panel-test.png"
 
 # Full regression sweep — run this first when picking work back up.
 #

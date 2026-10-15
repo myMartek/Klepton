@@ -33,14 +33,14 @@ struct KLMetricsSample {
     var cpuCores: Float = -1       // CPU the process used, in cores
     var cpuTop: Float = -1         // the busiest thread's share of one core, 0..1
     var cpuTopName = ""
-    var memUsedMB = -1
-    var memLeftMB = -1
-    var thermal = -1               // ProcessInfo.ThermalState's raw value, 0 nominal .. 3 critical
-    var eyeW = 0, eyeH = 0
     /// Test builds only: XR head prediction (kl_openxr_predict) — -1 not shown,
     /// 0 off, 1 on — and whether the game asks for it at all (an OpenXR game).
     var xrPredict = -1
     var xrPredictUsed = false
+    var memUsedMB = -1
+    var memLeftMB = -1
+    var thermal = -1               // ProcessInfo.ThermalState's raw value, 0 nominal .. 3 critical
+    var eyeW = 0, eyeH = 0         // the picture the game draws (render size)
 }
 
 enum KLMetricsPanel {
@@ -110,6 +110,12 @@ enum KLMetricsPanel {
         let f = CTFontCreateWithFontDescriptor(desc, size, nil)
         fonts[key] = f
         return f
+    }
+
+    private static func width(_ s: String, font: CTFont) -> CGFloat {
+        let attrs = [kCTFontAttributeName: font] as CFDictionary
+        guard let str = CFAttributedStringCreate(nil, s as CFString, attrs) else { return 0 }
+        return CGFloat(CTLineGetTypographicBounds(CTLineCreateWithAttributedString(str), nil, nil, nil))
     }
 
     private enum Align { case left, right }
@@ -213,20 +219,25 @@ enum KLMetricsPanel {
         if let t = thermalName(now.thermal) {
             rows.append(("Heat", t, now.thermal >= 3 ? red : now.thermal == 2 ? amber : bright))
         }
-        if now.eyeW > 0 { rows.append(("Picture", "\(now.eyeW) × \(now.eyeH)", bright)) }
+        if now.eyeW > 0 { rows.append(("Render", "\(now.eyeW) × \(now.eyeH)", bright)) }
         if now.xrPredict >= 0 {
             // Off is the A/B half, in amber so it is not left that way by mistake; "no OpenXR" where the
             // game never asks, so a switch that changes nothing does not look as if it did.
             rows.append(("XR predict", (now.xrPredict != 0 ? "on" : "off") + (now.xrPredictUsed ? "" : " · no OpenXR"),
                          !now.xrPredictUsed ? dim : now.xrPredict != 0 ? green : amber))
         }
-        // Rows as far down as the footer allows, closer together where there are more of them than fit.
-        let firstRow: CGFloat = 164, lastRow = h - (testLine ? 84 : 56)
-        let step = rows.count > 1 ? min(41, (lastRow - firstRow) / CGFloat(rows.count - 1)) : 41
-        var y = firstRow
+        // Nine rows fit at the full size; more close up, down to a size still read at a glance, so the
+        // column always ends above the hints at the bottom — one line, two in a test build.
+        let footer: CGFloat = testLine ? 90 : 62
+        let step = min(41, (h - footer - 164) / CGFloat(max(rows.count - 1, 1)))
+        let size = min(27, (step * 0.68).rounded())
+        var y: CGFloat = 164
         for (label, value, color) in rows {
-            text(ctx, label, x: left, y: y, font: font(27), color: dim)
-            text(ctx, value, x: right, y: y, font: font(27, bold: true), color: color, align: .right)
+            let lw = text(ctx, label, x: left, y: y, font: font(size), color: dim)
+            // A long value is set smaller rather than over its label.
+            var vs = size
+            while vs > 16, width(value, font: font(vs, bold: true)) > right - left - lw - 14 { vs -= 1 }
+            text(ctx, value, x: right, y: y, font: font(vs, bold: true), color: color, align: .right)
             y += step
         }
 

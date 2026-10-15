@@ -42,6 +42,26 @@ KLT = targets_mod.resolve(os.environ.get("KLEPTON_TARGET") or targets_mod.DEFAUL
 NAME = KLT["product"]
 BUNDLE_ID = os.environ.get("KLEPTON_BUNDLE_ID", KLT["bundle"])
 
+# Whether this is a TEST build — a copy beside the real game, for trying
+# something on the headset — and not what a player has (KL_TEST_BUILD below,
+# KLTestBuild in Info.plist, KleptonTestBuild in KleptonTuning.swift). Only
+# what a tester's command line sets counts: a name of its own
+# (KLEPTON_DISPLAY_SUFFIX / _OVERRIDE — `avpplay install --display-suffix`), a
+# bundle id ending in "-test" or ".test" in any case (regex [-.]test$; testing.md's
+# convention for a test copy), KL_TEST_BUILD among KLEPTON_TEST_ON, or
+# KLEPTON_TEST_BUILD=1. Deliberately NOT
+# any bundle id that differs from the target's, nor a non-empty KLEPTON_TEST_ON:
+# AVP Play sets the first for every install (a team's own prefix) and the
+# second for a player who chose its experimental switches.
+_bundle_test = re.search(r"[-.]test$", BUNDLE_ID or "", re.I) is not None and BUNDLE_ID != KLT["bundle"]
+TEST_BUILD = (os.environ.get("KLEPTON_TEST_BUILD", "").strip().lower() in ("1", "true", "yes", "on")
+              or bool(os.environ.get("KLEPTON_DISPLAY_SUFFIX", "").strip())
+              or bool(os.environ.get("KLEPTON_DISPLAY_OVERRIDE", "").strip())
+              or _bundle_test
+              or "KL_TEST_BUILD" in re.split(r"[,\s]+", os.environ.get("KLEPTON_TEST_ON", "")))
+if TEST_BUILD:
+    print("gen_xcodeproj: test build (KLTestBuild=1): tester-only controls are in it", file=sys.stderr)
+
 # Klepton.entitlements — the two memory capabilities (see that file for what
 # they buy and why this app wants them). **On by default: they fixed the
 # loading-transition kills on device, so a build without them is the unusual
@@ -198,25 +218,6 @@ import os as _os
 # project file and in Info.plist cannot be anything but a list of names.
 TEST_ON = ",".join(n for n in re.split(r"[,\s]+", os.environ.get("KLEPTON_TEST_ON", ""))
                    if re.fullmatch(r"KL_[A-Z0-9_]{1,60}", n))
-
-# Whether this is a TEST build — a copy beside the real game, for trying
-# something on the headset — and not what a player has (KL_TEST_BUILD below,
-# KLTestBuild in Info.plist, KleptonTestBuild in KleptonTuning.swift). Only
-# what a tester's command line sets counts: a name of its own
-# (KLEPTON_DISPLAY_SUFFIX / _OVERRIDE — `avpplay install --display-suffix`), a
-# bundle id ending in "-test" (testing.md's convention for a test copy),
-# KL_TEST_BUILD among KLEPTON_TEST_ON, or KLEPTON_TEST_BUILD=1. Deliberately NOT
-# any bundle id that differs from the target's, nor a non-empty KLEPTON_TEST_ON:
-# AVP Play sets the first for every install (a team's own prefix) and the
-# second for a player who chose its experimental switches.
-_bundle_test = re.search(r"[-.]test$", BUNDLE_ID or "", re.I) is not None and BUNDLE_ID != KLT["bundle"]
-TEST_BUILD = (os.environ.get("KLEPTON_TEST_BUILD", "").strip().lower() in ("1", "true", "yes", "on")
-              or bool(os.environ.get("KLEPTON_DISPLAY_SUFFIX", "").strip())
-              or bool(os.environ.get("KLEPTON_DISPLAY_OVERRIDE", "").strip())
-              or _bundle_test
-              or "KL_TEST_BUILD" in TEST_ON.split(","))
-if TEST_BUILD:
-    print("gen_xcodeproj: test build (KLTestBuild=1): tester-only controls are in it", file=sys.stderr)
 
 # Compile-time launcher opt-in (also drives LAUNCHER_COND + the display name below).
 _launcher_on = _os.environ.get("KL_CUSTOM_LAUNCHER", "").strip().lower() in ("1", "true", "yes", "on")
@@ -385,7 +386,8 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonChroma.swift", "KleptonMic.swift",
          "KleptonLauncher.swift", "KleptonHL1.swift", "KleptonGameData.swift",
          "KleptonAlyx.swift", "KleptonText.swift", "KleptonSteamCloud.swift",
-         "KleptonBackup.swift", "KleptonMetrics.swift", "KleptonPinch.swift"]
+         "KleptonBackup.swift", "KleptonMetrics.swift", "KleptonPinch.swift",
+         "KleptonTestBuild.swift"]
 # Steam's connection, sign-in and Steam Cloud (SteamCloudKit/README.md: parts of
 # Glovebox's SteamLauncherKit, MIT), compiled into the app's own module. The
 # folder is a Swift package only so that its tests run on a Mac.
