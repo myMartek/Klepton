@@ -171,11 +171,14 @@ int main(void) {
     kl_metrics now = m;
     kl_metrics_upscale_now(&now);
     CHECK(now.upscale == 0 && now.out_w == 0 && now.out_h == 0 && strcmp(now.path, "Vulkan \xc2\xb7 per eye") == 0,
-          "after the switch the upscale now is %d to %dx%d on \"%s\"", now.upscale, now.out_w, now.out_h, now.path);
+          "after the switch kl_metrics_upscale_now reads %d to %dx%d on \"%s\", not 0 to 0x0 on the same path",
+          now.upscale, now.out_w, now.out_h, now.path);
     CHECK(now.fps == m.fps && now.seq == m.seq, "kl_metrics_upscale_now touched more than the upscale");
     kl_metrics latest;
     kl_metrics_latest(&latest);
-    CHECK(latest.upscale == 2, "the switch reached the sample before the next second (%d)", latest.upscale);
+    // ...while the last sample keeps what was true when it was taken, until the next second.
+    CHECK(latest.upscale == 2, "the last sample was rewritten by the switch: it reads upscale %d, not the 2 it was "
+          "taken with", latest.upscale);
     if (chord()) return 1;
     printf("metrics: PASS\n");
     return 0;

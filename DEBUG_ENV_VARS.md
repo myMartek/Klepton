@@ -3682,9 +3682,12 @@ Moss's defaults since 2026-10-13 (the owner's setting on the headset): `KL_OVRP_
 rendering at "high". "high" itself changed with it for every Vulkan game: box 0.18 and floor 0.16 (were
 0.30 and 0.08); the Test switch `KL_FOVE_BOX=0.30` + `KL_FOVE_FLOOR=0.08` is the way back.
 
-After the release, one piece of his pose core (his commit be18669), as a switch
-that is off (2026-10-13). For a run from `Documents/lx/env.txt`; not a row in
-the window. `runtime/xr/kl_ovrp.c`, the block `ONE POSE PER GUEST FRAME`.
+After the release, one piece of his pose core (his commit be18669): added as a
+switch that was off (2026-10-13), **on by default since 2026-10-15** as the
+OVRPlugin half of "no XR prediction". It is no longer a Test switch of its own;
+the Test switch *XR prediction* turns it off (`KL_OVRP_ONE_POSE=0`), and so does
+a run from `Documents/lx/env.txt` or the launch line. `runtime/xr/kl_ovrp.c`,
+the block `ONE POSE PER GUEST FRAME`.
 
 - `KL_OVRP_ONE_POSE=1` (or `index`; **the default since 2026-10-15**) — one
   head pose per guest frame, the OVRPlugin half of "no XR prediction" (see
