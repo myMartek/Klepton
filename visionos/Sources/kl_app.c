@@ -1550,14 +1550,17 @@ static int guest_fresh_pose(void) {
 //
 // Default on for the one title it was run with — Real VR Fishing
 // (x2582932495064035), on its sender's headset (fix 37, 2026-10-14; not run
-// here). Every other guest keeps the loop as it was until a false has been seen
-// to mean the same for it: a game that answers false once and draws on would be
-// ended by this.
+// here), and Gun Club VR (x2285803881494677), whose in-game Exit its sender
+// ran with this and KL_UNITY_QUIT_TEARDOWN (kl_driver.c) for a clean exit with
+// its settings kept (fix 44, 2026-10-15; not run here). Every other guest keeps
+// the loop as it was until a false has been seen to mean the same for it: a
+// game that answers false once and draws on would be ended by this.
 static int guest_quit_exits(void) {
     static int v = -1;
     if (v < 0) {
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_UNITY_QUIT_EXITS", t && strcmp(t, "x2582932495064035") == 0);
+        v = kl_env_on("KL_UNITY_QUIT_EXITS", t && (strcmp(t, "x2582932495064035") == 0 ||
+                                                   strcmp(t, "x2285803881494677") == 0));
     }
     return v;
 }

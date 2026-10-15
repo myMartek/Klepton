@@ -827,6 +827,44 @@ int kl_driver_lifecycle_begin(FILE *out) {
     }
 }
 
+// KL_UNITY_QUIT_TEARDOWN: when nativeRender first answers false (the game's
+// own quit), give Unity the end Android would: the game's preferences saved,
+// then nativePause, then nativeDone, on the thread that just ran nativeRender.
+// nativeRender is dropped after it, so the engine that was torn down is never
+// called again whatever the frame loop does next.
+//
+// Gun Club VR (x2285803881494677, build 410) is the one title it was run with,
+// on its sender's headset (fix 44, 2026-10-15; not run here): its in-game Exit
+// left its settings at their old values, since pause and teardown alone wrote
+// nothing, and with TBMPrefs.Save in front of them they were kept across a
+// restart. Default on for that title only, alongside KL_UNITY_QUIT_EXITS.
+static int unity_quit_teardown(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *t = kl_driver_target_name();
+        v = kl_env_on("KL_UNITY_QUIT_TEARDOWN", t && strcmp(t, "x2285803881494677") == 0);
+    }
+    return v;
+}
+
+static void unity_lifecycle_call(const char *name) {
+    void *fn = unity_lifecycle_native(name);
+    if (!fn) { fprintf(stderr, "[guest] quit: %s not registered\n", name); return; }
+    kl_jni_local_frame_push();
+    ((void (*)(void *, void *))fn)(kl_jni_env(), g_thiz);
+    kl_jni_local_frame_pop();
+    fprintf(stderr, "[guest] quit: %s returned\n", name);
+}
+
+static void unity_quit_teardown_run(void) {
+    fprintf(stderr, "[guest] nativeRender returned false: saving and tearing down "
+                    "(KL_UNITY_QUIT_TEARDOWN)\n");
+    kl_mprobe_gunclub_save_preferences();
+    unity_lifecycle_call("nativePause");
+    unity_lifecycle_call("nativeDone");
+    g_render = NULL;
+}
+
 int kl_driver_frame(void) {
     if (kl_driver_owns_frame_loop()) return -1;
     if (!g_render || !g_thiz) return -1;
@@ -846,6 +884,13 @@ int kl_driver_frame(void) {
     int r = ((int8_t (*)(void *, void *))g_render)(kl_jni_env(), g_thiz);
     kl_jni_local_frame_pop();
     kl_jni_drain_ui_tasks();
+    if (r == 0 && unity_quit_teardown()) {
+        // Nothing else runs against the engine this frame: no probes, no songs.
+        unity_quit_teardown_run();
+        if (g_alarm) alarm(0);
+        g_frames++;
+        return r;
+    }
     // Android's low-memory notification: one task_info call, and the guest drops
     // its caches when the footprint crosses the reported budget.
     kl_mem_pressure_poll();

@@ -25,4 +25,8 @@ void kl_mprobe_tick(unsigned frame);
 // the game spins itself out to for SpaceWarp. See kl_mprobe.c.
 void kl_mprobe_nexus_frame_budget(unsigned frame);
 
+// Gun Club VR only, self-gated on the target: the game's own TBMPrefs.Save,
+// before Unity's teardown on quit. See kl_mprobe.c.
+void kl_mprobe_gunclub_save_preferences(void);
+
 #endif

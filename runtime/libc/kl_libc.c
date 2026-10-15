@@ -1973,6 +1973,21 @@ static int kl_fs_trace_mode(void) {
     }
     return mode;
 }
+// Gun Club VR also reports every operation on its preference file (TBMPrefs,
+// and the temporary names it writes and renames through) with KL_TRACE_FS
+// unset: names, flags and results, never contents. Whether its settings reach
+// the disk on the way out is otherwise invisible (fix 44, 2026-10-15). For
+// every other target this is one cached comparison and nothing else.
+static int kl_fs_trace_prefs(const char *path, const char *extra) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (!t) return 0;   // not known yet: ask again on the next call
+        on = strcmp(t, "x2285803881494677") == 0;
+    }
+    return on && ((path && strstr(path, "TBMPrefs")) || (extra && strstr(extra, "TBMPrefs")));
+}
 // Every path shim reports here right after its call, so this is also where a
 // FAILURE is published to the guest's errno slot (kl_errno_set) — not only to
 // Darwin's errno. A guest that cached the __errno() pointer and cleared or
@@ -1985,6 +2000,7 @@ static void kl_fs_trace(const char *op, const char *path, const char *extra, int
     if (failed) kl_errno_set(saved);
     if (!extra) extra = "";
     int mode = kl_fs_trace_mode();
+    if (!mode && kl_fs_trace_prefs(path, extra)) mode = 2;
     if (!mode || (mode == 1 && !failed)) return;
     if (failed) fprintf(stderr, "[fs] %s(\"%s\", \"%s\") FAILED: %s\n", op, path, extra, strerror(saved));
     else        fprintf(stderr, "[fs] %s(\"%s\", \"%s\") ok\n", op, path, extra);
@@ -4035,8 +4051,17 @@ int klb_madvise(void *a, size_t n, int advice) {
 // open() lives behind a variadic thunk in kl_va_handlers.c, so its trace call
 // comes back here rather than duplicating the mode lookup there.
 void kl_fs_trace_open(const char *path, int flags, int fd) {
-    (void)flags;
-    kl_fs_trace("open", path, NULL, fd < 0);
+    // The flags and descriptor only when the line is printed; kl_fs_trace takes
+    // the failure's errno first thing, so it is kept across the formatting.
+    char detail[48];
+    const char *extra = NULL;
+    if (kl_fs_trace_mode() || kl_fs_trace_prefs(path, NULL)) {
+        int saved = errno;
+        snprintf(detail, sizeof detail, "flags=0x%x fd=%d", flags, fd);
+        errno = saved;
+        extra = detail;
+    }
+    kl_fs_trace("open", path, extra, fd < 0);
     kl_bank_note("open", path, fd < 0);
     if (kl_file_watch && fd >= 0) kl_file_watch("open", path, fd, NULL, 0, 0, NULL);
 }

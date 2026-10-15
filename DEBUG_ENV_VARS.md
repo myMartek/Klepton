@@ -803,8 +803,10 @@ The guest's own memory management, and the three seams that used to disable it.
   ("Invalid texture unit!") — text as filled boxes. Default 1 for
   `x2773034772778845` (Premium Bowling, Unity 6000.3.22f1),
   `x2582932495064035` (Real VR Fishing, as its fix was sent in) and
-  `x4015163475201433` (LES MILLS BODYCOMBAT, every TextMeshPro glyph a block),
-  else 0.
+  `x4015163475201433` (LES MILLS BODYCOMBAT, every TextMeshPro glyph a block)
+  and `x2285803881494677` (Gun Club VR: black gun materials and repeated
+  invalid texture-unit errors, surface detail with the pins, as its fix was
+  sent in), else 0.
 - `KL_FS_JAR_FILE=0|1` — a path of the form `jar:file:///…` with no `!/`
   entry part is read as the plain path it wraps; Unity's Android file layer
   strips that scheme itself. Default 1 for `x3635172946605196` (BRINK
@@ -1524,6 +1526,15 @@ puts the camera on the ground with its hands underneath it.
   else 0. While the eye pass is off this way the compositor draws black behind
   the frame's quads (a mixed space shows the room wherever no depth was
   written).
+- `KL_OVRP_GL_EYE_FENCE=0|1` — a GL guest's `ovrp_EndFrame4` with an eye layer
+  publishes a GPU fence (`kl_glfb_frame_fence`) on the submitting thread before
+  the frame record announces the stage. For a guest that draws straight into
+  its eye textures and stops swapping once gameplay starts: the swap-driven
+  fence then stays fixed while the records advance, and the compositor can
+  take a stage's old picture under its new pose — head jitter at a steady
+  display cadence. Default 1 for `x2285803881494677` (Gun Club VR build 410:
+  jitter at reduced resolution and with foveation off, stable head movement
+  with the fence, as its fix was sent in), else 0.
 - `KL_OVRP_LAYERS=1` — census the whole `ovrp_EndFrame4` submit list: one line
   per distinct `(layer, shape, stage, viewport, pose, flags)`, printed when it
   first appears and when it changes, plus the union's per-shape tail. Every
@@ -2333,7 +2344,12 @@ The composite/timewarp pass — one file, compiled by both compositors
   `KleptonTuning.swift`): the Sense controller's pitch and offset, applied to
   every pose while they are dragged and logged as `[tune] hand position:`.
   LES MILLS BODYCOMBAT's owner set its values this way; they are its default
-  (`KLSenseTune.targetHand`).
+  (`KLSenseTune.targetHand`). Gun Club VR has its own there too, as its owner
+  aligned the gun's grip: pitch as for every title, offset
+  `-0.005,-0.010,0.010` (3 cm lower and 3 cm further back than the general
+  `-0.005,0.02,-0.02`). The "Controller alignment" panel's Reset goes back to a
+  title's own values where it has them. The game's own grip angle (-17°) and
+  Gun Grip Offset (None) are that owner's saved in-game choices, not set here.
 - `KL_SENSE_PREDICT_MS=<ms>` — how far into the future a Sense-controller pose
   may be predicted. 0 is the measured pose; the default 50 is the same horizon
   `kl_openxr` clamps the HEAD to, so both poses a guest reads are bounded by one
@@ -2609,6 +2625,10 @@ reads no knobs).
   `files/settings.cfg` and `files/PlayerData.dat` (plus both `.bak`s) was
   invisible, and the game looked like it was showing its first-run gate
   without ever checking saved state. It checks; the files simply do not exist.
+  `open` lines carry the call's flags and descriptor (`flags=0x241 fd=37`).
+  For Gun Club VR (`x2285803881494677`) the operations on its preference file
+  (`TBMPrefs` and its temporary names) are logged with this unset too, names
+  and results only, never contents.
 - `KL_TRACE_IMAGES=1` — log each loaded image's base and span, the stub pool
   mapping, and each emitted stub. Read by `kl_image.c`.
 - `KL_TRACE_MMAP=1` — log every guest `mmap`/`mprotect` (`[mm]` lines): the
@@ -3314,9 +3334,18 @@ except its own control vars (next section).
   way Android finishes the activity when a game calls `Application.Quit()`.
   Without it the loop goes on calling an engine that has stopped drawing, and
   a game quit from its own menu leaves its last picture standing until the app
-  is closed by hand. Default 1 for `x2582932495064035` (Real VR Fishing), else
-  0: no other game has been watched answering false. Not on the
-  `KL_SYNC_GUEST` path.
+  is closed by hand. Default 1 for `x2582932495064035` (Real VR Fishing) and
+  `x2285803881494677` (Gun Club VR, with `KL_UNITY_QUIT_TEARDOWN`), else 0: no
+  other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
+- `KL_UNITY_QUIT_TEARDOWN=0|1` — (`runtime/guest/kl_driver.c`) when
+  `nativeRender` first answers false, end Unity the way Android does before
+  the loop stops: Gun Club VR's own public static `TBMPrefs.Save()` through
+  IL2CPP (that title only; nothing is set, the game writes what the player
+  chose), then `nativePause` and `nativeDone`, on the guest frame thread.
+  `nativeRender` is never called again after it. Default 1 for
+  `x2285803881494677` (Gun Club VR build 410: its in-game Exit kept its settings
+  across a restart only with the save in front, as its fix was sent in), else
+  0. Persistence when visionOS force-quits the app is not covered.
 - `KL_SYNC_GUEST=1` — drive the guest inline on the compositor thread, i.e.
   P5b's shape before the guest moved to its own thread. The clock P5.4's device numbers were taken
   against, and the A/B for anything that looks like a pacing regression.

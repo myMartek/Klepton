@@ -4412,6 +4412,29 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // before the record announces the stage (the same ordering argument as the
     // Vulkan branch above: nothing else puts the compositor behind it).
     klovrp_mirror_array_eyes(layer_submits, layer_submit_count);
+    // KL_OVRP_GL_EYE_FENCE=0|1 — fence a GL guest's eye drawing here, on its
+    // submitting thread, before the record announces the stage. For a guest
+    // that renders straight into its eye textures and stops swapping once
+    // gameplay starts: the swap-driven GPU fence then stays where it was while
+    // the records advance, and the compositor can take a stage's old picture
+    // under its new pose — the head jitters on a steady display cadence.
+    // Gun Club VR (x2285803881494677, build 410): jitter at reduced resolution
+    // and with foveation off, steady head movement with this fence (fix 44,
+    // 2026-10-15, its sender's headset; not run here).
+    //   default 1 for x2285803881494677, else 0
+    static int gl_eye_fence = -1;
+    if (gl_eye_fence < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        gl_eye_fence = kl_env_on("KL_OVRP_GL_EYE_FENCE", t && !strcmp(t, "x2285803881494677"));
+    }
+    if (gl_eye_fence && named >= 0 && !kl_vulkan_guest_active()) {
+        kl_glfb_frame_fence();
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [ovrp] GL eyes fenced before their frame record is "
+                            "published (KL_OVRP_GL_EYE_FENCE)\n");
+    }
     int vp[8], of[2] = { 0, 0 };
     int have = klovrp_submit_viewports(layer_submits, layer_submit_count, vp, of);
     return klovrp_end_frame_impl(guest_frame_index, have ? vp : NULL,

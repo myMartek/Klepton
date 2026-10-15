@@ -1021,6 +1021,9 @@ static unsigned g_shader_pins_n;
 // and was run on a headset that way (fix 37, 2026-10-14; not run here).
 // LES MILLS BODYCOMBAT (x4015163475201433) the third: 466k
 // "Invalid texture unit!" in one session and every TextMeshPro glyph a block.
+// Gun Club VR (x2285803881494677) the fourth: black gun materials and repeated
+// "Invalid texture unit!", surface detail on the gun with the pins on (fix 44,
+// 2026-10-15, its sender's screenshots; not run here).
 static int klfb_bind_pins(void) {
     static int v = -1;
     if (v < 0) {
@@ -1028,7 +1031,8 @@ static int klfb_bind_pins(void) {
         const char *t = kl_driver_target_name();
         v = kl_env_on("KL_GLFB_BIND_PINS", t && (strcmp(t, "x2773034772778845") == 0 ||
                                                  strcmp(t, "x2582932495064035") == 0 ||
-                                                 strcmp(t, "x4015163475201433") == 0));
+                                                 strcmp(t, "x4015163475201433") == 0 ||
+                                                 strcmp(t, "x2285803881494677") == 0));
     }
     return v;
 }

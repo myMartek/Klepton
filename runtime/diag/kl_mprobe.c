@@ -97,6 +97,28 @@ static const MethodInfo *find_method(const char *ns, const char *cls,
     return m;
 }
 
+// Gun Club VR only, self-gated on the target: its preference store is not
+// flushed on the emulated exit path, so call the game's own public,
+// parameterless static TBMPrefs.Save before Unity is torn down
+// (KL_UNITY_QUIT_TEARDOWN, kl_driver.c). Runs on the thread that just ran
+// nativeRender. What it writes is what the player chose; nothing is set here.
+void kl_mprobe_gunclub_save_preferences(void) {
+    extern const char *kl_driver_target_name(void);
+    const char *t = kl_driver_target_name();
+    if (!t || strcmp(t, "x2285803881494677") || !mprobe_init()) return;
+    const MethodInfo *m = find_method("", "TBMPrefs", "Save", 0);
+    if (!m) return;
+    Il2CppObject *exc = NULL;
+    il.runtime_invoke(m, NULL, NULL, &exc);
+    if (exc) {
+        Il2CppClass *k = il.object_get_class(exc);
+        fprintf(stderr, "[guest] Gun Club VR: TBMPrefs.Save threw %s\n",
+                k ? il.class_get_name(k) : "?");
+    } else {
+        fprintf(stderr, "[guest] Gun Club VR: TBMPrefs.Save returned\n");
+    }
+}
+
 // Invoke, reporting a managed throw by class name instead of letting it
 // escape. A probe that aborts the run it is measuring is worse than no probe.
 static Il2CppObject *invoke_on(Il2CppObject *self, const MethodInfo *m,

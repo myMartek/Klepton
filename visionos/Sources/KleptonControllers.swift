@@ -250,8 +250,16 @@ struct KLSenseTune {
     /// A title's own hand placement, where the general one is visibly off.
     /// LES MILLS BODYCOMBAT: its gloves sat above the player's hands; the owner
     /// set these with HandTuneView while playing (on device, 2026-10-15).
-    static let targetHand: (pitch: Float, pos: SIMD3<Float>)? =
-        klTargetName() == "x4015163475201433" ? (-30, SIMD3<Float>(-0.010, 0.005, 0.055)) : nil
+    /// Gun Club VR: the general pitch, the gun's grip 3 cm lower and 3 cm further
+    /// back than the general offset, as its owner aligned it (fix 44,
+    /// 2026-10-15, on their headset; not run here).
+    static let targetHand: (pitch: Float, pos: SIMD3<Float>)? = {
+        switch klTargetName() {
+        case "x4015163475201433": return (-30, SIMD3<Float>(-0.010, 0.005, 0.055))
+        case "x2285803881494677": return (-37, SIMD3<Float>(-0.005, -0.010, 0.010))
+        default: return nil
+        }
+    }()
 
     var rot = klEulerXYZ(SIMD3<Float>(psvr2Tilt + hiltPitch, 0, 0))
     var pos = KLSenseTune.targetHand?.pos ?? SIMD3<Float>(-0.005, 0.02, -0.02)

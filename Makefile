@@ -560,6 +560,16 @@ jni-memory: build/t_jni_memory
 jni-azs2: build/t_jni_azs2
 	./build/t_jni_azs2
 
+# Gun Club VR's quit teardown and preference-file trace, and that every other
+# title keeps its frame loop and its silent file ops.
+build/t_gunclub: tests/t_gunclub.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_gunclub.c $(RUNTIME) $(LDLIBS)
+
+.PHONY: gunclub
+gunclub: build/t_gunclub
+	./build/t_gunclub
+
 # kl_view.c is the KL_VIEW=1 interactive viewer (SDL3); only m_boot links it,
 # so only this rule carries the pkg-config flags. kl_view.c compiles to a stub
 # without SDL3 headers, but the link flags below assume pkg-config finds sdl3.
@@ -929,7 +939,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_x18pool build/t_ue421
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_x18pool build/t_ue421
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -992,6 +1002,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@echo "=== BattleGroupVR2: Firebase, Vivox, memory ===" && tail -1 build/jni-firebase.log && tail -1 build/jni-vivox.log && tail -1 build/jni-memory.log
 	@./build/t_jni_azs2 > build/jni-azs2.log 2>&1 || { cat build/jni-azs2.log; exit 1; }
 	@echo "=== Arizona Sunshine 2: logcat, Sentry ===" && tail -1 build/jni-azs2.log
+	@./build/t_gunclub > build/gunclub.log 2>&1 || { cat build/gunclub.log; exit 1; }
+	@head -1 build/gunclub.log && tail -1 build/gunclub.log
 	@./build/t_pinch > build/pinch.log 2>&1 || { cat build/pinch.log; exit 1; }
 	@echo "=== discrete hand pinch ===" && tail -1 build/pinch.log
 	@./build/t_arrayviews > build/arrayviews.log 2>&1 || { cat build/arrayviews.log; exit 1; }
