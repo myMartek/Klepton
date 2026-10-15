@@ -435,6 +435,15 @@ void kl_reproject_grid_build(simd_float2 *out, uint32_t nx, uint32_t ny,
                              float tex_w, float tex_h,
                              kl_reproject_s2p fn, void *ctx);
 
+// A render viewport, {x, y, w, h} counted from the picture's first row as the
+// guest submits it, turned into the rect the grid above wants when the picture's
+// first row is its TOP (`flip_y`, every Vulkan guest): the shader mirrors v after
+// the grid, over the whole texture, so a rect shorter than the texture is
+// mirrored here first or the pass reads the rows the guest did not write. A
+// full-height rect, or top_left 0, comes back as it went in. Shared by the
+// visionOS compositor and the Mac viewer, so the two cannot disagree.
+void kl_reproject_viewport_for_pass(float vp[4], float tex_h, int top_left);
+
 // The plain blit the viewer used before any of this existed: a full-screen
 // triangle, no uniforms but the slice. Kept because it is the A/B — if the
 // reprojected picture is wrong, this is the one known to be right.

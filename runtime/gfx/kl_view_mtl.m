@@ -1072,6 +1072,9 @@ int kl_viewmtl_present(int win_w, int win_h) {
                               "the [ovrp] render viewport line" : "");
             }
         }
+        // A Vulkan picture's first row is its top and the shader mirrors v after
+        // the grid: the rect is mirrored first, as KleptonCompositor does.
+        if (src) kl_reproject_viewport_for_pass(vp, (float)src.height, flip);
         id<MTLBuffer> gbuf = klvm_grid_buffer(src, vp[2] > 0 ? vp : NULL, &gverts);
         [enc setVertexBuffer:gbuf offset:0 atIndex:1];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:gverts];

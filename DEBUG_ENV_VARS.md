@@ -1845,12 +1845,16 @@ puts the camera on the ground with its hands underneath it.
   the recommendation between 70 % and 100 %. Only a title that implements Meta's
   dynamic resolution reads it. Default 1 for `x24882487241367228` (Alien: Rogue
   Incursion), else 0.
-- `KL_OVRP_VIEWPORT_TOP=0|1` — read the eye layer's submitted render viewport as
-  counted from the picture's top (the rect is moved to the texture's last rows
-  before the compositors see it), which is where Unreal on Vulkan puts a
-  viewport shorter than the texture. Makes no difference to a full-height rect.
-  Default 1 for an Unreal guest on Vulkan under a store-built target
-  (`x<app id>`; seen with Alien: Rogue Incursion and Witchblood), else 0.
+- `KL_OVRP_VIEWPORT_TOP=0|1` — mirror the eye layer's submitted render
+  viewport to the texture's last rows before it goes into the frame record.
+  Default 0. The compositors (visionOS and the Mac viewer) already mirror a
+  rect shorter than the texture for every Vulkan guest
+  (`kl_reproject_viewport_for_pass`); with this on as well the two cancel and
+  the picture shows its lower part over unwritten rows. It used to default to
+  1 for Unreal guests on Vulkan under a store-built target, which is how Alien:
+  Rogue Incursion came to show a black band at the bottom from toolchain 478 on
+  (every such title with a viewport shorter than its texture had the same
+  double mirror). Only for an A/B against a compositor that does not mirror.
 - `KL_OVRP_SWAP_PER_FRAME=0|1` — whether EndFrame presents for a guest is
   decided by "did it swap since the last EndFrame" instead of "has it ever
   swapped". Saints & Sinners swaps for its pre-VR splash and never again,

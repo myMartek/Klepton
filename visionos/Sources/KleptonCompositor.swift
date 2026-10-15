@@ -4652,9 +4652,18 @@ final class KleptonCompositor {
         // 2026-10-13). kl_proj_layer_grid does the same for projection layers.
         // A foveated Vulkan eye WITH a partial viewport is not covered by this:
         // the rate map is asked in the mirrored coordinates.
+        // This is the ONLY place the eye rect is mirrored: the frame record
+        // carries it as the guest submitted it (KL_OVRP_VIEWPORT_TOP is off).
+        // The arithmetic is kl_reproject_viewport_for_pass, which `make
+        // reproject` checks on real pixels and the Mac viewer shares.
         func rowZeroAtTop(_ r: SIMD4<Float>) -> SIMD4<Float> {
-            guard topLeft, r.z > 0, r.w > 0, th > 0 else { return r }
-            return SIMD4<Float>(r.x, max(0, Float(th) - (r.y + r.w)), r.z, r.w)
+            var out = r
+            withUnsafeMutablePointer(to: &out) {
+                $0.withMemoryRebound(to: Float.self, capacity: 4) {
+                    kl_reproject_viewport_for_pass($0, Float(th), topLeft ? 1 : 0)
+                }
+            }
+            return out
         }
         let vp = rowZeroAtTop(sanitise(viewport0))
         let vpR = rowZeroAtTop(sanitise(viewport1))

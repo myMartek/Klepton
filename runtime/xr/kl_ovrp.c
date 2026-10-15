@@ -8035,33 +8035,22 @@ static int klovrp_submit_viewports(const void *layer_submits, int count, int vp[
                     l->desc.texture_size.w > 0
                         ? 100.0 * (double)vp[2] / (double)l->desc.texture_size.w : 0.0);
         }
-        // The compositors read the rect as rows counted from the texture's
-        // first row, which is where a GL guest's y=0 is. Unreal on Vulkan counts
-        // its rect from the picture's TOP, and its picture lies the other way up
-        // in the texture, so a shortened rect sits against the LAST row: taken
-        // as it stands, Alien: Rogue Incursion at 73 % showed the lower part of
-        // the picture and, under it, rows nothing had drawn since the viewport
-        // shrank (2026-10-09). A full-height rect is the same either way, which
-        // is all any Vulkan guest had submitted until then. Witchblood (UE 4.27,
-        // Vulkan) submits 2219 of 2465 rows from its first frame, and read from
-        // the first row the world swam diagonally against every head turn
-        // (2026-10-10).
+        // The rect goes into the frame record as the guest submitted it,
+        // counted from the picture's first row. For a Vulkan guest that row is
+        // the TOP, and the compositors mirror a rect shorter than the texture
+        // themselves (kl_reproject_viewport_for_pass, since toolchain 478).
         //
-        // Two Unreal-on-Vulkan titles, sent in by two people, needed the same
-        // thing, and it is the engine's way of counting and not either game's:
-        // so it is the rule for every Unreal guest on Vulkan that runs under a
-        // store-built target (x<app id>). For a full-height rect it changes
-        // nothing. The targets with a name of their own (wrath2 and the like)
-        // were brought up and checked as they are and keep what they had.
-        //   KL_OVRP_VIEWPORT_TOP=0|1   default 1 for those guests, else 0
+        // Before that, this function did the mirroring for every Unreal guest
+        // on Vulkan under a store-built target (Alien: Rogue Incursion,
+        // 2026-10-09; Witchblood, 2026-10-10). Once the compositor did it too,
+        // the two cancelled and the record's rect named the texture's LAST rows
+        // again: Alien showed the lower part of its picture at the top of the
+        // view and unwritten (black) rows under it (a quarter of the view in
+        // the owner's screenshot, 2026-10-15). So it is off; the switch stays for an
+        // A/B against a compositor that does not mirror.
+        //   KL_OVRP_VIEWPORT_TOP=0|1   default 0
         static int top = -1;
-        if (top < 0) {
-            extern kl_guest_kind kl_driver_kind(void);
-            const char *t = kl_driver_target_name();
-            int store_built = t && t[0] == 'x' && t[1] && strspn(t + 1, "0123456789") == strlen(t + 1);
-            top = kl_env_on("KL_OVRP_VIEWPORT_TOP",
-                            store_built && kl_driver_kind() == KL_GUEST_UE4 && kl_vulkan_guest_active());
-        }
+        if (top < 0) top = kl_env_on("KL_OVRP_VIEWPORT_TOP", 0);
         if (top && l->desc.texture_size.h > 0)
             for (int eye = 0; eye < 2; eye++) {
                 int y = l->desc.texture_size.h - (vp[eye * 4 + 1] + vp[eye * 4 + 3]);

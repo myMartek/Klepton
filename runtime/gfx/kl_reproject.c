@@ -684,6 +684,19 @@ void kl_reproject_grid_identity(simd_float2 *out) {
     out[4] = simd_make_float2(1.0f, 1.0f);
 }
 
+// Red Matter 2 (Unreal, dynamic resolution) drew into the top 2244 of 3944
+// rows and showed a strip of its picture at the top of the view over black
+// until this was applied (owner, headset, 2026-10-13). Applied once, by the
+// compositor: runtime/xr/kl_ovrp.c used to mirror the same rect again for
+// store-built Unreal titles on Vulkan (KL_OVRP_VIEWPORT_TOP), and the two
+// mirrors cancelled — Alien: Rogue Incursion showed the lower part of its
+// picture at the top of the view and unwritten rows under it.
+void kl_reproject_viewport_for_pass(float vp[4], float tex_h, int top_left) {
+    if (!vp || !top_left || !(vp[2] > 0) || !(vp[3] > 0) || !(tex_h > 0)) return;
+    float y = tex_h - (vp[1] + vp[3]);
+    vp[1] = y > 0 ? y : 0;
+}
+
 void kl_reproject_grid_build(simd_float2 *out, uint32_t nx, uint32_t ny,
                              const float *vp,
                              float screen_w, float screen_h,
