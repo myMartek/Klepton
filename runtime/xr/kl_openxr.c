@@ -2952,6 +2952,16 @@ static int64_t klxr_predict_ahead(int64_t display_time) {
 // points agreeing for free. KL_XR_PREDICT=0 is the A/B.
 typedef struct { int valid; float q[4], p[3]; } klxr_head_delta;
 
+// The cache is read and filled from whichever guest threads locate poses
+// (Unity's render and sim threads both do), so the key and the q/p it names
+// are one unit: a reader that saw a new key beside the previous q/p would
+// answer a head that belongs to neither. A mutex rather than a seqlock, held
+// across the miss's prediction too, so two threads missing on the same
+// (frame, instant) cannot each predict and hand out two heads — the first one
+// fills, the second hits. File-static rather than in the session, because the
+// session struct is zeroed whole (and the self-test builds one on the stack).
+static pthread_mutex_t g_predict_mu = PTHREAD_MUTEX_INITIALIZER;
+
 static klxr_head_delta klxr_frame_head_delta(klxr_session *s, int64_t display_time) {
     klxr_head_delta d = { 0, {0, 0, 0, 1}, {0, 0, 0} };
     static int predict_on = -1;
@@ -2960,19 +2970,25 @@ static klxr_head_delta klxr_frame_head_delta(klxr_session *s, int64_t display_ti
     // recentre path locates spaces before its first xrWaitFrame). There is no
     // instant to predict to, so the latched head is the whole answer.
     if (!predict_on || !s || display_time <= 0) return d;
-    if (s->predict_frame == s->frames_waited && s->predict_time == display_time) {
+    pthread_mutex_lock(&g_predict_mu);
+    uint64_t frame = __atomic_load_n(&s->frames_waited, __ATOMIC_RELAXED);
+    if (s->predict_frame == frame && s->predict_time == display_time) {
         d.valid = s->predict_valid;
         memcpy(d.q, s->predict_q, sizeof d.q);
         memcpy(d.p, s->predict_p, sizeof d.p);
+        pthread_mutex_unlock(&g_predict_mu);
         return d;
     }
     d.valid = kl_ovrp_head_predict_delta(
         (double)(klxr_now() + klxr_predict_ahead(display_time)) / 1e9, d.q, d.p);
-    s->predict_frame = s->frames_waited;
-    s->predict_time  = display_time;
+    // The values before the key, so even a reader outside the lock could never
+    // pair this key with the previous entry's q/p.
     s->predict_valid = d.valid;
     memcpy(s->predict_q, d.q, sizeof d.q);
     memcpy(s->predict_p, d.p, sizeof d.p);
+    s->predict_time  = display_time;
+    s->predict_frame = frame;
+    pthread_mutex_unlock(&g_predict_mu);
     return d;
 }
 
@@ -5712,7 +5728,7 @@ static XrResult klxr_WaitFrame(void *session, const XrFrameWaitInfo *info,
                   last, (int)s->state);
       } }
     s->frame_predicted_time = state->predictedDisplayTime;
-    s->frames_waited++;
+    __atomic_add_fetch(&s->frames_waited, 1, __ATOMIC_RELAXED);   // read by klxr_frame_head_delta
     return KLXR_SUCCESS;
 }
 
