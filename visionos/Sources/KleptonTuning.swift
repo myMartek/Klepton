@@ -495,10 +495,10 @@ final class KleptonMetalFX: ObservableObject {
         return rs < 0.999 && w > 0 && h > 0
     }
 
-    /// The switch as a settings page turns it (Picture, and Picture in detail
-    /// under Advanced). Turned on at 100 % it also sets the resolution to 75 %
-    /// (KleptonMetalFXPreset), from the next start like any change of it; true
-    /// when it did, so the page can say so.
+    /// The switch as a settings page turns it (Picture; Picture in detail under
+    /// Advanced for Alyx and the developer window). Turned on at 100 % it also
+    /// sets the resolution to 75 % (KleptonMetalFXPreset), from the next start
+    /// like any change of it; true when it did, so the page can say so.
     @discardableResult
     func setFromSettings(_ on: Bool) -> Bool {
         let rendering = KleptonRendering.shared
@@ -796,6 +796,11 @@ extension KleptonRendering {
 }
 
 struct RenderingView: View {
+    /// Whether the MetalFX switch is here. A player's settings page has it under
+    /// Picture › Resolution (PlayerSettingsView), so its Advanced copy of this
+    /// view only points there; the developer window and Alyx, whose page has no
+    /// Picture box, keep the switch here.
+    var metalFXSwitch = true
     @ObservedObject private var rendering = KleptonRendering.shared
 
     var body: some View {
@@ -838,20 +843,28 @@ struct RenderingView: View {
                  + "halves the rate head movement is corrected at. Takes "
                  + "effect the next time the app starts.")
                 .font(.caption).foregroundStyle(.secondary)
-            MetalFXSwitch(title: "MetalFX upscaling", hintFont: .caption)
-            Text(klT("Sharpens the picture when the resolution the game was started with is below 100%: the game draws small and Apple's scaler stretches it to eye size instead of a plain linear stretch. Costs some graphics time. Switching takes effect on the next frame; a new resolution only with the next start. Works in every game: Vulkan and GL, through Meta's interface or OpenXR, with foveated rendering too. The metrics panel shows whether it is upscaling.",
-                     "Schärft das Bild, wenn die Auflösung, mit der das Spiel gestartet wurde, unter 100 % liegt: Das Spiel zeichnet klein, und Apples Scaler streckt es auf Augengröße statt einer einfachen linearen Streckung. Kostet etwas Grafikzeit. Das Umschalten wirkt ab dem nächsten Bild, eine neue Auflösung erst beim nächsten Start. Wirkt in jedem Spiel: Vulkan und GL, über Metas Schnittstelle oder OpenXR, auch mit Foveated Rendering. Ob hochskaliert wird, zeigt das Leistungs-Panel."))
-                .font(.caption).foregroundStyle(.secondary)
-            if KleptonMetalFX.onFromInstall {
-                Text(klT("On from the start in this installation: AVP Play's experimental setting asked for it.",
-                         "In dieser Installation von Anfang an eingeschaltet: Die experimentelle Einstellung von AVP Play hat es so verlangt."))
-                    .font(.caption).foregroundStyle(.orange)
+            if !metalFXSwitch {
+                if KleptonMetalFX.deviceSupported {
+                    Text(klT("MetalFX upscaling is under Picture, below Resolution.",
+                             "MetalFX-Hochskalieren steht unter Bild, unter der Auflösung."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                MetalFXSwitch(title: "MetalFX upscaling", hintFont: .caption)
+                Text(klT("Sharpens the picture when the resolution the game was started with is below 100%: the game draws small and Apple's scaler stretches it to eye size instead of a plain linear stretch. Costs some graphics time. Switching takes effect on the next frame; a new resolution only with the next start. Works in every game: Vulkan and GL, through Meta's interface or OpenXR, with foveated rendering too. The metrics panel shows whether it is upscaling.",
+                         "Schärft das Bild, wenn die Auflösung, mit der das Spiel gestartet wurde, unter 100 % liegt: Das Spiel zeichnet klein, und Apples Scaler streckt es auf Augengröße statt einer einfachen linearen Streckung. Kostet etwas Grafikzeit. Das Umschalten wirkt ab dem nächsten Bild, eine neue Auflösung erst beim nächsten Start. Wirkt in jedem Spiel: Vulkan und GL, über Metas Schnittstelle oder OpenXR, auch mit Foveated Rendering. Ob hochskaliert wird, zeigt das Leistungs-Panel."))
+                    .font(.caption).foregroundStyle(.secondary)
+                if KleptonMetalFX.onFromInstall {
+                    Text(klT("On from the start in this installation: AVP Play's experimental setting asked for it.",
+                             "In dieser Installation von Anfang an eingeschaltet: Die experimentelle Einstellung von AVP Play hat es so verlangt."))
+                        .font(.caption).foregroundStyle(.orange)
+                }
             }
         }
     }
 }
 
-/// The MetalFX switch as both settings pages show it: the stored choice
+/// The MetalFX switch wherever a page shows it: the stored choice
 /// (KleptonMetalFX.shared), so a tap of Create and Options shows here at once.
 /// Turned on at 100 % it sets the resolution to 75 % (setFromSettings) and says
 /// so for a few seconds under the switch.

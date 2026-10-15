@@ -524,13 +524,19 @@ struct PlayerSettingsView: View {
                     Text(klT("How finely the game is drawn. Lower it if the picture stutters when you look around.",
                              "Wie fein das Spiel gezeichnet wird. Verringern, wenn das Bild beim Umsehen ruckelt."))
                         .font(.callout).foregroundStyle(.secondary)
-                    // The same switch as under Advanced and as Create + Options
+                    // The one MetalFX switch of this page (Advanced only points
+                    // here) and the same choice as Create + Options
                     // (KleptonMetalFX), only where the device has the scaler.
                     if KleptonMetalFX.deviceSupported {
                         MetalFXSwitch(title: klT("MetalFX upscaling", "MetalFX-Hochskalieren"), hintFont: .callout)
                         Text(klT("Sharpens the picture when the resolution is below 100%: Apple's scaler enlarges it instead of a plain stretch. Costs some graphics time. Switching takes effect at once, a new resolution with the next start.",
                                  "Schärft das Bild, wenn die Auflösung unter 100 % liegt: Apples Scaler vergrößert es statt einer einfachen Streckung. Kostet etwas Grafikzeit. Das Umschalten wirkt sofort, eine neue Auflösung beim nächsten Start."))
                             .font(.callout).foregroundStyle(.secondary)
+                        if KleptonMetalFX.onFromInstall {
+                            Text(klT("On from the start in this installation: AVP Play's MetalFX setting asked for it.",
+                                     "In dieser Installation von Anfang an eingeschaltet: Die MetalFX-Einstellung von AVP Play hat es so verlangt."))
+                                .font(.callout).foregroundStyle(.orange)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -935,7 +941,7 @@ struct BootView: View {
                     // dials of the port itself, and the report of this run.
                     DisclosureGroup(klT("Advanced", "Erweitert")) {
                         VStack(alignment: .leading, spacing: 14) {
-                            GroupBox(klT("Picture, in detail", "Bild, im Einzelnen")) { RenderingView() }
+                            GroupBox(klT("Picture, in detail", "Bild, im Einzelnen")) { RenderingView(metalFXSwitch: klIsAlyx()) }
                             DisclosureGroup(klT("Passthrough and chroma key", "Durchsicht und Chroma-Key")) { ChromaView() }
                             DisclosureGroup(klT("Controller alignment", "Ausrichtung der Controller")) { TuningView() }
                             if showMic {

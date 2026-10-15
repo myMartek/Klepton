@@ -3881,8 +3881,10 @@ audio path that has shipped: both are linked in, and
   (`KleptonMetalFX.canUpscale`). The panel then has a second hint line, "Tap
   both: MetalFX on / off", and redraws at once after a tap: *MetalFX*, *Path*
   and *Output* show the new state. It is the same choice as *Settings ›
-  Picture › MetalFX upscaling* (and the one under *Advanced*), stored the same
-  way, and the switch there shows it at once. Anywhere else the
+  Picture › MetalFX upscaling*, stored the same way, and the switch there
+  shows it at once. *Advanced › Picture, in detail* only points to it (it
+  keeps the switch for Alyx, whose page has no Picture box, and in the
+  developer window). Anywhere else the
   tap does nothing (`[metalfx] tap of Create + Options: nothing to switch` in
   the log). It replaces the live XR head prediction switch test builds had.
 
