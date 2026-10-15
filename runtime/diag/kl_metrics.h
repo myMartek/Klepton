@@ -22,7 +22,11 @@ typedef struct kl_metrics {
     char  cpu_top_name[32];    // ...and its name, "" where it has none
     int   mem_used_mb;         // the app's footprint
     int   mem_left_mb;         // what is left before the system's limit (visionOS)
-    int   eye_w, eye_h;        // the eye picture the compositor reads, in pixels
+    int   eye_w, eye_h;        // the picture the game draws (render size), in pixels
+    int   upscale;             // MetalFX: 0 off, 1 on but linear, 2 upscaled; -1 not said yet
+    int   out_w, out_h;        // ...the size after the upscale, in the picture's pixels (0 when none)
+    char  path[40];            // how the picture comes: "Vulkan · per eye", "OpenXR GL · 2 layers", ...
+    char  upscale_note[24];    // ...and why it is linear, in a few words ("100 %", "budget")
 } kl_metrics;
 
 // Starts the counting. Nothing below counts before it, and kl_metrics_tick
@@ -36,6 +40,9 @@ void kl_metrics_note_shown(int fresh, int stale);
 void kl_metrics_note_composite(double gpu_seconds);
 // ...and the size of the eye picture it reads.
 void kl_metrics_note_eye(int w, int h);
+// ...and its MetalFX upscale (kl_metrics.upscale and what follows it). Strings
+// are copied; NULL is "".
+void kl_metrics_note_upscale(int state, int out_w, int out_h, const char *path, const char *note);
 // The game's side, where its frames are counted: one call as a frame starts.
 void kl_metrics_note_game_frame(void);
 // Takes a sample when a second has passed since the last one; returns 1 when

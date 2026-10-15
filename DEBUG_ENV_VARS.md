@@ -3452,6 +3452,16 @@ Read by the scripts themselves, never forwarded to the app.
   an empty container: assets, OBB and the guest's saves stay in the old one. The
   staging stamp is keyed on the id, so the next build re-stages by itself rather
   than launching into an empty container — it is just not free.
+- `KLEPTON_DISPLAY_OVERRIDE=<name>` — the whole name under the icon
+  (CFBundleDisplayName), for every target. It takes precedence over the row's
+  `display`, over `KLEPTON_GENERIC_DISPLAY` and over the custom launcher's
+  compact name. `KLEPTON_DISPLAY_NAME` is the older spelling and still works;
+  `KLEPTON_DISPLAY_OVERRIDE` wins if both are set.
+- `KLEPTON_DISPLAY_SUFFIX=<text>` — appended to the name after the override is
+  applied, e.g. `" (Test)"` gives `Beat Saber (Test)`. Use it with
+  `KLEPTON_BUNDLE_ID` to install a test copy beside the one already on the headset
+  without the two icons looking the same. Unset or empty, neither variable
+  changes anything; non-printable characters are dropped.
 - `KLEPTON_TEAM=<id>` — override the signing team;
   `KLEPTON_DEVICE=<udid>` — skip device auto-detection;
   `KLEPTON_ENTITLEMENTS=0` — build without the two memory capabilities (see
@@ -3825,7 +3835,13 @@ audio path that has shipped: both are linked in, and
   | (thread name) | the busiest thread's share of one core — the one a CPU-bound game waits for |
   | Memory | footprint, and what is left before the system's limit |
   | Heat | the system's thermal state |
-  | Picture | the eye picture the compositor reads, in pixels |
+  | Render | the picture the game draws, in pixels: the eye texture, or the first projection layer's (the backdrop) |
+  | MetalFX | the upscale (`KleptonMetalFX`): **on** (green) when this frame was upscaled, **off**, or **linear · <why>** (amber) when it is on and the picture keeps the linear stretch — `100 %`, `budget`, `format`, `texture view`, … (`[metalfx] linear path:` in the log says it in full) |
+  | Path | how the picture comes: the engine (`Vulkan`, `GL`), `OpenXR … · n layers` or the eye pass's `array` / `per eye`, and `foveated` for a GL eye drawn through the display's rate map |
+  | Output | the size after the upscale, in the picture's own pixels (for a foveated eye the screen size the copy stands for); only while it upscales |
+
+  The column closes up when it has more than nine rows, and a value too long
+  for its row is set smaller.
 
   Graphs: frames a second against the display rate; GPU load and the busiest
   thread; shaders a second, as a bar for every second that had any, the compiled
@@ -3858,3 +3874,37 @@ audio path that has shipped: both are linked in, and
   until chosen, as before. AVP Play sets it from its setting "Experimental:
   switch on the new pose and audio implementations when installing"; the log
   line of such a switch ends in `(on from the installation)`.
+- `KLEPTON_RENDER_SCALE=<0.5..1.0>` (build/install environment, read by
+  `visionos/gen_xcodeproj.py`) — the render scale the game starts at: it
+  replaces the target's `render_scale` as `KL_RENDER_SCALE_DEFAULT` /
+  `KLRenderScaleDefault`, so *Resolution* in the game starts there and a value
+  chosen in the game still wins. AVP Play sets it with its MetalFX switch
+  (75 % unless chosen otherwise). Unset: the target's default, byte for byte
+  as before; a value outside 0.5..1.0 or not a number is said on stderr and
+  ignored.
+- `KL_METALFX_UPSCALE` in that list — not a Test switch of its own but the
+  start value of *Settings › Rendering › MetalFX upscaling*
+  (`klepton.metalfxUpscale`, `KleptonMetalFX`): on from the first start, off
+  again in the game if chosen there. Unnamed, the switch starts off, as
+  before. AVP Play sets it from its setting "MetalFX: switch on upscaling
+  automatically when installing". The compositor's `[metalfx] on` line then
+  ends in `(on from the installation, KL_METALFX_UPSCALE)`; each place it
+  keeps the linear path is said once as `[metalfx] linear path: <reason>`.
+  Every path is upscaled: the eye pass (a shared 2-slice array, a texture per
+  eye), a GL eye drawn through the display's rate map (only its physical
+  part, the grid normalised to it), and every projection layer of an OpenXR
+  guest, each eye from its own texture. `[metalfx] upscaling <what>` names
+  each copy when the arrangement changes. The metrics panel (`KL_STATS_CARD`)
+  shows *Render* (the size the game draws), *MetalFX* (on / off / linear and
+  why), *Path* (engine and composite path) and *Output* (the size after it).
+- `KL_METALFX_BUDGET=<full eyes>` — the projection layers' share of MetalFX
+  output a frame, in full eye pictures (1..16, default 4). A layer whose
+  copies would go past it is drawn linear and said once (`budget` on the
+  panel); the eye pass has no budget.
+- `KL_METALFX_COLOR=hdr|linear|perceptual` — the scaler's colour processing
+  mode, for A/B tests. Unset: RGBA16F `hdr` (the default, kept), the rest
+  `perceptual`. An sRGB eye (`rgba8Unorm_srgb`, `bgra8Unorm_srgb`) is always
+  `perceptual`, whatever this says: MetalFX makes no scaler for sRGB with
+  `linear` or `hdr` (said once). Said once as
+  `[metalfx] colour processing …`; any other value is said and ignored. Read
+  once a run, at the first copy.

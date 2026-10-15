@@ -6,7 +6,7 @@ import Foundation
 //
 // The model is the performance overlay a Quest developer knows: the numbers of
 // the last second in a column — frame rate, shader compiles, GPU and CPU
-// load, memory, heat, picture size — and beside it the last minute of the
+// load, memory, heat, picture size and its MetalFX upscale — and beside it the last minute of the
 // three that say why a game does not feel smooth, as graphs. A single number
 // answers "how fast is it now"; the graphs answer "was that a hitch or is it
 // always like this", which is the question a test run is usually about.
@@ -41,6 +41,10 @@ struct KLMetricsSample {
     var memLeftMB = -1
     var thermal = -1               // ProcessInfo.ThermalState's raw value, 0 nominal .. 3 critical
     var eyeW = 0, eyeH = 0         // the picture the game draws (render size)
+    var upscale = -1               // MetalFX: 0 off, 1 on but linear, 2 upscaled; -1 not known
+    var outW = 0, outH = 0         // ...the size after it
+    var path = ""                  // how the picture comes: "Vulkan · per eye", "OpenXR GL · 2 layers", ...
+    var upscaleNote = ""           // ...and why it is linear
 }
 
 enum KLMetricsPanel {
@@ -220,6 +224,18 @@ enum KLMetricsPanel {
             rows.append(("Heat", t, now.thermal >= 3 ? red : now.thermal == 2 ? amber : bright))
         }
         if now.eyeW > 0 { rows.append(("Render", "\(now.eyeW) × \(now.eyeH)", bright)) }
+        // The upscale: whether it is on, how the picture comes (the engine and the compositor's path for
+        // it), and what it is upscaled to. A switch that is on and does nothing says why, in amber.
+        if now.upscale >= 0 {
+            switch now.upscale {
+            case 2: rows.append(("MetalFX", "on", green))
+            case 1: rows.append(("MetalFX", now.upscaleNote.isEmpty ? "on · linear"
+                                                                   : "linear · " + now.upscaleNote, amber))
+            default: rows.append(("MetalFX", "off", bright))
+            }
+        }
+        if !now.path.isEmpty { rows.append(("Path", now.path, bright)) }
+        if now.upscale == 2, now.outW > 0 { rows.append(("Output", "\(now.outW) × \(now.outH)", green)) }
         if now.xrPredict >= 0 {
             // Off is the A/B half, in amber so it is not left that way by mistake; "no OpenXR" where the
             // game never asks, so a switch that changes nothing does not look as if it did.
@@ -234,7 +250,7 @@ enum KLMetricsPanel {
         var y: CGFloat = 164
         for (label, value, color) in rows {
             let lw = text(ctx, label, x: left, y: y, font: font(size), color: dim)
-            // A long value is set smaller rather than over its label.
+            // A long value (the path) is set smaller rather than over its label.
             var vs = size
             while vs > 16, width(value, font: font(vs, bold: true)) > right - left - lw - 14 { vs -= 1 }
             text(ctx, value, x: right, y: y, font: font(vs, bold: true), color: color, align: .right)

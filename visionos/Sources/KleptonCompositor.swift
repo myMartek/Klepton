@@ -46,6 +46,7 @@
 import SwiftUI
 import CompositorServices
 import Metal
+import MetalFX
 import simd
 import ARKit
 import AVFoundation
@@ -2314,6 +2315,509 @@ final class KleptonCompositor {
         return encoded > 0 ? 1 : 0
     }
 
+    // MARK: MetalFX spatial upscale
+    //
+    // The guest renders small (the "Resolution" setting) and this puts its
+    // pictures back up to the size they would have had, with Apple's spatial
+    // scaler, before the composite samples them — instead of the composite's
+    // own linear stretch. Single frame in, single frame out, no motion data.
+    //
+    // Every way a picture reaches the composite is upscaled:
+    //   * the eye pass — a 2-slice array both eyes share (the GL eye provider,
+    //     Vulkan through OVRPlugin), a texture per eye (Vulkan through one
+    //     swapchain per eye, which `arrayView` wraps), Vulkan foveation (kl_fove
+    //     expands its eyes back to screen layout before this sees them);
+    //   * a GL eye drawn through the display's rate map (kl_glfb_eye_rate_map):
+    //     the texture holds the squeezed picture in its top-left physical part.
+    //     Only that part is upscaled (the scaler's input content), uniformly, so
+    //     the squeeze keeps its shape and the unwarp grid is built normalised to
+    //     that part (`MfxOrigin.content`) — the same texture coordinates land on
+    //     the same scene point in the copy;
+    //   * projection layers (every OpenXR guest, KL_XR_LAYERS=1: Alyx, Steam
+    //     Link, Doom 3, Walkabout, Beat Saber 1.45): each layer and each of its
+    //     eyes is upscaled from its own texture — a layer's rect is a fraction
+    //     of its texture (kl_proj_layer_grid), so it holds for the copy as it
+    //     is. One layer's eyes both or neither; the layers of a frame share a
+    //     budget of output pixels (KL_METALFX_BUDGET, in full eyes, 4 by
+    //     default) so a guest with many layers cannot put eight full-size
+    //     scalers on the pass that has the least time, and a layer past it is
+    //     said once and drawn linear.
+    // What keeps the linear path, each said once (`mfxSay`) and shown on the
+    // metrics panel: a format outside `mfxFormats`, multisampling, a view
+    // MoltenVK or the guest made of another texture (the scaler's input must
+    // be a plain 2D texture a slice), eyes of different sizes in the eye pass
+    // (its grid is built from slot 0), and a guest started at 100 % — nothing
+    // to restore (kl_ovrp_eye_texture_scale).
+
+    /// One upscaled copy, its per-slice output views and the scaler for that
+    /// geometry. Keyed by the shape AND by which source of the frame it serves
+    /// (the eye pass's slot 0 or 1, or a layer's index and slot): two textures
+    /// must never write into one copy, while the stages of one swapchain — only
+    /// one of which is composited in a frame — can share it, which is the memory.
+    private struct MfxTarget {
+        let texture: MTLTexture
+        let outViews: [MTLTexture]
+        let scaler: any MTLFXSpatialScaler
+        var lastUse: UInt64
+    }
+    /// An upscaled copy's raw texture, and the part of it the copy holds — the
+    /// whole texture, or the physical part of a foveated one — in its pixels.
+    private struct MfxOrigin {
+        let source: MTLTexture
+        let content: SIMD2<Float>
+    }
+    /// What the metrics panel says about the upscale (kl_metrics_note_upscale).
+    private struct MfxStats: Equatable {
+        var state: Int32 = 0          // 0 off, 1 on and linear, 2 upscaled
+        var note = ""                 // why linear, in a few words
+        var outW = 0, outH = 0        // the copy, in the picture's own (screen) pixels
+    }
+    private var mfxTargets: [String: MfxTarget] = [:]
+    /// This frame's swap, rebuilt every frame: raw texture -> upscaled copy.
+    private var mfxUpgraded: [ObjectIdentifier: MTLTexture] = [:]
+    /// ...and back: upscaled copy -> the raw texture it was made from. The
+    /// composite builds its grids against the raw texture's pixels normalised
+    /// to `content` (see unwarpGrid's `uvSize`) and the stats name the size the
+    /// game draws, not this one. This frame's only — keyed across frames, a
+    /// freed texture's identifier is the next one's.
+    private var mfxOrigin: [ObjectIdentifier: MfxOrigin] = [:]
+    /// The last fresh upscale and the guest frame it was built for. The
+    /// composite runs at display rate while a heavy guest only delivers 30-50
+    /// pictures a second: without this every repeat re-encodes the identical
+    /// upscale and the scaler's memory traffic contends with the guest's own
+    /// GPU. Holds every raw texture the frame looked at (`sources`), so their
+    /// identifiers cannot be reused while it is consulted.
+    private var mfxCache: (frame: UInt64, sources: [MTLTexture],
+                           upgraded: [ObjectIdentifier: MTLTexture],
+                           origin: [ObjectIdentifier: MfxOrigin], keys: [String],
+                           stats: MfxStats)?
+    private var mfxTick: UInt64 = 0
+    private var mfxLastShape = ""
+    private var mfxLastOn = false
+    private var mfxSaid = Set<String>()
+    private var mfxStats = MfxStats()
+    private lazy var mfxSupported = MTLFXSpatialScalerDescriptor.supportsDevice(device)
+    /// What the scaler is given. Others keep the linear path.
+    private static let mfxFormats: Set<MTLPixelFormat> = [
+        .rgba16Float, .rgba8Unorm, .rgba8Unorm_srgb, .bgra8Unorm, .bgra8Unorm_srgb,
+    ]
+    /// A copy nobody asked for in this many frames is dropped (a few seconds):
+    /// a swapchain re-created at another size, a toggle that stays off.
+    private static let mfxKeepTicks: UInt64 = 600
+    /// KL_METALFX_COLOR=hdr|linear|perceptual: one colour processing mode for
+    /// every format MetalFX allows it for, for A/B tests — unset, RGBA16F is
+    /// `.hdr` and the rest `.perceptual`. An sRGB format is always
+    /// `.perceptual` (see mfxMakeTarget). Read once; a copy made before keeps
+    /// its mode.
+    private static let mfxColorOverride: MTLFXSpatialScalerColorProcessingMode? = {
+        let v = ProcessInfo.processInfo.environment["KL_METALFX_COLOR"]?.lowercased() ?? ""
+        let mode: MTLFXSpatialScalerColorProcessingMode?
+        switch v {
+        case "": return nil
+        case "hdr": mode = .hdr
+        case "linear": mode = .linear
+        case "perceptual": mode = .perceptual
+        default: mode = nil
+        }
+        NSLog(mode != nil ? "[metalfx] colour processing \(v) for every format (KL_METALFX_COLOR)"
+                          : "[metalfx] KL_METALFX_COLOR=\(v) is not hdr, linear or perceptual — ignored")
+        return mode
+    }()
+    /// The projection layers' share of output pixels a frame, in full eyes.
+    private static let mfxLayerBudget = max(1, min(16, klEnvFloat("KL_METALFX_BUDGET", 4)))
+
+    /// Says once why a picture keeps the linear path, and gives the panel the
+    /// short form.
+    private func mfxSay(_ reason: String, short: String) {
+        if mfxStats.state != 2 { mfxStats.state = 1; mfxStats.note = short }
+        // Bounded: a reason that names sizes can come in many forms in a run.
+        guard mfxSaid.count < 64, mfxSaid.insert(reason).inserted else { return }
+        NSLog("[metalfx] linear path: \(reason)")
+    }
+
+    /// The part of `tex` the guest wrote, in its pixels: the whole texture, or
+    /// for one drawn through the display's rate map (the eye provider's, or a
+    /// mirrored layer's — a texture of the map's screen size) the map's
+    /// physical size, top left, two texels over for the rounding at its edge
+    /// as kl_glfb copies it. The unwarp grid maps the screen into exactly these
+    /// texels, so a copy of them alone loses nothing the composite reads.
+    private func mfxContent(_ tex: MTLTexture) -> SIMD2<Float> {
+        let whole = SIMD2<Float>(Float(tex.width), Float(tex.height))
+        guard let mp = kl_glfb_eye_rate_map(),
+              let rm = Unmanaged<AnyObject>.fromOpaque(mp).takeUnretainedValue()
+                  as? MTLRasterizationRateMap,
+              rm.screenSize.width == tex.width, rm.screenSize.height == tex.height else { return whole }
+        var pw = 0, ph = 0
+        for l in 0..<rm.layerCount {
+            let p = rm.physicalSize(layer: l)
+            pw = max(pw, p.width); ph = max(ph, p.height)
+        }
+        guard pw > 0, ph > 0 else { return whole }
+        return SIMD2<Float>(Float(min(tex.width, pw + 2)), Float(min(tex.height, ph + 2)))
+    }
+
+    /// One source, planned: where the scaler reads each slice from, which part
+    /// of it, and which copy it writes into. Nothing is encoded until every
+    /// source of its group has a plan — both eyes of the eye pass, or of one
+    /// layer, are upscaled or neither is.
+    private struct MfxPlan {
+        let source: MTLTexture
+        let input: (Int) -> MTLTexture?
+        let slices: [Int]
+        let content: (w: Int, h: Int)
+        let key: String
+        let out: (w: Int, h: Int)
+    }
+
+    private func mfxPlan(_ src: MTLTexture, slices: Set<Int>, key slot: String,
+                         rs: Float, fullW: Int, fullH: Int) -> MfxPlan? {
+        guard Self.mfxFormats.contains(src.pixelFormat) else {
+            mfxSay("texture format \(src.pixelFormat.rawValue)", short: "format"); return nil
+        }
+        guard src.usage.contains(.shaderRead), src.sampleCount == 1 else {
+            mfxSay("texture usage \(src.usage.rawValue), samples \(src.sampleCount)", short: "usage")
+            return nil
+        }
+        // The scaler reads one plain 2D texture a slice.
+        let input: (Int) -> MTLTexture?
+        if src.textureType == .type2DArray, src.parent == nil {
+            input = { s in
+                src.makeTextureView(pixelFormat: src.pixelFormat, textureType: .type2D,
+                                    levels: 0..<1, slices: s..<s + 1)
+            }
+        } else if src.textureType == .type2DArray, src.arrayLength == 1,
+                  let p = src.parent, p.textureType == .type2D, p.parent == nil,
+                  p.width == src.width, p.height == src.height,
+                  p.pixelFormat == src.pixelFormat, p.sampleCount == 1,
+                  src.parentRelativeLevel == 0, src.parentRelativeSlice == 0,
+                  p.usage.contains(.shaderRead) {
+            // `arrayView` of a texture per eye: read the texture itself.
+            input = { s in s == 0 ? p : nil }
+        } else {
+            mfxSay("texture type \(src.textureType.rawValue), parent "
+                   + "\(src.parent.map { "type \($0.textureType.rawValue)" } ?? "nil"), "
+                   + "\(src.arrayLength) slice(s)", short: "texture view")
+            return nil
+        }
+        let c = mfxContent(src)
+        let cw = Int(c.x), ch = Int(c.y)
+        // What the guest would have drawn at 100 %: the part it wrote over the
+        // scale it was started with — never more pixels than the eye that scale
+        // was taken from. The slider only takes away, so restoring more than
+        // 100 % invents pixels the game never drew — measured without a hold
+        // 5760x3696 (+31 % over the display), composite GPU 8.6 -> 34.8 ms and
+        // cadence 10 -> 21 ms. Held by AREA, uniformly: a texture the guest
+        // shaped otherwise (Doom 3's square, BONELAB's widened eye) keeps its
+        // shape and its aspect never distorts, where a box of the eye's own
+        // shape cut the long side short. Even, so a halved viewport stays whole.
+        func even(_ v: Double) -> Int { (Int(v + 0.5) + 1) & ~1 }
+        func evenDown(_ v: Double) -> Int { max(Int(v) & ~1, 2) }
+        var dstW = even(Double(cw) / Double(rs))
+        var dstH = even(Double(ch) / Double(rs))
+        let fullArea = Double(fullW) * Double(fullH)
+        if Double(dstW) * Double(dstH) > fullArea {
+            let k = (fullArea / (Double(dstW) * Double(dstH))).squareRoot()
+            dstW = evenDown(Double(dstW) * k)
+            dstH = evenDown(Double(dstH) * k)
+        }
+        guard dstW > cw, dstH > ch else {
+            mfxSay("texture \(src.width)x\(src.height) (written \(cw)x\(ch)) is already at the "
+                   + "full size \(fullW)x\(fullH)", short: "full size")
+            return nil
+        }
+        let slices = slices.filter { $0 >= 0 && $0 < src.arrayLength }.sorted()
+        guard !slices.isEmpty else { return nil }
+        let key = "\(slot) \(src.width)x\(src.height)x\(src.arrayLength) \(cw)x\(ch)->\(dstW)x\(dstH) "
+                  + "\(src.pixelFormat.rawValue)"
+        return MfxPlan(source: src, input: input, slices: slices, content: (cw, ch), key: key,
+                       out: (dstW, dstH))
+    }
+
+    /// The scaler first, then the copy with the usage the scaler asks for: its
+    /// output is written by MetalFX's own passes, and a texture without what
+    /// `outputTextureUsage` names is undefined on the GPU, not an error here.
+    private func mfxMakeTarget(_ src: MTLTexture, width: Int, height: Int) -> MfxTarget? {
+        let d = MTLFXSpatialScalerDescriptor()
+        d.colorTextureFormat = src.pixelFormat
+        d.outputTextureFormat = src.pixelFormat
+        // The whole texture: the part read is the encode's input content.
+        d.inputWidth = src.width; d.inputHeight = src.height
+        d.outputWidth = width; d.outputHeight = height
+        // An sRGB texture takes `.perceptual` and nothing else: MetalFX makes
+        // no scaler for an sRGB format with `.linear` or `.hdr` — nil, and an
+        // assertion under the API validation ("sRGB inputs or outputs not
+        // supported with non-perceptual color processing"). That was every
+        // GL guest with an sRGB eye (GL_SRGB8_ALPHA8, format 71): Beat Saber
+        // 1.45 on the headset, 2026-10-15, "no scaler for 4306x3454 ->
+        // 2386x2302 format 71" and the panel saying linear. Measured on a Mac
+        // (M4): 71 and 81 give a scaler only with `.perceptual`; 70 and 115
+        // with all three.
+        let srgb = src.pixelFormat == .rgba8Unorm_srgb || src.pixelFormat == .bgra8Unorm_srgb
+        switch src.pixelFormat {
+        case .rgba16Float: d.colorProcessingMode = .hdr
+        default: d.colorProcessingMode = .perceptual
+        }
+        if let forced = Self.mfxColorOverride {
+            if !srgb || forced == .perceptual { d.colorProcessingMode = forced }
+            else if mfxSaid.insert("color-srgb").inserted {
+                NSLog("[metalfx] KL_METALFX_COLOR does not apply to the sRGB format "
+                      + "\(src.pixelFormat.rawValue) — MetalFX takes only perceptual there")
+            }
+        }
+        guard let sc = d.makeSpatialScaler(device: device) else {
+            mfxSay("no scaler for \(src.width)x\(src.height) -> \(width)x\(height) "
+                   + "format \(src.pixelFormat.rawValue)", short: "no scaler")
+            return nil
+        }
+        guard src.usage.contains(sc.colorTextureUsage) else {
+            mfxSay("texture usage \(src.usage.rawValue) lacks what the scaler reads "
+                   + "with (\(sc.colorTextureUsage.rawValue))", short: "usage")
+            return nil
+        }
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type2DArray
+        desc.pixelFormat = src.pixelFormat
+        desc.width = width; desc.height = height
+        desc.arrayLength = src.arrayLength
+        desc.mipmapLevelCount = 1
+        desc.usage = sc.outputTextureUsage.union(.shaderRead)
+        desc.storageMode = .private
+        guard let t = device.makeTexture(descriptor: desc) else { return nil }
+        t.label = "klepton metalfx \(width)x\(height)"
+        var views: [MTLTexture] = []
+        for s in 0..<t.arrayLength {
+            guard let v = t.makeTextureView(pixelFormat: t.pixelFormat, textureType: .type2D,
+                                            levels: 0..<1, slices: s..<s + 1) else { return nil }
+            views.append(v)
+        }
+        return MfxTarget(texture: t, outViews: views, scaler: sc, lastUse: mfxTick)
+    }
+
+    /// Upscales this frame's pictures on `cmd` — the eye pass's eyes, or every
+    /// projection layer's — or leaves `mfxUpgraded` empty for what keeps the
+    /// linear path, which then composites exactly as before.
+    private func mfxPrepass(stage: Int, on cmd: any MTLCommandBuffer) {
+        mfxUpgraded = [:]
+        mfxOrigin = [:]
+        mfxTick &+= 1
+        if mfxTick % 120 == 0, !mfxTargets.isEmpty {
+            let before = mfxTargets.count
+            mfxTargets = mfxTargets.filter { mfxTick &- $0.value.lastUse < Self.mfxKeepTicks }
+            if mfxTargets.count != before {
+                NSLog("[metalfx] released \(before - mfxTargets.count) unused upscale target(s)")
+            }
+        }
+        let on = KleptonMetalFX.isOn
+        if on != mfxLastOn {
+            mfxLastOn = on
+            NSLog(on ? "[metalfx] on — next frames upscale to the full eye size"
+                       + (UserDefaults.standard.object(forKey: KleptonMetalFX.key) == nil
+                          ? " (on from the installation, \(KleptonMetalFX.installSwitch))" : "")
+                     : "[metalfx] off — linear path")
+            if !on {
+                // Off is off: the copies are hundreds of MiB at a large eye.
+                mfxTargets = [:]
+                mfxCache = nil
+                mfxLastShape = ""
+            }
+        }
+        mfxStats = MfxStats(state: on ? 1 : 0)
+        guard on else { return }
+        guard mfxSupported else {
+            mfxSay("MetalFX spatial scaling is not supported on this device", short: "unsupported")
+            return
+        }
+        guard kl_ovrp_eye_layer_live() != 0 else { mfxStats.note = "no picture"; return }
+        // The scale the guest's eye size was made with — not the stored
+        // setting, which the slider in the game changes at once while the
+        // guest keeps the size it was started with. An OpenXR guest is told the
+        // same size (klxr_EnumerateViewConfigurationViews), so this holds for
+        // its layers as for the eye.
+        var rs: Float = 1
+        var fullW: Int32 = 0, fullH: Int32 = 0
+        kl_ovrp_eye_texture_scale(&rs, &fullW, &fullH)
+        guard rs < 0.999, fullW > 0, fullH > 0 else {
+            mfxSay("the game was started at 100 % resolution", short: "100 %")
+            return
+        }
+
+        // The frame's sources in groups that go together: the eye pass is one
+        // group (its grid is built from slot 0 for both eyes), each projection
+        // layer another. Within a group, the distinct textures in eye order and
+        // the slices read of each: one for a shared 2-slice array, two for a
+        // texture per eye. A texture seen in an earlier group is not planned
+        // twice — the copy is keyed by the texture, not by who reads it.
+        typealias Source = (tex: MTLTexture, slices: Set<Int>)
+        var groups: [[Source]] = []
+        var seen: [ObjectIdentifier: (g: Int, i: Int)] = [:]
+        func add(_ tex: MTLTexture, slice: Int, to g: inout [Source], group: Int) {
+            if let at = seen[ObjectIdentifier(tex)] {
+                if at.g == group { g[at.i].slices.insert(slice) }
+                else { groups[at.g][at.i].slices.insert(slice) }
+                return
+            }
+            seen[ObjectIdentifier(tex)] = (group, g.count)
+            g.append((tex, [slice]))
+        }
+        let layered = projLayerCount > 0
+        if layered {
+            for i in 0..<min(projLayerCount, projLayers.count) {
+                let pl = projLayers[i]
+                var g: [Source] = []
+                for vi in 0..<2 {
+                    let slot = vi == 1 ? pl.slot.1 : pl.slot.0
+                    var slice: Int32 = 0
+                    guard slot >= 0, let t = kl_glfb_eye_mtl_texture(Int32(vi), slot, &slice) else { continue }
+                    // The same array view encodeProjLayers binds, so the swap finds it.
+                    let tex = arrayView(Unmanaged<MTLTexture>.fromOpaque(t).takeUnretainedValue() as MTLTexture)
+                    add(tex, slice: Int(slice), to: &g, group: groups.count)
+                }
+                if !g.isEmpty { groups.append(g) }
+            }
+        } else {
+            var g: [Source] = []
+            for eye in 0..<2 {
+                if let a = eyeSource(eye, stage) { add(a.texture, slice: a.slice, to: &g, group: 0) }
+            }
+            if !g.isEmpty { groups.append(g) }
+        }
+        guard !groups.isEmpty else { mfxStats.note = "no picture"; return }
+        let all = groups.flatMap { $0.map { $0.tex } }
+
+        // Same guest frame as the last prepass, looking at the same textures:
+        // they still hold the pictures the copies were made from. The same
+        // "same" the metrics panel uses for fresh vs repeated pictures (see the
+        // drawable loop).
+        let fence = kl_glfb_gpu_fence_value()
+        let frame = fence != 0 ? fence : kl_vulkan_frame_serial()
+        if frame != 0, let c = mfxCache, c.frame == frame, c.sources.count == all.count,
+           zip(c.sources, all).allSatisfy({ $0 === $1 }) {
+            mfxUpgraded = c.upgraded
+            mfxOrigin = c.origin
+            mfxStats = c.stats
+            for k in c.keys { mfxTargets[k]?.lastUse = mfxTick }
+            return
+        }
+        mfxCache = nil
+
+        let fullArea = Double(fullW) * Double(fullH)
+        var budget = layered ? fullArea * Double(Self.mfxLayerBudget) : .infinity
+        var keys: [String] = []
+        var shapes: [String] = []
+        for (gi, sources) in groups.enumerated() {
+            let name = layered ? "layer \(gi)" : "eye"
+            if !layered, sources.count > 1 {
+                let s0 = sources[0].tex
+                guard sources.dropFirst().allSatisfy({ $0.tex.width == s0.width && $0.tex.height == s0.height }) else {
+                    mfxSay("the eyes' textures differ in size", short: "eye sizes"); continue
+                }
+            }
+            var plans: [MfxPlan] = []
+            for (slot, s) in sources.enumerated() {
+                guard let p = mfxPlan(s.tex, slices: s.slices,
+                                      key: layered ? "l\(gi).\(slot)" : "e\(slot)", rs: rs,
+                                      fullW: Int(fullW), fullH: Int(fullH)) else { break }
+                plans.append(p)
+            }
+            guard plans.count == sources.count else { continue }
+            // The layers' budget: a layer whose copies would take the frame past
+            // it stays linear, and the ones after it may still fit.
+            let cost = plans.reduce(0.0) { $0 + Double($1.out.w) * Double($1.out.h) * Double($1.slices.count) }
+            if cost > budget {
+                mfxSay("\(name): \(Int(cost / 1e6)) MP of copies is past the budget of "
+                       + "\(Self.mfxLayerBudget) full eyes a frame (KL_METALFX_BUDGET)", short: "budget")
+                continue
+            }
+            // Targets and inputs before anything is encoded, for the all-or-nothing.
+            var inputs: [[MTLTexture]] = []
+            var ok = true
+            for p in plans {
+                if mfxTargets[p.key] == nil {
+                    guard let t = mfxMakeTarget(p.source, width: p.out.w, height: p.out.h) else { ok = false; break }
+                    mfxTargets[p.key] = t
+                }
+                var row: [MTLTexture] = []
+                for s in p.slices {
+                    guard let v = p.input(s) else {
+                        mfxSay("no input view of slice \(s)", short: "texture view"); ok = false; break
+                    }
+                    row.append(v)
+                }
+                if !ok { break }
+                inputs.append(row)
+            }
+            guard ok else { continue }
+            budget -= cost
+            for (p, row) in zip(plans, inputs) {
+                guard var t = mfxTargets[p.key] else { continue }
+                for (s, input) in zip(p.slices, row) where s < t.outViews.count {
+                    t.scaler.colorTexture = input
+                    t.scaler.inputContentWidth = p.content.w
+                    t.scaler.inputContentHeight = p.content.h
+                    t.scaler.outputTexture = t.outViews[s]
+                    t.scaler.encode(commandBuffer: cmd)
+                }
+                t.lastUse = mfxTick
+                mfxTargets[p.key] = t
+                keys.append(p.key)
+                mfxUpgraded[ObjectIdentifier(p.source)] = t.texture
+                mfxOrigin[ObjectIdentifier(t.texture)] =
+                    MfxOrigin(source: p.source, content: SIMD2<Float>(Float(p.content.w), Float(p.content.h)))
+                if mfxStats.state != 2 {
+                    // The first picture upscaled is the one the panel names: the
+                    // eye, or the backdrop layer. In the picture's own pixels —
+                    // for a foveated one the screen size the copy stands for.
+                    mfxStats = MfxStats(state: 2, note: "",
+                                        outW: Int((Double(p.out.w) * Double(p.source.width) / Double(p.content.w)).rounded()),
+                                        outH: Int((Double(p.out.h) * Double(p.source.height) / Double(p.content.h)).rounded()))
+                }
+                shapes.append("\(name) \(p.content.w)x\(p.content.h)"
+                              + (p.content.w != p.source.width || p.content.h != p.source.height
+                                 ? " of \(p.source.width)x\(p.source.height)" : "")
+                              + "->\(p.out.w)x\(p.out.h)")
+            }
+        }
+        let shape = shapes.joined(separator: ", ")
+        if !shape.isEmpty, shape != mfxLastShape {
+            mfxLastShape = shape
+            NSLog("[metalfx] upscaling \(shape) (render scale \(rs), full eye \(fullW)x\(fullH))")
+        }
+        if frame != 0 { mfxCache = (frame, all, mfxUpgraded, mfxOrigin, keys, mfxStats) }
+    }
+
+    /// The panel's picture rows, said to kl_metrics when they change: the size
+    /// the game draws (the eye, or the first projection layer — the backdrop),
+    /// the way it comes, and the upscale.
+    private var statsPicture = (w: 0, h: 0, path: "", mfx: MfxStats())
+    private func noteStatsPicture(stage: Int) {
+        guard kl_ovrp_eye_layer_live() != 0 else { return }
+        let gfx = kl_vulkan_guest_active() != 0 ? "Vulkan" : "GL"
+        var tex: MTLTexture? = nil
+        var path = ""
+        if projLayerCount > 0 {
+            for i in 0..<min(projLayerCount, projLayers.count) where tex == nil {
+                let pl = projLayers[i]
+                var slice: Int32 = 0
+                if pl.slot.0 >= 0, let t = kl_glfb_eye_mtl_texture(0, pl.slot.0, &slice) {
+                    tex = Unmanaged<MTLTexture>.fromOpaque(t).takeUnretainedValue() as MTLTexture
+                }
+            }
+            path = "OpenXR \(gfx) · \(projLayerCount) layer\(projLayerCount == 1 ? "" : "s")"
+        } else if let a0 = eyeSource(0, stage) {
+            tex = a0.texture
+            let a1 = eyeSource(1, stage)
+            path = "\(gfx) · " + (a1.map { $0.texture === a0.texture } ?? true ? "array" : "per eye")
+        }
+        guard let tex else { return }
+        if mfxContent(tex) != SIMD2<Float>(Float(tex.width), Float(tex.height)) { path += " · foveated" }
+        guard tex.width != statsPicture.w || tex.height != statsPicture.h
+              || path != statsPicture.path || mfxStats != statsPicture.mfx else { return }
+        statsPicture = (tex.width, tex.height, path, mfxStats)
+        kl_metrics_note_eye(Int32(tex.width), Int32(tex.height))
+        kl_metrics_note_upscale(mfxStats.state, Int32(mfxStats.outW), Int32(mfxStats.outH),
+                                path, mfxStats.note)
+    }
+
     /// One drawable, every eye it carries. Returns how many eyes got a picture.
     ///
     /// **Both eyes go through ONE render pass now, and that is what foveation
@@ -2334,6 +2838,9 @@ final class KleptonCompositor {
                                  cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                                  rendered: kl_ovrp_render_pose, haveRendered: Bool,
                                  originFromHead: simd_float4x4) -> Int {
+        // MetalFX prepass: small pictures up to the full eye size before sampling.
+        mfxPrepass(stage: stage, on: cmd)
+        noteStatsPicture(stage: stage)
         // KL_CP_AMPLIFY=0 — back to ONE RENDER PASS PER EYE, selecting the
         // slice on the attachment, with no rate map and no amplification.
         //
@@ -2482,7 +2989,10 @@ final class KleptonCompositor {
         var visible = 0
         for vi in viewIndices {
             let view = drawable.views[vi]
-            let a = eyeSource(vi, stage)
+            var a = eyeSource(vi, stage)
+            if let au = a, let up = mfxUpgraded[ObjectIdentifier(au.texture)] {
+                a = EyeAllocation(texture: up, slice: au.slice, flipY: au.flipY)
+            }
             // No eye texture yet — the guest is still in _begin, or it has not
             // reached ovrp_SetupEyeTexture2 for this stage. The pass still runs,
             // because the clear above is the point: a drawable that is presented
@@ -2607,7 +3117,6 @@ final class KleptonCompositor {
         // the overlay pass below is then the entire composite rather than a
         // decoration on top of one.
         if nproj == 0, visible > 0, let bind0, let bind1 {
-            noteStatsEye(bind0)
             if !loggedEyeTextures {
                 loggedEyeTextures = true
                 NSLog("[cp] eye textures: slot0 \(bind0.width)x\(bind0.height) "
@@ -2701,9 +3210,16 @@ final class KleptonCompositor {
             // and its rate map, and the two eyes agree on both — a guest that
             // rendered them at different sizes would already be failing the
             // viewport arithmetic below.
+            //
+            // MetalFX: the bound texture may be the upscaled copy. The grid is
+            // then built against the raw texture the guest's rects and rate map
+            // describe, normalised to the part of it the copy holds — the same
+            // texture coordinates are the same scene point in the copy.
+            let gridOrigin = mfxOrigin[ObjectIdentifier(bind0)]
             let (gridBuf, gridVerts, gridPerEye) =
-                unwarpGrid(bind0, viewport0: vp0, viewport1: vp1, viewportOf: vpOf,
-                           topLeft: uniforms.first(where: { $0.visible != 0 })?.flip_y ?? 0 != 0)
+                unwarpGrid(gridOrigin?.source ?? bind0, viewport0: vp0, viewport1: vp1, viewportOf: vpOf,
+                           topLeft: uniforms.first(where: { $0.visible != 0 })?.flip_y ?? 0 != 0,
+                           uvSize: gridOrigin?.content)
             // ...and which block each view reads. Assigned here rather than passed
             // to kl_reproject_build above because the decision needs the eye
             // texture, which is not known until the loop that builds the uniforms
@@ -2791,6 +3307,10 @@ final class KleptonCompositor {
                     // nothing with no error at all.
                     tex = arrayView(Unmanaged<MTLTexture>.fromOpaque(t)
                                         .takeUnretainedValue() as MTLTexture)
+                    // MetalFX: this frame's upscaled copy of it, where there is
+                    // one (mfxPrepass). The layer's rect is a fraction of the
+                    // texture, so it holds for the copy unchanged.
+                    if let raw = tex, let up = mfxUpgraded[ObjectIdentifier(raw)] { tex = up }
                 }
                 var u = withUnsafePointer(to: pl) {
                     kl_proj_layer_build($0, Int32(vi), originFromHead,
@@ -2843,12 +3363,16 @@ final class KleptonCompositor {
             // 2026-10-08). The map says which textures: only one of its own
             // screen size was drawn through it. A layer that is also cropped is
             // not handled here; none of the mirrored guests does both.
+            // Asked of the raw texture: an upscaled copy is not the map's size,
+            // and holds only the physical part (MfxOrigin.content).
+            let origin0 = mfxOrigin[ObjectIdentifier(bind0)]
+            let raw0 = origin0?.source ?? bind0
             var foveated = false
             if let mp = kl_glfb_eye_rate_map(),
                let rm = Unmanaged<AnyObject>.fromOpaque(mp).takeUnretainedValue()
                    as? MTLRasterizationRateMap {
-                foveated = rm.screenSize.width == bind0.width
-                    && rm.screenSize.height == bind0.height
+                foveated = rm.screenSize.width == raw0.width
+                    && rm.screenSize.height == raw0.height
             }
             // The unwarp grid is ONE block shared by both eyes unless the guest's
             // map has a curve per eye (unwarpGrid's third answer), where this
@@ -2861,8 +3385,8 @@ final class KleptonCompositor {
             // 2026-10-12, the first build with a curve per eye).
             var unwarp: (MTLBuffer?, Int, Bool)? = nil
             if foveated {
-                unwarp = unwarpGrid(bind0, viewport0: .zero, viewport1: .zero, viewportOf: .zero,
-                                    topLeft: false)
+                unwarp = unwarpGrid(raw0, viewport0: .zero, viewport1: .zero, viewportOf: .zero,
+                                    topLeft: false, uvSize: origin0?.content)
                 if unwarp?.2 != true {
                     for n in uniforms.indices { uniforms[n].grid_eye = 0 }
                 }
@@ -3230,6 +3754,13 @@ final class KleptonCompositor {
                 s.memUsedMB = Int(m.mem_used_mb); s.memLeftMB = Int(m.mem_left_mb)
                 s.thermal = ProcessInfo.processInfo.thermalState.rawValue
                 s.eyeW = Int(m.eye_w); s.eyeH = Int(m.eye_h)
+                s.upscale = Int(m.upscale); s.outW = Int(m.out_w); s.outH = Int(m.out_h)
+                s.path = withUnsafeBytes(of: &m.path) {
+                    String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
+                }
+                s.upscaleNote = withUnsafeBytes(of: &m.upscale_note) {
+                    String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
+                }
                 samples.append(s)
                 if samples.count > KLMetricsPanel.history { samples.removeFirst(samples.count - KLMetricsPanel.history) }
             }
@@ -3251,14 +3782,6 @@ final class KleptonCompositor {
         statsTimer = timer
         NSLog("[cp] metrics %@ in the view (KL_STATS_CARD), refreshed once a second",
               mode == .panel ? "panel" : "line")
-    }
-
-    private var statsEye = (w: 0, h: 0)
-    /// The eye picture this frame reads, for the panel's "Picture" row.
-    private func noteStatsEye(_ t: MTLTexture) {
-        guard t.width != statsEye.w || t.height != statsEye.h else { return }
-        statsEye = (t.width, t.height)
-        kl_metrics_note_eye(Int32(t.width), Int32(t.height))
     }
 
     private func encodeStatsCard(_ enc: MTLRenderCommandEncoder,
@@ -3985,6 +4508,7 @@ final class KleptonCompositor {
     private var gridBuffer: MTLBuffer?
     private var gridMap: UnsafeMutableRawPointer?
     private var gridTexW = -1, gridTexH = -1
+    private var gridUV = SIMD2<Float>(-1, -1)
     private var gridVertexCount = 0
     private var gridViewport: SIMD4<Float> = .zero
     /// Eye 1's rect, and whether the built grid carries a block for it. Part of
@@ -4025,9 +4549,15 @@ final class KleptonCompositor {
                             viewport0: SIMD4<Float>,
                             viewport1: SIMD4<Float>,
                             viewportOf: SIMD2<Float>,
-                            topLeft: Bool) -> (MTLBuffer?, Int, Bool) {
+                            topLeft: Bool,
+                            uvSize: SIMD2<Float>? = nil) -> (MTLBuffer?, Int, Bool) {
         let map = kl_glfb_eye_rate_map()
         let tw = source?.width ?? 0, th = source?.height ?? 0
+        // What a texture coordinate of 1 is, in `source`'s pixels: the whole
+        // texture, or the part a MetalFX copy holds (mfxPrepass) — the copy is
+        // sampled in place of `source`, and its 0..1 spans only that part.
+        let uw = uvSize.map { Float($0.x) } ?? Float(tw)
+        let uh = uvSize.map { Float($0.y) } ?? Float(th)
         // A viewport that IS the whole texture is not a crop, and keeping it as
         // .zero means an unscaled title never leaves the pre-existing path.
         //
@@ -4103,8 +4633,9 @@ final class KleptonCompositor {
         let croppedR = vpR.z > 0 && vpR.w > 0
         let eyes: UInt32 = perEye ? 2 : 1
         if gridBuffer == nil || map != gridMap || tw != gridTexW || th != gridTexH
-            || vp != gridViewport || vpR != gridViewportR {
+            || vp != gridViewport || vpR != gridViewportR || uw != gridUV.x || uh != gridUV.y {
             gridMap = map; gridTexW = tw; gridTexH = th
+            gridUV = SIMD2<Float>(uw, uh)
             gridViewport = vp; gridViewportR = vpR
             var nx: UInt32 = 1, ny: UInt32 = 1
             if let map, tw > 0, th > 0,
@@ -4141,7 +4672,7 @@ final class KleptonCompositor {
                             kl_reproject_grid_build_eye(buf.baseAddress, UInt32(e), nx, ny,
                                                         croppedEye[e] ? r.baseAddress : nil,
                                                         Float(scr.width), Float(scr.height),
-                                                        Float(tw), Float(th),
+                                                        uw, uh,
                                                         layered && e == 1
                                                             ? Self.screenToPhysicalLayer1
                                                             : Self.screenToPhysical, map)
@@ -4174,7 +4705,7 @@ final class KleptonCompositor {
                             kl_reproject_grid_build_eye(buf.baseAddress, UInt32(e), 1, 1,
                                                         croppedEye[e] ? r.baseAddress : nil,
                                                         Float(tw), Float(th),
-                                                        Float(tw), Float(th), nil, nil)
+                                                        uw, uh, nil, nil)
                         }
                     }
                 }

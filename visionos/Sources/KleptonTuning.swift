@@ -439,6 +439,46 @@ final class KleptonRendering: ObservableObject {
     }
 }
 
+// The guest renders small (the Render resolution slider); the LINEAR stretch
+// to the eye texture is then replaced by Apple's spatial scaler: same pixels
+// in, sharper picture out. Single frame in/out, no motion data.
+// Read live in the compositor, so the switch applies to the next frame.
+// "Never chosen" means what the installation started with: off, unless the
+// installer named KL_METALFX_UPSCALE among the switches it wants on
+// (KLEPTON_TEST_ON, KLTestOn in Info.plist — AVP Play's experimental setting
+// "MetalFX"). A choice made here then stays, the way a Test switch's does.
+final class KleptonMetalFX: ObservableObject {
+    static let shared = KleptonMetalFX()
+
+    static let key = "klepton.metalfxUpscale"
+    /// The name an installation switches this on from the start with.
+    static let installSwitch = "KL_METALFX_UPSCALE"
+
+    /// On from the installation (KleptonTestSwitches.onFromInstall).
+    static var onFromInstall: Bool { KleptonTestSwitches.onFromInstall.contains(installSwitch) }
+
+    /// What the compositor reads every frame: the choice made in the game, else
+    /// what the installation started with.
+    static var isOn: Bool {
+        (UserDefaults.standard.object(forKey: key) as? Bool) ?? onFromInstall
+    }
+
+    @Published var enabled: Bool {
+        didSet {
+            // Stored only where it differs from what the installation starts
+            // with (KleptonTestSwitches.set), so a switch put back follows a
+            // later installation that starts it differently.
+            if enabled == Self.onFromInstall { UserDefaults.standard.removeObject(forKey: Self.key) }
+            else { UserDefaults.standard.set(enabled, forKey: Self.key) }
+            NSLog("[metalfx] spatial upscale: \(enabled ? "on" : "off")")
+        }
+    }
+
+    private init() {
+        enabled = Self.isOn
+    }
+}
+
 /// "Record what the game waits for": the runtime's account of blocked threads
 /// (KL_TRACE_CONDDUMP — kl_pthread_stuck_diag has what it writes), as a switch
 /// a player can turn on for a game that stops in a loading screen. Off unless
@@ -704,6 +744,7 @@ extension KleptonRendering {
 
 struct RenderingView: View {
     @ObservedObject private var rendering = KleptonRendering.shared
+    @ObservedObject private var metalfx = KleptonMetalFX.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -745,6 +786,15 @@ struct RenderingView: View {
                  + "halves the rate head movement is corrected at. Takes "
                  + "effect the next time the app starts.")
                 .font(.caption).foregroundStyle(.secondary)
+            Toggle("MetalFX upscaling", isOn: $metalfx.enabled)
+            Text(klT("Sharpens the picture when the resolution the game was started with is below 100%: the game draws small and Apple's scaler stretches it to eye size instead of a plain linear stretch. Costs some graphics time. Switching takes effect on the next frame; a new resolution only with the next start. Works in every game: Vulkan and GL, through Meta's interface or OpenXR, with foveated rendering too. The metrics panel shows whether it is upscaling.",
+                     "Schärft das Bild, wenn die Auflösung, mit der das Spiel gestartet wurde, unter 100 % liegt: Das Spiel zeichnet klein, und Apples Scaler streckt es auf Augengröße statt einer einfachen linearen Streckung. Kostet etwas Grafikzeit. Das Umschalten wirkt ab dem nächsten Bild, eine neue Auflösung erst beim nächsten Start. Wirkt in jedem Spiel: Vulkan und GL, über Metas Schnittstelle oder OpenXR, auch mit Foveated Rendering. Ob hochskaliert wird, zeigt das Leistungs-Panel."))
+                .font(.caption).foregroundStyle(.secondary)
+            if KleptonMetalFX.onFromInstall {
+                Text(klT("On from the start in this installation: AVP Play's experimental setting asked for it.",
+                         "In dieser Installation von Anfang an eingeschaltet: Die experimentelle Einstellung von AVP Play hat es so verlangt."))
+                    .font(.caption).foregroundStyle(.orange)
+            }
         }
     }
 }

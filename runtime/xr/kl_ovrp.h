@@ -743,6 +743,13 @@ void kl_ovrp_set_eye_texture_size(int w, int h);
 // overrides it.
 void kl_ovrp_set_render_scale_default(float s);
 void kl_ovrp_eye_texture_size(int *w, int *h);
+// The render scale the CURRENT eye size carries (1.0 until
+// kl_ovrp_set_eye_texture_size has applied one) and the size it was taken
+// from — after the cap, before the scale and KL_OVRP_EYE_ALIGN. What the
+// compositor's MetalFX upscale restores to: the stored "Render resolution"
+// can be moved in the game at any time, but the guest keeps rendering at the
+// scale it was started with, so the setting is not the answer and this is.
+void kl_ovrp_eye_texture_scale(float *rs, int *full_w, int *full_h);
 // The same size reshaped for the cone the guest is actually TOLD. They differ
 // only under KL_OVRP_UNIFY_FRUSTUM, where both eyes get the union of the two
 // cones: that cone is wider than the one the display sized its texture for

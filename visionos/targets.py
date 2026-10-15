@@ -1227,6 +1227,34 @@ def bundle_for(name):
     return f"{scope}.{ident}" if scope else ident
 
 
+# The name the headset shows under the icon (CFBundleDisplayName), for EVERY
+# target — the rows above and the generic one alike. A parallel copy of a game
+# beside the one already installed (a test build next to the player's own, with
+# KLEPTON_BUNDLE_ID set so it is a second app rather than a replacement) needs a
+# name of its own, or the two icons cannot be told apart.
+#
+#     KLEPTON_DISPLAY_OVERRIDE=<name>   the whole name, over the row's (and over
+#                                       KLEPTON_GENERIC_DISPLAY / the launcher's)
+#     KLEPTON_DISPLAY_SUFFIX=<text>     appended to whatever name that leaves,
+#                                       e.g. " (Test)" -> "Beat Saber (Test)"
+#
+# KLEPTON_DISPLAY_NAME is the older spelling of the override (gen_xcodeproj.py
+# read it on its own) and still works; KLEPTON_DISPLAY_OVERRIDE wins over it.
+# Unset or empty, both leave the name exactly as the row has it. Non-printable
+# characters are dropped, as for the generic display; a name that strips to
+# nothing falls back to `base`.
+def display_for(base):
+    import os
+    override = (os.environ.get("KLEPTON_DISPLAY_OVERRIDE", "")
+                or os.environ.get("KLEPTON_DISPLAY_NAME", ""))
+    suffix = os.environ.get("KLEPTON_DISPLAY_SUFFIX", "")
+    if not override and not suffix:
+        return base
+    clean = lambda v: "".join(c for c in v if c.isprintable())
+    name = clean(override).strip() or base
+    return (name + clean(suffix)).strip() or base
+
+
 def _follow_unpacked_build(t):
     """The data panel's OBB name and store ids are a property of the BUILD.
 
@@ -1267,6 +1295,7 @@ def resolve(name):
     t = dict(TARGETS[name])
     t["name"] = name
     t["bundle"] = bundle_for(name)
+    t["display"] = display_for(t["display"])
     # The DEFAULTS only: the settings panel, KL_HAND_MATTING and KL_VRR still
     # decide. Both are what a player wants from a game they just installed:
     #

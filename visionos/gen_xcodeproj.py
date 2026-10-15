@@ -219,6 +219,25 @@ import os as _os
 TEST_ON = ",".join(n for n in re.split(r"[,\s]+", os.environ.get("KLEPTON_TEST_ON", ""))
                    if re.fullmatch(r"KL_[A-Z0-9_]{1,60}", n))
 
+# The render scale an installer wants the game to START at (KLEPTON_RENDER_SCALE,
+# a fraction such as 0.75; AVP Play sets it with its MetalFX switch). It replaces
+# the target's own default (targets.py "render_scale") as KLRenderScaleDefault, so
+# a choice made in the game still wins. Unset: the target's, as before. Anything
+# that is not a number in 0.5..1.0 (the range KleptonTuning's targetRenderScale
+# accepts; outside it the bundle would quietly start at 1.0) is said and ignored.
+RENDER_SCALE = float(KLT["render_scale"])
+_rs_env = os.environ.get("KLEPTON_RENDER_SCALE", "").strip()
+if _rs_env:
+    try:
+        _rs = float(_rs_env)
+    except ValueError:
+        _rs = None
+    if _rs is not None and 0.5 <= _rs <= 1.0:
+        RENDER_SCALE = _rs
+    else:
+        print(f"gen_xcodeproj: KLEPTON_RENDER_SCALE={_rs_env!r} is not a fraction in 0.5..1.0 "
+              f"- the target's {RENDER_SCALE:.2f} stays", file=sys.stderr)
+
 # Compile-time launcher opt-in (also drives LAUNCHER_COND + the display name below).
 _launcher_on = _os.environ.get("KL_CUSTOM_LAUNCHER", "").strip().lower() in ("1", "true", "yes", "on")
 # NB: the bundle id is deliberately NOT switched by the launcher flag. It is a SIGNING
@@ -252,8 +271,9 @@ ASSETCATALOG_SETTING = ((f"\t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = \"{_icon
                         # value carries '=' and ','.
                         + f"\t\t\t\tKL_GAMEPAD_MAP = \"{KLT['gamepad_map']}\";\n"
                         # ...and its render-scale default (targets.py
-                        # "render_scale"), KLRenderScaleDefault in Info.plist.
-                        + f"\t\t\t\tKL_RENDER_SCALE_DEFAULT = {float(KLT['render_scale']):.2f};\n"
+                        # "render_scale", or KLEPTON_RENDER_SCALE above),
+                        # KLRenderScaleDefault in Info.plist.
+                        + f"\t\t\t\tKL_RENDER_SCALE_DEFAULT = {RENDER_SCALE:.2f};\n"
                         # ...and whether in-game video is tried by default
                         # (targets.py "video"), KLVideoDefault in Info.plist.
                         + f"\t\t\t\tKL_VIDEO_DEFAULT = {1 if KLT['video'] else 0};\n"
@@ -438,12 +458,18 @@ fwchildren = "\n".join(f'\t\t\t\t{g["ref"]},' for g in guest)
 # the project-level DEBUG condition.
 # With the launcher on, the game builds present a compact trademark-free name; every
 # other build (and every other target) keeps its normal display name from targets.py.
+# KLT['display'] has already been through targets.display_for (the
+# KLEPTON_DISPLAY_OVERRIDE / KLEPTON_DISPLAY_SUFFIX overrides — a second install
+# of the same target beside the first needs a name of its own on the headset);
+# the launcher's compact name takes the same overrides, so an override still
+# wins over it and a suffix is still appended to it.
 _launcher_display = {"hl1": "HL1VR", "hl2": "HL2VR", "portal": "P1VR"}
-_display = (_launcher_display.get(KLT['name'], KLT['display']) if _launcher_on
+_display = (targets_mod.display_for(_launcher_display[KLT['name']])
+            if _launcher_on and KLT['name'] in _launcher_display
             else KLT['display'])
-# A second install of the same target beside the first (the Steam build of a game
-# that is also there from the Meta Store) needs a name of its own on the headset.
-_display = os.environ.get("KLEPTON_DISPLAY_NAME") or _display
+# Inside a quoted pbxproj string: a quote or backslash in an override would end
+# the string early and leave the project unparseable.
+_display = _display.replace("\\", "\\\\").replace('"', '\\"')
 # Trailing newline, glued at line-start to the next setting — the same shape as
 # ENTITLEMENTS_SETTING / ASSETCATALOG_SETTING above, so it lands on its own line in
 # the output and expands to nothing (no blank line) when the flag is off.

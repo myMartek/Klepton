@@ -1359,6 +1359,16 @@ void kl_ovrp_set_render_scale_default(float s) {
 // The cap the size below was held to, for klovrp_fill_eye_desc (KL_OVRP_EYE_DESC_CAP).
 static int g_eye_cap;
 
+// What g_eye_w/h were made of: the size after the cap and the render scale
+// applied to it (kl_ovrp_eye_texture_scale). 0 / 1.0 until a frontend sets one.
+// Written where the display's size is pushed and read by the compositor every
+// frame and by the guest's threads, elsewhere — under their own lock, together
+// with g_eye_w/h, so a reader gets one answer (a size with the scale and the
+// size it was taken from), never a torn mix. Only ever held for the copies.
+static pthread_mutex_t g_eye_scale_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_eye_full_w, g_eye_full_h;
+static float g_eye_rs = 1.0f;
+
 // KL_OVRP_EYE_ALIGN=<n> (1 = off): each axis of the eye size is rounded DOWN to a multiple of n, last of all.
 // Unreal quantizes its scene buffers UP to a multiple of 4, and every foveation match in kl_vulkan.c compares
 // extents exactly: Moss drew a 3840x2468 scene for a 3840x2465 eye, and kl_fove left its eye pass unmarked
@@ -1522,12 +1532,23 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
     // halves cleanly.
     float rs = kl_env_float("KL_OVRP_RENDER_SCALE", g_render_scale_default);
     if (!(rs >= 0.2f && rs <= 1.0f)) rs = 1.0f;   // the same floor as the setter's
+    const int full_w = w, full_h = h;
     if (rs < 1.0f) {
         w = ((int)((float)w * rs + 0.5f) + 1) & ~1;
         h = ((int)((float)h * rs + 0.5f) + 1) & ~1;
     }
     klovrp_eye_align(&w, &h);
-    if (w == g_eye_w && h == g_eye_h) return;
+    // One write for all five: a call that lands on the same size still says
+    // what that size was made of (kl_ovrp_eye_texture_scale).
+    pthread_mutex_lock(&g_eye_scale_mu);
+    const int was_w = g_eye_w, was_h = g_eye_h;
+    g_eye_full_w = full_w;
+    g_eye_full_h = full_h;
+    g_eye_rs = rs;
+    g_eye_w = w;
+    g_eye_h = h;
+    pthread_mutex_unlock(&g_eye_scale_mu);
+    if (w == was_w && h == was_h) return;
 
     // Logged every change, not once: each one costs the guest a swapchain
     // rebuild, and how many of those happen is the question. The MiB figure is
@@ -1536,20 +1557,30 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
     fprintf(stderr, "  [ovrp] eye texture size %dx%d -> %dx%d; the display asked "
                     "for %dx%d (scale %.2f, cap %d, render scale %.2f). %.0f MiB "
                     "of swapchain, before Unity's own ~1.2x\n",
-            g_eye_w, g_eye_h, w, h, req_w, req_h, scale, cap, rs, mib);
-    g_eye_w = w;
-    g_eye_h = h;
+            was_w, was_h, w, h, req_w, req_h, scale, cap, rs, mib);
 }
 
 void kl_ovrp_eye_texture_size(int *w, int *h) {
+    pthread_mutex_lock(&g_eye_scale_mu);
     if (w) *w = g_eye_w;
     if (h) *h = g_eye_h;
+    pthread_mutex_unlock(&g_eye_scale_mu);
+}
+
+void kl_ovrp_eye_texture_scale(float *rs, int *full_w, int *full_h) {
+    pthread_mutex_lock(&g_eye_scale_mu);
+    if (rs) *rs = g_eye_rs;
+    if (full_w) *full_w = g_eye_full_w;
+    if (full_h) *full_h = g_eye_full_h;
+    pthread_mutex_unlock(&g_eye_scale_mu);
 }
 
 // Packed return: width in the low 32 bits, height in the high (0x9bce58).
 static uint64_t klovrp_GetEyeTextureSize(void) {
     ovrp_hit("ovrp_GetEyeTextureSize");
-    return (uint64_t)(uint32_t)g_eye_w | ((uint64_t)(uint32_t)g_eye_h << 32);
+    int w = 0, h = 0;
+    kl_ovrp_eye_texture_size(&w, &h);
+    return (uint64_t)(uint32_t)w | ((uint64_t)(uint32_t)h << 32);
 }
 
 int kl_ovrp_stage_count(void);
@@ -1694,7 +1725,9 @@ void kl_ovrp_eye_display_tangents(int eye, float tan[4]) {
     memcpy(tan, raw, 4 * sizeof(float));
 }
 void kl_ovrp_eye_texture_size_for_cone(int *w, int *h) {
-    int ew = g_eye_w, eh = g_eye_h;
+    int sw = 0, sh = 0;                                         // one snapshot, under the lock
+    kl_ovrp_eye_texture_size(&sw, &sh);
+    int ew = sw, eh = sh;
     const float *forced = klovrp_forced_tan();
     const float *raw = forced ? forced : &g_eye_tan[0][0];      // eye 0, as measured
     const float *told = klovrp_eye_tan(0);                      // ...and as told
@@ -1708,8 +1741,8 @@ void kl_ovrp_eye_texture_size_for_cone(int *w, int *h) {
         static int said;
         if (!said++)
             fprintf(stderr, "  [ovrp] eye texture narrowed with the capped cone: %dx%d -> "
-                            "%dx%d (%.0f%% of the pixels, same density)\n", g_eye_w, g_eye_h,
-                    ew, eh, (double)(100.0f * (float)ew * (float)eh / ((float)g_eye_w * (float)g_eye_h)));
+                            "%dx%d (%.0f%% of the pixels, same density)\n", sw, sh,
+                    ew, eh, (double)(100.0f * (float)ew * (float)eh / ((float)sw * (float)sh)));
     } else
     if (wr > 0.01f && wt > wr * 1.01f) {
         float k = sqrtf(wt / wr);
@@ -1719,7 +1752,7 @@ void kl_ovrp_eye_texture_size_for_cone(int *w, int *h) {
         if (!said++)
             fprintf(stderr, "  [ovrp] eye texture reshaped for the unified cone: %dx%d -> "
                             "%dx%d (same area, %.0f%% wider cone)\n",
-                    g_eye_w, g_eye_h, ew, eh, (double)((wt / wr - 1.0f) * 100.0f));
+                    sw, sh, ew, eh, (double)((wt / wr - 1.0f) * 100.0f));
     }
     if (w) *w = ew;
     if (h) *h = eh;

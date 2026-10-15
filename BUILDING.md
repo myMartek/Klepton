@@ -56,6 +56,19 @@ The bundle id is set to `$USER.dev.klepton.target.<target>` in order to avoid co
 Set `KLEPTON_BUNDLE_SCOPE` to use something else instead of `$USER`, or `KLEPTON_BUNDLE_ID` 
 to override the the whole id.
 
+The name under the icon comes from the target's row in `visionos/targets.py`.
+`KLEPTON_DISPLAY_OVERRIDE` replaces it (for every target, generic ones included),
+and `KLEPTON_DISPLAY_SUFFIX` is appended to whatever name that leaves. Together
+with `KLEPTON_BUNDLE_ID`, that installs a test copy next to the one you already have:
+
+```sh
+KLEPTON_BUNDLE_ID=$USER.dev.klepton.target.beatsaber140.test \
+KLEPTON_DISPLAY_SUFFIX=" (Test)" \
+  ./build_run_vpro.sh beatsaber140      # -> "Beat Saber (Test)"
+```
+
+If neither is set, or both are empty, the name stays exactly as it is now.
+
 ---
 
 ## Guest applications
