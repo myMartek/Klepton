@@ -1504,9 +1504,12 @@ final class KleptonControllers {
         // A tap is passed on after the button is up again, with the bits it had.
         for h in 0...1 where state[h].pill != 0 { pillBits[h] = state[h].pill }
         var passL: Int32 = 0, passR: Int32 = 0
-        kl_metrics_chord(state[0].fromController && state[0].pill != 0 ? 1 : 0,
-                         state[1].fromController && state[1].pill != 0 ? 1 : 0,
-                         ProcessInfo.processInfo.systemUptime, &passL, &passR)
+        let chord = kl_metrics_chord(state[0].fromController && state[0].pill != 0 ? 1 : 0,
+                                     state[1].fromController && state[1].pill != 0 ? 1 : 0,
+                                     ProcessInfo.processInfo.systemUptime, &passL, &passR)
+        // A tap of the two together with the panel shown: a test build switches XR head prediction
+        // (KleptonXRPredict); a player's build does nothing with it, as before.
+        if chord == 2 && KleptonTestBuild.on { KleptonXRPredict.toggle() }
         for h in 0...1 where state[h].fromController {
             let pill = (h == 0 ? passL : passR) != 0 ? pillBits[h] : 0
             state[h].buttons = state[h].otherButtons | pill

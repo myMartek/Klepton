@@ -54,12 +54,15 @@ static int near(float v, float want) { return fabsf(v - want) <= want * 0.1f; }
 // was switched.
 typedef struct { double from, to; } span;
 static double g_clock = 100.0;
+static int g_taps;                      // the polls that ended a tap of the two together (kl_metrics_chord's 2)
 static void hold(span l, span r, double seconds, double *passed_l, double *passed_r, int *switched) {
-    *passed_l = *passed_r = 0; *switched = 0;
+    *passed_l = *passed_r = 0; *switched = 0; g_taps = 0;
     for (int i = 0; i < (int)(seconds * 100 + 0.5); i++) {
         double t = i / 100.0;
         int pl = 0, pr = 0;
-        *switched += kl_metrics_chord(t >= l.from && t < l.to, t >= r.from && t < r.to, g_clock, &pl, &pr);
+        int got = kl_metrics_chord(t >= l.from && t < l.to, t >= r.from && t < r.to, g_clock, &pl, &pr);
+        if (got == 1) (*switched)++;
+        else if (got == 2) g_taps++;
         if (pl) *passed_l += 0.01;
         if (pr) *passed_r += 0.01;
         g_clock += 0.01;
@@ -87,20 +90,28 @@ static int chord(void) {
     // game hears of neither — not while they are held and not as they are let go one after the other.
     hold((span){ 0.10, 1.60 }, (span){ 0.18, 1.90 }, 3.0, &pl, &pr, &sw);
     CHECK(sw == 1 && kl_metrics_visible() == 0, "both held 1.4 s: %d switch(es), visible %d", sw, kl_metrics_visible());
+    CHECK(g_taps == 0, "a hold that switched the panel was also taken for a tap");
+    // A tap of the two while the panel is hidden is nothing at all: no switch, no tap, nothing for the game.
+    hold((span){ 0.10, 0.30 }, (span){ 0.12, 0.30 }, 1.0, &pl, &pr, &sw);
+    CHECK(sw == 0 && g_taps == 0 && pl == 0 && pr == 0, "a tap of both with the panel hidden: %d switch(es), "
+          "%d tap(s), passed %.2f/%.2f", sw, g_taps, pl, pr);
     CHECK(pl == 0 && pr == 0, "both held: the game was passed the left for %.2f s and the right for %.2f s", pl, pr);
     // The same again brings it back.
     hold((span){ 0.10, 1.40 }, (span){ 0.10, 1.40 }, 2.0, &pl, &pr, &sw);
     CHECK(sw == 1 && kl_metrics_visible() == 1 && pl == 0 && pr == 0, "both held again: %d switch(es), visible %d", sw,
           kl_metrics_visible());
 
-    // Both for half a second is neither: nothing is switched and nothing reaches the game.
+    // Both for half a second does not switch the panel and nothing reaches the game; with the panel shown it
+    // is a tap of the two together, said once (a test build switches XR head prediction on it).
     hold((span){ 0.10, 0.60 }, (span){ 0.10, 0.60 }, 1.5, &pl, &pr, &sw);
     CHECK(sw == 0 && pl == 0 && pr == 0 && kl_metrics_visible() == 1, "both for 0.5 s: %d switch(es), passed %.2f/%.2f",
           sw, pl, pr);
+    CHECK(g_taps == 1, "both for 0.5 s with the panel shown: %d tap(s), not one", g_taps);
     // Together for 0.6 s, one let go and pressed again: that is not a second held together.
     hold((span){ 0.10, 2.00 }, (span){ 0.10, 0.70 }, 1.0, &pl, &pr, &sw);
     hold((span){ 0.00, 1.00 }, (span){ 0.00, 0.80 }, 2.0, &pl, &pr, &sw);
     CHECK(sw == 0 && kl_metrics_visible() == 1, "a hold with a gap in it switched the panel");
+    CHECK(g_taps == 0, "a hold of nearly two seconds with a gap in it was taken for a tap");
     printf("  the two menu buttons: alone they are the game's, together for a second they switch the panel\n");
     return 0;
 }

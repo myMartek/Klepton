@@ -56,8 +56,11 @@ unsigned kl_metrics_latest(kl_metrics *out);
 // press is to reach the game. A press is held back for a quarter of a second to
 // see whether the other one follows (a shorter tap is played afterwards), and
 // while both are down neither reaches the game, so the game's own menu does not
-// open with the panel. Returns 1 on the poll that switched the panel. One
-// caller, one thread.
+// open with the panel. Returns 1 on the poll that switched the panel, and 2 on
+// the poll that ended a TAP of the two together (both up again within the
+// second, nothing switched) while the panel was shown — which the panel itself does
+// nothing with: a test build switches XR head prediction on it
+// (kl_openxr_set_predict). 0 otherwise. One caller, one thread.
 int kl_metrics_chord(int left_down, int right_down, double now_s, int *pass_left, int *pass_right);
 // Whether the panel is to be drawn. It is not until someone says so: the
 // game's setting at its start, or the two buttons.

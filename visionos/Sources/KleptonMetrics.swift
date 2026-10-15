@@ -37,6 +37,10 @@ struct KLMetricsSample {
     var memLeftMB = -1
     var thermal = -1               // ProcessInfo.ThermalState's raw value, 0 nominal .. 3 critical
     var eyeW = 0, eyeH = 0
+    /// Test builds only: XR head prediction (kl_openxr_predict) — -1 not shown,
+    /// 0 off, 1 on — and whether the game asks for it at all (an OpenXR game).
+    var xrPredict = -1
+    var xrPredictUsed = false
 }
 
 enum KLMetricsPanel {
@@ -166,6 +170,9 @@ enum KLMetricsPanel {
         let left: CGFloat = 28, right: CGFloat = 404
         // How to get rid of it, and back: the two menu buttons of the Sense controllers (kl_metrics_chord).
         text(ctx, "Hold Create + Options 1 s to hide", x: left, y: h - 22, font: font(21), color: dim)
+        // A test build's tap of the two (KleptonXRPredict), on the line above.
+        let testLine = samples.last.map { $0.xrPredict >= 0 } ?? false
+        if testLine { text(ctx, "Tap both: XR predict on / off", x: left, y: h - 50, font: font(21), color: dim) }
         // Shown for the first time, before its first second is over.
         guard let now = samples.last else {
             text(ctx, "Measuring …", x: left, y: 112, font: font(56, bold: true), color: bright)
@@ -207,11 +214,20 @@ enum KLMetricsPanel {
             rows.append(("Heat", t, now.thermal >= 3 ? red : now.thermal == 2 ? amber : bright))
         }
         if now.eyeW > 0 { rows.append(("Picture", "\(now.eyeW) × \(now.eyeH)", bright)) }
-        var y: CGFloat = 164
+        if now.xrPredict >= 0 {
+            // Off is the A/B half, in amber so it is not left that way by mistake; "no OpenXR" where the
+            // game never asks, so a switch that changes nothing does not look as if it did.
+            rows.append(("XR predict", (now.xrPredict != 0 ? "on" : "off") + (now.xrPredictUsed ? "" : " · no OpenXR"),
+                         !now.xrPredictUsed ? dim : now.xrPredict != 0 ? green : amber))
+        }
+        // Rows as far down as the footer allows, closer together where there are more of them than fit.
+        let firstRow: CGFloat = 164, lastRow = h - (testLine ? 84 : 56)
+        let step = rows.count > 1 ? min(41, (lastRow - firstRow) / CGFloat(rows.count - 1)) : 41
+        var y = firstRow
         for (label, value, color) in rows {
             text(ctx, label, x: left, y: y, font: font(27), color: dim)
             text(ctx, value, x: right, y: y, font: font(27, bold: true), color: color, align: .right)
-            y += 41
+            y += step
         }
 
         // The graphs: a minute each, the newest second at the right.

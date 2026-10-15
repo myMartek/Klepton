@@ -1774,6 +1774,10 @@ typedef struct {
     int64_t  predict_time;
     int      predict_valid;
     float    predict_q[4], predict_p[3];
+    // Whether frame predict_on_frame predicts (kl_openxr_set_predict): 0 not
+    // latched yet, 1 off, 2 on. Under g_predict_mu.
+    uint64_t predict_on_frame;
+    int      predict_on;
     // KL_XR_POSE_TRACE: the head this frame was answered with, per entry
     // point, so "the guest draws from one head and declares another" is a
     // measurement rather than a reading of the guest's source. Indexed by
@@ -2988,7 +2992,50 @@ typedef struct { int valid; float q[4], p[3]; } klxr_head_delta;
 //      older than the one already cached is returned to its caller but not
 //      published, so a thread descheduled across a frame boundary cannot roll
 //      the cache back.
+//
+// The prediction can be switched off and on while the game runs
+// (kl_openxr_set_predict — the metrics panel of a test build). The request is
+// an atomic, and it is LATCHED per frame under g_predict_mu: the first entry
+// point to ask about a new frame decides for the whole frame, so a switch
+// arriving mid-frame cannot leave xrLocateSpace predicted and xrLocateViews
+// not. The request is read BEFORE the lock (its first read is the
+// environment's), and under it there is only the latch, so g_predict_mu stays
+// a leaf.
 static pthread_mutex_t g_predict_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int g_predict_want = -1;        // -1 until read from KL_XR_PREDICT
+static _Atomic int g_predict_used;
+
+int kl_openxr_predict(void) {
+    int on = atomic_load(&g_predict_want);
+    if (on >= 0) return on;
+    int from_env = kl_env_on("KL_XR_PREDICT", 1) ? 1 : 0;
+    // Two first readers read the same environment; whichever stores, it is that.
+    atomic_compare_exchange_strong(&g_predict_want, &on, from_env);
+    return atomic_load(&g_predict_want);
+}
+
+void kl_openxr_set_predict(int on) {
+    on = on != 0;
+    (void)kl_openxr_predict();                 // the environment's value first, so the log says what changed
+    int was = atomic_exchange(&g_predict_want, on);
+    if (was != on)
+        fprintf(stderr, "  [xr] head prediction switched %s (from the next frame)\n", on ? "ON" : "OFF");
+}
+
+int kl_openxr_predict_used(void) { return atomic_load(&g_predict_used); }
+
+// Whether `frame` predicts, given what is asked for now (`want`, read before
+// the lock). Under g_predict_mu. Kept in the session beside the cache, so a new
+// session — whose frame count starts over — latches afresh. A frame older than
+// the latched one (a thread descheduled across the boundary) gets the newer
+// frame's answer rather than rolling the latch back.
+static int klxr_predict_on_locked(klxr_session *s, uint64_t frame, int want) {
+    if (!s->predict_on || frame > s->predict_on_frame) {
+        s->predict_on = want ? 2 : 1;
+        s->predict_on_frame = frame;
+    }
+    return s->predict_on == 2;
+}
 
 // The cached entry for (frame, instant) into `d`, if that is what is cached.
 // Under g_predict_mu.
@@ -3003,19 +3050,21 @@ static int klxr_predict_lookup_locked(const klxr_session *s, uint64_t frame,
 
 static klxr_head_delta klxr_frame_head_delta(klxr_session *s, int64_t display_time) {
     klxr_head_delta d = { 0, {0, 0, 0, 1}, {0, 0, 0} };
-    static int predict_on = -1;
-    if (predict_on < 0) predict_on = kl_env_on("KL_XR_PREDICT", 1);
     // A displayTime of 0 is the guest saying it has no frame in flight (JKXR's
     // recentre path locates spaces before its first xrWaitFrame). There is no
     // instant to predict to, so the latched head is the whole answer.
-    if (!predict_on || !s || display_time <= 0) return d;
+    if (!s || display_time <= 0) return d;
+    if (!atomic_load_explicit(&g_predict_used, memory_order_relaxed))
+        atomic_store(&g_predict_used, 1);
+    int want = kl_openxr_predict();            // outside the lock: it may read the environment
     // The key is fixed once, here: the prediction below is FOR this frame,
     // even if xrWaitFrame advances the counter while it runs.
     uint64_t frame = __atomic_load_n(&s->frames_waited, __ATOMIC_RELAXED);
     pthread_mutex_lock(&g_predict_mu);
-    int hit = klxr_predict_lookup_locked(s, frame, display_time, &d);
+    int on = klxr_predict_on_locked(s, frame, want);
+    int hit = on && klxr_predict_lookup_locked(s, frame, display_time, &d);
     pthread_mutex_unlock(&g_predict_mu);
-    if (hit) return d;
+    if (!on || hit) return d;
 
     klxr_head_delta mine = d;
     mine.valid = kl_ovrp_head_predict_delta(
@@ -8583,6 +8632,36 @@ int kl_openxr_space_selftest(FILE *f) {
         fprintf(f, "  %s two threads racing on one instant get one head\n",
                 same ? "ok  " : "FAIL");
         ok &= same;
+
+        // Switched while the game runs (kl_openxr_set_predict): from the next
+        // frame, and never inside one — a frame that has answered predicted
+        // keeps answering predicted, or its two entry points would disagree.
+        kl_ovrp_set_head_at(klxr_st_head_at);
+        int was = kl_openxr_predict();
+        kl_openxr_set_predict(1);
+        klxr_session ts;
+        memset(&ts, 0, sizeof ts);
+        ts.frames_waited = 1;
+        int64_t t1 = klxr_now() + 8000000LL;
+        klxr_head_delta a = klxr_frame_head_delta(&ts, t1);
+        kl_openxr_set_predict(0);
+        klxr_head_delta b = klxr_frame_head_delta(&ts, t1);
+        klxr_head_delta b2 = klxr_frame_head_delta(&ts, t1 + 1000000LL);
+        int held = a.valid && b.valid && b2.valid && memcmp(a.q, b.q, sizeof a.q) == 0;
+        fprintf(f, "  %s switching prediction off mid-frame leaves that frame "
+                   "predicted\n", held ? "ok  " : "FAIL");
+        ok &= held;
+        ts.frames_waited = 2;
+        klxr_head_delta c = klxr_frame_head_delta(&ts, t1 + 11000000LL);
+        int off = !c.valid;
+        fprintf(f, "  %s ...and the next frame answers the latched head\n", off ? "ok  " : "FAIL");
+        ok &= off;
+        kl_openxr_set_predict(1);
+        ts.frames_waited = 3;
+        klxr_head_delta e = klxr_frame_head_delta(&ts, t1 + 22000000LL);
+        fprintf(f, "  %s ...and switched back on, predicts again\n", e.valid ? "ok  " : "FAIL");
+        ok &= e.valid;
+        kl_openxr_set_predict(was);
         kl_ovrp_set_head_at(NULL);
     }
 

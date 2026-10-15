@@ -2187,6 +2187,19 @@ The composite/timewarp pass — one file, compiled by both compositors
   existed, which makes it the A/B for any motion artefact that appeared with it.
   No host frontend publishes a tracker at all, so on host this knob does
   nothing and every pose is the latched head.
+  **Switched live in a test build:** with the metrics panel shown (hold Create +
+  Options 1 s), a short tap of Create + Options together switches prediction
+  off and on without a relaunch; the panel's `XR predict` row says which it is
+  (`· no OpenXR` where the game never asks). A switch applies from the next
+  `xrWaitFrame`, never inside a frame (`kl_openxr_set_predict`). It is not
+  stored: each start begins at this variable's value. A player's build has
+  neither the row nor the tap. A build is a test build when it was generated
+  with `KLEPTON_DISPLAY_SUFFIX` or `KLEPTON_DISPLAY_OVERRIDE`, a
+  `KLEPTON_BUNDLE_ID` ending in `-test`, `KL_TEST_BUILD` in `KLEPTON_TEST_ON`,
+  or `KLEPTON_TEST_BUILD=1` (baked as `KLTestBuild` in Info.plist), or when it
+  is launched with `KL_TEST_BUILD=1` or a non-empty `KLEPTON_TEST_ON`. A bundle
+  id of its own or the experimental switches alone do not make one: AVP Play
+  sets those for players too.
 - `KL_XR_POSE_TRACE=1` — once a second, the head each pose entry point answered
   with this frame and the head the guest actually submitted, differenced
   pairwise (worst degrees and metres over the second) with a count of the frames

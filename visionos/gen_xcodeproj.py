@@ -199,6 +199,25 @@ import os as _os
 TEST_ON = ",".join(n for n in re.split(r"[,\s]+", os.environ.get("KLEPTON_TEST_ON", ""))
                    if re.fullmatch(r"KL_[A-Z0-9_]{1,60}", n))
 
+# Whether this is a TEST build — a copy beside the real game, for trying
+# something on the headset — and not what a player has (KL_TEST_BUILD below,
+# KLTestBuild in Info.plist, KleptonTestBuild in KleptonTuning.swift). Only
+# what a tester's command line sets counts: a name of its own
+# (KLEPTON_DISPLAY_SUFFIX / _OVERRIDE — `avpplay install --display-suffix`), a
+# bundle id ending in "-test" (testing.md's convention for a test copy),
+# KL_TEST_BUILD among KLEPTON_TEST_ON, or KLEPTON_TEST_BUILD=1. Deliberately NOT
+# any bundle id that differs from the target's, nor a non-empty KLEPTON_TEST_ON:
+# AVP Play sets the first for every install (a team's own prefix) and the
+# second for a player who chose its experimental switches.
+_bundle_test = re.search(r"[-.]test$", BUNDLE_ID or "", re.I) is not None and BUNDLE_ID != KLT["bundle"]
+TEST_BUILD = (os.environ.get("KLEPTON_TEST_BUILD", "").strip().lower() in ("1", "true", "yes", "on")
+              or bool(os.environ.get("KLEPTON_DISPLAY_SUFFIX", "").strip())
+              or bool(os.environ.get("KLEPTON_DISPLAY_OVERRIDE", "").strip())
+              or _bundle_test
+              or "KL_TEST_BUILD" in TEST_ON.split(","))
+if TEST_BUILD:
+    print("gen_xcodeproj: test build (KLTestBuild=1): tester-only controls are in it", file=sys.stderr)
+
 # Compile-time launcher opt-in (also drives LAUNCHER_COND + the display name below).
 _launcher_on = _os.environ.get("KL_CUSTOM_LAUNCHER", "").strip().lower() in ("1", "true", "yes", "on")
 # NB: the bundle id is deliberately NOT switched by the launcher flag. It is a SIGNING
@@ -273,6 +292,9 @@ ASSETCATALOG_SETTING = ((f"\t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = \"{_icon
                         # someone who wants a change that is built in but off
                         # in every game at once, without a visit to each.
                         + f"\t\t\t\tKL_TEST_ON = \"{TEST_ON}\";\n"
+                        # ...and whether it is a test build (TEST_BUILD above;
+                        # KLTestBuild in Info.plist).
+                        + f"\t\t\t\tKL_TEST_BUILD = {1 if TEST_BUILD else 0};\n"
                         # ...and what KleptonGameData.swift reads: which files
                         # this build's guest needs and the store ids to fetch
                         # them by. KL_DATA_TREE is empty for a target without the

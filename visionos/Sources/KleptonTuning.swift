@@ -455,6 +455,45 @@ enum KleptonDiagnostics {
     }
 }
 
+/// Whether this is a test build — a copy installed beside the real game to try
+/// something on the headset — rather than what a player has. What only a tester
+/// is to see or switch asks this, and in a player's build it is not there at all.
+///
+/// Baked in at build time (KLTestBuild in Info.plist, from gen_xcodeproj.py):
+/// a test copy is the one with a name of its own (KLEPTON_DISPLAY_SUFFIX or
+/// _OVERRIDE, which only the command line sets), a bundle id ending in "-test",
+/// KL_TEST_BUILD among KLEPTON_TEST_ON, or KLEPTON_TEST_BUILD=1. Not merely a
+/// bundle id of its own or any KLEPTON_TEST_ON: AVP Play sets the first for
+/// every install and the second for a player who chose the experimental
+/// switches. Or on the launch line, for a run from Xcode or devicectl:
+/// KL_TEST_BUILD=1, or KLEPTON_TEST_ON with anything in it (an installer's
+/// variable, so nothing a player's launch carries).
+enum KleptonTestBuild {
+    static let on: Bool = {
+        let baked = (Bundle.main.object(forInfoDictionaryKey: "KLTestBuild") as? String) == "1"
+        let env = ProcessInfo.processInfo.environment
+        let launched = klEnvOn("KL_TEST_BUILD", default: false)
+            || !(env["KLEPTON_TEST_ON"] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        if baked || launched {
+            NSLog("[app] test build (%@): tester-only controls are on",
+                  baked ? "KLTestBuild in Info.plist" : "launch environment")
+        }
+        return baked || launched
+    }()
+}
+
+/// XR head prediction (KL_XR_PREDICT), switched while the game runs — test
+/// builds only. A tap of Create and Options together while the metrics panel
+/// is shown switches it (kl_metrics_chord's 2, KleptonControllers), and the
+/// panel says which it is. The starting value is KL_XR_PREDICT's; the switch is
+/// not stored, so the next start is the environment's again.
+enum KleptonXRPredict {
+    static func toggle() {
+        guard KleptonTestBuild.on else { return }
+        kl_openxr_set_predict(kl_openxr_predict() != 0 ? 0 : 1)
+    }
+}
+
 /// Behaviour that is in the runtime but not yet the default: each entry is one
 /// environment switch, off unless chosen, so a change taken over from another
 /// fork can be tried on the headset without a build per trial. The group is in

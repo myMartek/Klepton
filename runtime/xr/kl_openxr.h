@@ -161,4 +161,21 @@ void kl_openxr_set_grip_tune(float grip_pitch_deg, float aim_pitch_deg,
 void kl_openxr_grip_tune(float *grip_pitch_deg, float *aim_pitch_deg,
                          float pivot[3], float pos[3]);
 
+// Head prediction (KL_XR_PREDICT), switched LIVE — the A/B for a motion
+// artefact without a relaunch between the two halves of it. The environment
+// sets the starting value, so a run nobody switches behaves exactly as before.
+//
+// A switch takes effect at the next xrWaitFrame, never inside a frame: every
+// pose entry point answers one (frame, instant) with one head, and a frame half
+// predicted and half not would be the very swim the prediction cache exists to
+// prevent. Lock-free on this side (an atomic store), so any thread may call it.
+// Only the visionOS app's test builds offer it (the metrics panel).
+void kl_openxr_set_predict(int on);
+// What the next frame will do: 1 predicts, 0 answers the latched head.
+int  kl_openxr_predict(void);
+// Whether a guest has asked a pose entry point for an instant at all — whether
+// the switch above changes anything in this game. 0 for a guest that is not on
+// OpenXR (or has not drawn a frame yet).
+int  kl_openxr_predict_used(void);
+
 #endif

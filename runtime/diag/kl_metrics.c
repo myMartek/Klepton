@@ -83,6 +83,7 @@ enum { kIdle, kPending, kPassing, kTap, kChord };
 static struct { int phase; double t; } g_pill[2];
 static double g_chord_since;
 static int g_chord_spent;                  // switched already, or one of the two was let go
+static int g_chord_switched;               // this chord switched the panel
 static _Atomic int g_visible;
 
 void kl_metrics_set_visible(int visible) { g_visible = visible != 0; }
@@ -93,9 +94,9 @@ int kl_metrics_chord(int left_down, int right_down, double now, int *pass_left, 
     if (down[0] && down[1]) {
         if (g_pill[0].phase != kChord) {
             g_pill[0].phase = g_pill[1].phase = kChord;
-            g_chord_since = now; g_chord_spent = 0;
+            g_chord_since = now; g_chord_spent = 0; g_chord_switched = 0;
         } else if (!g_chord_spent && now - g_chord_since >= KL_PILL_CHORD_S) {
-            g_chord_spent = 1;
+            g_chord_spent = g_chord_switched = 1;
             int visible = !g_visible;
             g_visible = visible;
             switched = 1;
@@ -103,7 +104,12 @@ int kl_metrics_chord(int left_down, int right_down, double now, int *pass_left, 
         }
     } else if (g_pill[0].phase == kChord) {
         g_chord_spent = 1;                 // held together means without a gap
-        if (!down[0] && !down[1]) g_pill[0].phase = g_pill[1].phase = kIdle;
+        if (!down[0] && !down[1]) {
+            g_pill[0].phase = g_pill[1].phase = kIdle;
+            // Both up again within the second, and nothing switched: a tap of the two together. Said
+            // only while the panel is there to show what it did.
+            if (!g_chord_switched && now - g_chord_since < KL_PILL_CHORD_S && g_visible) switched = 2;
+        }
     }
     for (int h = 0; h < 2; h++) {
         switch (g_pill[h].phase) {

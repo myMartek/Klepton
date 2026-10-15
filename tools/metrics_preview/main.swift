@@ -4,6 +4,8 @@
 //
 //   make metrics-preview            build/metrics-panel.png, build/metrics-line.png
 //   build/metrics_preview 12 out    12 samples, out-panel.png / out-line.png
+//
+// Also out-panel-test.png: the panel a test build shows, with the XR predict row.
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -48,6 +50,14 @@ let out = CommandLine.arguments.last!
 let p = KLMetricsPanel.makeContext(w: 480, h: 240, units: KLMetricsPanel.panelLayout.w)!
 KLMetricsPanel.drawPanel(p, samples: samples)
 write(p, out + "-panel.png")
+// A test build's: XR head prediction switched off in an OpenXR game, at full size.
+var test = samples
+test[test.count - 1].xrPredict = 0
+test[test.count - 1].xrPredictUsed = true
+let t = KLMetricsPanel.makeContext(w: KLMetricsPanel.panelPixels.w, h: KLMetricsPanel.panelPixels.h,
+                                   units: KLMetricsPanel.panelLayout.w)!
+KLMetricsPanel.drawPanel(t, samples: test)
+write(t, out + "-panel-test.png")
 let l = KLMetricsPanel.makeContext(w: KLMetricsPanel.linePixels.w, h: KLMetricsPanel.linePixels.h)!
 KLMetricsPanel.drawLine(l, sample: samples.last!)
 write(l, out + "-line.png")
