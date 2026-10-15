@@ -20,6 +20,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
@@ -33,6 +34,7 @@ static _Atomic unsigned long long g_shown, g_fresh, g_stale, g_frames;
 static _Atomic int g_eye_w, g_eye_h;
 static struct { double gpu_s; unsigned long n; } g_comp;     // under g_mu
 static kl_metrics g_now;                                     // under g_mu
+static struct { int state, w, h; char path[40], note[24]; } g_up = { .state = -1 };  // under g_mu
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
 void kl_metrics_begin(void) {
@@ -57,6 +59,14 @@ void kl_metrics_note_composite(double gpu_seconds) {
 }
 
 void kl_metrics_note_eye(int w, int h) { g_eye_w = w; g_eye_h = h; }
+
+void kl_metrics_note_upscale(int state, int out_w, int out_h, const char *path, const char *note) {
+    pthread_mutex_lock(&g_mu);
+    g_up.state = state; g_up.w = out_w; g_up.h = out_h;
+    snprintf(g_up.path, sizeof g_up.path, "%s", path ? path : "");
+    snprintf(g_up.note, sizeof g_up.note, "%s", note ? note : "");
+    pthread_mutex_unlock(&g_mu);
+}
 void kl_metrics_note_game_frame(void) { g_frames++; }
 
 unsigned kl_metrics_latest(kl_metrics *out) {
@@ -211,6 +221,9 @@ int kl_metrics_tick(void) {
     }
     m.eye_w = g_eye_w; m.eye_h = g_eye_h;
     pthread_mutex_lock(&g_mu);
+    m.upscale = g_up.state; m.out_w = g_up.w; m.out_h = g_up.h;
+    memcpy(m.path, g_up.path, sizeof m.path);
+    memcpy(m.upscale_note, g_up.note, sizeof m.upscale_note);
     m.seq = g_now.seq + 1;
     g_now = m;
     pthread_mutex_unlock(&g_mu);

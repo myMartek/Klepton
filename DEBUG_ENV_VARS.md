@@ -3811,7 +3811,13 @@ audio path that has shipped: both are linked in, and
   | (thread name) | the busiest thread's share of one core — the one a CPU-bound game waits for |
   | Memory | footprint, and what is left before the system's limit |
   | Heat | the system's thermal state |
-  | Picture | the eye picture the compositor reads, in pixels |
+  | Render | the picture the game draws, in pixels: the eye texture, or the first projection layer's (the backdrop) |
+  | MetalFX | the upscale (`KleptonMetalFX`): **on** (green) when this frame was upscaled, **off**, or **linear · <why>** (amber) when it is on and the picture keeps the linear stretch — `100 %`, `budget`, `format`, `texture view`, … (`[metalfx] linear path:` in the log says it in full) |
+  | Path | how the picture comes: the engine (`Vulkan`, `GL`), `OpenXR … · n layers` or the eye pass's `array` / `per eye`, and `foveated` for a GL eye drawn through the display's rate map |
+  | Output | the size after the upscale, in the picture's own pixels (for a foveated eye the screen size the copy stands for); only while it upscales |
+
+  The column closes up when it has more than nine rows, and a value too long
+  for its row is set smaller.
 
   Graphs: frames a second against the display rate; GPU load and the busiest
   thread; shaders a second, as a bar for every second that had any, the compiled
@@ -3852,3 +3858,14 @@ audio path that has shipped: both are linked in, and
   automatically when installing". The compositor's `[metalfx] on` line then
   ends in `(on from the installation, KL_METALFX_UPSCALE)`; each place it
   keeps the linear path is said once as `[metalfx] linear path: <reason>`.
+  Every path is upscaled: the eye pass (a shared 2-slice array, a texture per
+  eye), a GL eye drawn through the display's rate map (only its physical
+  part, the grid normalised to it), and every projection layer of an OpenXR
+  guest, each eye from its own texture. `[metalfx] upscaling <what>` names
+  each copy when the arrangement changes. The metrics panel (`KL_STATS_CARD`)
+  shows *Render* (the size the game draws), *MetalFX* (on / off / linear and
+  why), *Path* (engine and composite path) and *Output* (the size after it).
+- `KL_METALFX_BUDGET=<full eyes>` — the projection layers' share of MetalFX
+  output a frame, in full eye pictures (1..16, default 4). A layer whose
+  copies would go past it is drawn linear and said once (`budget` on the
+  panel); the eye pass has no budget.

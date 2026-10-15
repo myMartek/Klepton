@@ -40,7 +40,9 @@ for i in 0..<count {
     s.memUsedMB = 3180 + i * 3
     s.memLeftMB = 1840 - i * 3
     s.thermal = i < 40 ? 0 : 1
-    s.eyeW = 3072; s.eyeH = 2880
+    s.eyeW = 2688; s.eyeH = 2160
+    s.upscale = 2; s.outW = 3584; s.outH = 2880
+    s.path = "OpenXR Vulkan · 3 layers"
     samples.append(s)
 }
 let out = CommandLine.arguments.last!

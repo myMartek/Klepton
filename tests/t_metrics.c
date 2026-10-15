@@ -114,6 +114,7 @@ int main(void) {
 
     kl_metrics_begin();
     kl_metrics_note_eye(3072, 2880);
+    kl_metrics_note_upscale(2, 4096, 3840, "Vulkan \xc2\xb7 per eye", NULL);
     pthread_t tc, tb;
     pthread_create(&tc, NULL, compositor, NULL);
     pthread_create(&tb, NULL, busy, NULL);
@@ -145,6 +146,10 @@ int main(void) {
           m.cpu_top);
     CHECK(m.mem_used_mb > 0, "the footprint is missing");
     CHECK(m.eye_w == 3072 && m.eye_h == 2880, "the eye size is %dx%d", m.eye_w, m.eye_h);
+    CHECK(m.upscale == 2 && m.out_w == 4096 && m.out_h == 3840, "the upscale is %d to %dx%d", m.upscale, m.out_w,
+          m.out_h);
+    CHECK(strcmp(m.path, "Vulkan \xc2\xb7 per eye") == 0 && m.upscale_note[0] == 0, "the path is \"%s\", the note \"%s\"",
+          m.path, m.upscale_note);
     // No command buffer was committed here: the GPU, where there is one to count on, did nothing for us.
     CHECK(m.gpu_busy <= 0.001f, "no command buffer was committed and the GPU reads %.3f busy", m.gpu_busy);
     CHECK(m.compiles == 0 && m.compiles_cached == 0, "no shader was asked for and the sample says %.1f compiled, "
