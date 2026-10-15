@@ -745,6 +745,9 @@ int kl_ovrp_title_eye_cap(const char *target);
 // number of pixels replaces it, KL_OVRP_EYE_NATIVE takes the display's whole
 // request. Call before kl_ovrp_set_eye_texture_size; KL_OVRP_EYE_MAX wins.
 #define KL_OVRP_EYE_NATIVE (-1)
+// The eye layer's final size for the guest's own scale (ovrp_CalculateEyeLayerDesc*),
+// after KL_OVRP_EYE_DESC_CAP: what the swapchain really is.
+void kl_ovrp_eye_desc_size(float texture_scale, int *w, int *h);
 void kl_ovrp_set_eye_max_choice(int px);
 // The fraction of that size the guest is actually told, 0.4..1.0, applied after
 // the cap. Call before kl_ovrp_set_eye_texture_size; KL_OVRP_RENDER_SCALE

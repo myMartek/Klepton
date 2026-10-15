@@ -8125,11 +8125,9 @@ static int klovrp_spacewarp_tex(void) {
     }
     return v;
 }
-static void klovrp_fill_eye_desc(ovrp_layer_desc_eyefov *d, int layout,
-                                 int mip_levels, int sample_count, int format,
-                                 int depth_format, int mv_format,
-                                 int mv_depth_format,
-                                 int layer_flags, float texture_scale) {
+// The eye layer's size as the guest ends up allocating it: the offered size times the guest's own
+// scale, held to the cap where KL_OVRP_EYE_DESC_CAP is on (below). Exposed for the tests.
+void kl_ovrp_eye_desc_size(float texture_scale, int *out_w, int *out_h) {
     int w = 0, h = 0;
     kl_ovrp_eye_texture_size(&w, &h);
     if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
@@ -8144,15 +8142,22 @@ static void klovrp_fill_eye_desc(ovrp_layer_desc_eyefov *d, int layout,
     // (be18669). Off by default but for Moss: Beat Saber's 1.2x level scale is wanted, and its caps are
     // sized for it.
     {
-        static int on = -1;
-        if (on < 0) {
-            // On for Moss: seen on the headset 2026-10-13 ("es wird wirklich besser mit der einstellung"),
-            // 110 frames a second where there were 45.
-            const char *t = kl_driver_target_name();
-            on = kl_env_on("KL_OVRP_EYE_DESC_CAP", t && strcmp(t, "moss") == 0);
-        }
+        // On for Moss: seen on the headset 2026-10-13 ("es wird wirklich besser mit der einstellung"),
+        // 110 frames a second where there were 45. On for Gun Club VR: Unity asks for 1.4 on top, so its
+        // 4000 cap became 5600x4492 an eye on the headset (toolchain 557, about 42 frames a second, the
+        // panel showing 5600). And on wherever the player chose a "Max resolution per eye" in the start
+        // window: that number is meant as the size of the picture, whatever the game multiplies it by.
+        // Not cached as a whole: the choice can arrive after the first call in a host run.
+        static int env = -2;
+        if (env == -2) env = getenv("KL_OVRP_EYE_DESC_CAP") ? kl_env_on("KL_OVRP_EYE_DESC_CAP", 0) : -1;
+        const char *t = kl_driver_target_name();
+        int on = env >= 0 ? env
+               : (t && (strcmp(t, "moss") == 0 || strcmp(t, "x2285803881494677") == 0)) || g_eye_max_choice > 0;
         // No display has pushed a size in a host run, so no cap was worked out: the plain default there.
         int cap = g_eye_cap >= 0 ? g_eye_cap : kl_env_int("KL_OVRP_EYE_MAX", 3072);
+        // ...times the render scale, so "Resolution" still lowers the picture: held to the plain cap, a
+        // guest scale of 1.4 would undo anything down to 71 %.
+        if (cap > 0 && g_eye_rs > 0.0f && g_eye_rs < 1.0f) cap = (int)((float)cap * g_eye_rs + 0.5f);
         if (on && cap > 0 && (w > cap || h > cap)) {
             float k = (float)cap / (float)(w > h ? w : h);
             int cw = ((int)((float)w * k + 0.5f) + 1) & ~1, ch = ((int)((float)h * k + 0.5f) + 1) & ~1;
@@ -8166,6 +8171,16 @@ static void klovrp_fill_eye_desc(ovrp_layer_desc_eyefov *d, int layout,
             w = cw; h = ch;
         }
     }
+
+    *out_w = w; *out_h = h;
+}
+static void klovrp_fill_eye_desc(ovrp_layer_desc_eyefov *d, int layout,
+                                 int mip_levels, int sample_count, int format,
+                                 int depth_format, int mv_format,
+                                 int mv_depth_format,
+                                 int layer_flags, float texture_scale) {
+    int w = 0, h = 0;
+    kl_ovrp_eye_desc_size(texture_scale, &w, &h);
 
     memset(d, 0, sizeof *d);
     d->shape        = KLOVRP_SHAPE_EYEFOV;

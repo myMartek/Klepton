@@ -3812,9 +3812,13 @@ Not from his fork, found on the way (2026-10-13):
   default) also bounds the layer a guest ends up with after its OWN scale, not
   only the size it is offered. Moss multiplies the offer by 1.5 in a level and
   got 4608x3697 an eye over a 3072 cap: 18.8 ms of GPU a frame on the headset,
-  45 frames a second. **Default off, on for Moss** (seen on the headset: about
-  110 frames a second); Beat Saber's 1.2x level scale is wanted. His fork
-  bounds the desc always. `klovrp_fill_eye_desc`.
+  45 frames a second. **Default off; on for Moss** (seen on the headset: about
+  110 frames a second), **for Gun Club VR** (`x2285803881494677`: Unity's 1.4
+  made its 4000 cap 5600 an eye, about 42 frames a second, toolchain 557)
+  **and for any game with a "Max resolution per eye" chosen** in the start
+  window; Beat Saber's 1.2x level scale is wanted. The bound is the cap times
+  the render scale, so "Resolution" still lowers the picture. His fork
+  bounds the desc always. `kl_ovrp_eye_desc_size`.
 - `KL_OVRP_EYE_ALIGN=<n>` — each axis of the eye size is rounded down to a
   multiple of n, last of all. **Default 1 (off), 4 for Moss.** Unreal rounds its
   scene buffers UP to a multiple of 4 and kl_fove compares extents exactly: Moss
