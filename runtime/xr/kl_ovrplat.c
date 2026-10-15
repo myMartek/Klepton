@@ -440,12 +440,23 @@ static uint64_t klplat_called(const char *name) {
 // dropped the completion of a 17th outstanding request while still handing out
 // its id, which is the "poll forever" the queue exists to prevent, and it
 // rewrote popped handles on wrap. A request id is issued only together with its
-// slot; with no memory for one the request fails (id 0) instead. Blocks are
+// slot; with no slot to be had — no memory, or the pool at its limit below —
+// the request fails (id 0) instead. Blocks are
 // never freed, so even a handle used after its FreeMessage reads a slot, not
 // freed memory. The mutex is not defensive — the requests are issued from
 // managed code on the main thread and the pump runs there too, but nothing in
 // the API promises that.
 #define KLPLAT_MSGQ 16                 // slots per pool block
+// How far the pool may grow. Every guest in the corpus has at most a handful
+// of requests outstanding, so a pool past KLPLAT_MSG_WARN_BLOCKS (128 slots)
+// means a guest that requests without pumping or pops without freeing; that
+// is said once, with the count, because it is the first line anyone will want
+// when the run later goes wrong. KLPLAT_MSG_MAX_BLOCKS (2048 slots, about
+// 2.4 MB of message slots) is the hard stop: past it a request fails cleanly
+// with id 0 — the SDK reports that as a failed request rather than awaiting it
+// — instead of growing a leak until the process is killed for memory.
+#define KLPLAT_MSG_WARN_BLOCKS 8
+#define KLPLAT_MSG_MAX_BLOCKS  128
 // A language pack's details (see plat_is_langpack_status), here because a
 // message carries a copy of them.
 typedef struct {
@@ -487,19 +498,30 @@ typedef struct klplat_msg_block {
     klplat_msg m[KLPLAT_MSGQ];
 } klplat_msg_block;
 static klplat_msg_block *g_msg_blocks;          // every block, never freed
+static int              g_msg_nblocks;          // how many, under g_msg_mu
+static int              g_msg_warned;           // the growth warning was said
 static klplat_msg      *g_msg_free;             // slots no one holds
 static klplat_msg      *g_msg_head, *g_msg_tail; // queued, oldest first
 static uint64_t        g_next_request = 1;
 static int             g_platform_up;
 static pthread_mutex_t g_msg_mu = PTHREAD_MUTEX_INITIALIZER;
 
-// A free slot, growing the pool by a block when there is none. Under g_msg_mu.
+// A free slot, growing the pool by a block when there is none — up to
+// KLPLAT_MSG_MAX_BLOCKS, past which there is no slot (NULL). Under g_msg_mu.
 static klplat_msg *klplat_msg_alloc_locked(void) {
     if (!g_msg_free) {
+        if (g_msg_nblocks >= KLPLAT_MSG_MAX_BLOCKS) return NULL;
         klplat_msg_block *b = calloc(1, sizeof *b);
         if (!b) return NULL;
         b->next = g_msg_blocks;
         g_msg_blocks = b;
+        if (++g_msg_nblocks >= KLPLAT_MSG_WARN_BLOCKS && !g_msg_warned) {
+            g_msg_warned = 1;
+            fprintf(stderr, "  [plat] WARNING: %d platform messages queued or held "
+                            "(pool limit %d) — the guest is not pumping or not freeing "
+                            "its messages\n", g_msg_nblocks * KLPLAT_MSGQ - KLPLAT_MSGQ,
+                    KLPLAT_MSG_MAX_BLOCKS * KLPLAT_MSGQ);
+        }
         for (int i = KLPLAT_MSGQ - 1; i >= 0; i--) {
             b->m[i].next = g_msg_free;
             g_msg_free = &b->m[i];
@@ -546,7 +568,8 @@ static uint64_t klplat_enqueue(uint32_t type, int32_t payload, const char *str,
 }
 
 static uint64_t klplat_request_failed(const char *what) {
-    fprintf(stderr, "  [plat] %s -> no memory for its completion, request refused (0)\n", what);
+    fprintf(stderr, "  [plat] %s -> no slot for its completion (pool at its limit "
+                    "or out of memory), request refused (0)\n", what);
     return 0;
 }
 
@@ -3326,6 +3349,32 @@ int kl_ovrplat_queue_selftest(FILE *f) {
                     names, KLPLAT_ST_NAMES, nulls, wrong);
     fprintf(f, "  %d threads x %d names: %u slots, none NULL, counts exact\n",
             KLPLAT_ST_HITTERS, KLPLAT_ST_NAMES, names);
+
+    // 7. The pool's limit: with nothing outstanding, exactly
+    //    KLPLAT_MSG_MAX_BLOCKS * KLPLAT_MSGQ requests get an id, the next one
+    //    is refused with 0 and leaves no completion behind, the growth warning
+    //    was said, and once the guest drains the queue requests succeed again.
+    enum { CAP = KLPLAT_MSG_MAX_BLOCKS * KLPLAT_MSGQ };
+    int issued = 0;
+    while (issued <= CAP && klplat_request("selftest", KLPLAT_ST_TYPE + 4, issued)) issued++;
+    pthread_mutex_lock(&g_msg_mu);
+    int nblocks = g_msg_nblocks, warned = g_msg_warned;
+    pthread_mutex_unlock(&g_msg_mu);
+    int drained = 0, inorder = 1;
+    for (klplat_msg *m; (m = klplat_PopMessage()) != NULL; drained++) {
+        inorder &= m->payload == drained;
+        klplat_FreeMessage(m);
+    }
+    uint64_t after = klplat_request("selftest", KLPLAT_ST_TYPE + 5, 0);
+    klplat_msg *ml = klplat_PopMessage();
+    KLPLAT_ST_CHECK(issued == CAP && nblocks == KLPLAT_MSG_MAX_BLOCKS && warned &&
+                    drained == CAP && inorder && after && ml && ml->request == after,
+                    "pool limit: %d of %d issued, %d blocks, warned %d, %d drained%s, "
+                    "%s afterwards", issued, CAP, nblocks, warned, drained,
+                    inorder ? "" : " OUT OF ORDER", after ? "served" : "REFUSED");
+    if (ml) klplat_FreeMessage(ml);
+    fprintf(f, "  pool limit: %d requests served, the next refused with 0, "
+               "served again once drained\n", issued);
 #undef KLPLAT_ST_CHECK
     return ok;
 }
