@@ -69,6 +69,15 @@ void kl_metrics_note_upscale(int state, int out_w, int out_h, const char *path, 
 }
 void kl_metrics_note_game_frame(void) { g_frames++; }
 
+void kl_metrics_upscale_now(kl_metrics *out) {
+    if (!out) return;
+    pthread_mutex_lock(&g_mu);
+    out->upscale = g_up.state; out->out_w = g_up.w; out->out_h = g_up.h;
+    memcpy(out->path, g_up.path, sizeof out->path);
+    memcpy(out->upscale_note, g_up.note, sizeof out->upscale_note);
+    pthread_mutex_unlock(&g_mu);
+}
+
 unsigned kl_metrics_latest(kl_metrics *out) {
     pthread_mutex_lock(&g_mu);
     unsigned seq = g_now.seq;

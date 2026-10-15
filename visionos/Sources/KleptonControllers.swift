@@ -1507,9 +1507,9 @@ final class KleptonControllers {
         let chord = kl_metrics_chord(state[0].fromController && state[0].pill != 0 ? 1 : 0,
                                      state[1].fromController && state[1].pill != 0 ? 1 : 0,
                                      ProcessInfo.processInfo.systemUptime, &passL, &passR)
-        // A tap of the two together with the panel shown: a test build switches XR head prediction
-        // (KleptonXRPredict); a player's build does nothing with it, as before.
-        if chord == 2 && KleptonTestBuild.on { KleptonXRPredict.toggle() }
+        // A tap of the two together with the panel shown switches MetalFX upscaling where it can upscale
+        // (KleptonMetalFX.tapToggle), and does nothing anywhere else. The panel shows the result.
+        if chord == 2 { KleptonMetalFX.tapToggle() }
         for h in 0...1 where state[h].fromController {
             let pill = (h == 0 ? passL : passR) != 0 ? pillBits[h] : 0
             state[h].buttons = state[h].otherButtons | pill

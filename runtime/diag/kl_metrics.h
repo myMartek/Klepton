@@ -51,6 +51,10 @@ void kl_metrics_note_game_frame(void);
 int kl_metrics_tick(void);
 // The newest sample; returns its seq (0 and an untouched *out before the first).
 unsigned kl_metrics_latest(kl_metrics *out);
+// The upscale as the compositor said it last (kl_metrics_note_upscale), into
+// those fields of *out only — newer than the last sample's, so a switch (a tap
+// of Create + Options) can be drawn at once rather than with the next second.
+void kl_metrics_upscale_now(kl_metrics *out);
 
 // ---- showing and hiding the panel with the controllers ---------------------
 //
@@ -66,8 +70,8 @@ unsigned kl_metrics_latest(kl_metrics *out);
 // open with the panel. Returns 1 on the poll that switched the panel, and 2 on
 // the poll that ended a TAP of the two together (both up again within the
 // second, nothing switched) while the panel was shown — which the panel itself does
-// nothing with: a test build switches XR head prediction on it
-// (kl_openxr_set_predict). 0 otherwise. One caller, one thread.
+// nothing with: the app switches MetalFX upscaling on it where MetalFX can
+// upscale (KleptonMetalFX.tapToggle). 0 otherwise. One caller, one thread.
 int kl_metrics_chord(int left_down, int right_down, double now_s, int *pass_left, int *pass_right);
 // Whether the panel is to be drawn. It is not until someone says so: the
 // game's setting at its start, or the two buttons.

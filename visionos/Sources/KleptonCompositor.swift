@@ -3737,12 +3737,28 @@ final class KleptonCompositor {
         let textures = [a, b]
         var samples: [KLMetricsSample] = []
         var seq: UInt32 = 0, turn = 0, drawn = false
-        // XR head prediction for a test build's panel (KleptonXRPredict): -1 where it is not shown. A switch
-        // is drawn at once rather than with the next second's sample — whoever tapped is looking for it.
-        var predict = (on: -1, used: false)
-        func predictNow() -> (on: Int, used: Bool) {
-            KleptonTestBuild.on ? (Int(kl_openxr_predict()), kl_openxr_predict_used() != 0) : (-1, false)
+        // The upscale as the compositor said it last, and whether a tap of Create + Options switches it
+        // (KleptonMetalFX.tapToggle). A switch is drawn at once rather than with the next second's
+        // sample — whoever tapped is looking for it.
+        struct Upscale: Equatable { var tap = false, state = -1, outW = 0, outH = 0, path = "", note = "" }
+        func upscaleNow() -> Upscale {
+            var u = kl_metrics()
+            kl_metrics_upscale_now(&u)
+            return Upscale(tap: KleptonMetalFX.canUpscale, state: Int(u.upscale),
+                           outW: Int(u.out_w), outH: Int(u.out_h),
+                           path: withUnsafeBytes(of: &u.path) {
+                               String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
+                           },
+                           note: withUnsafeBytes(of: &u.upscale_note) {
+                               String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
+                           })
         }
+        func put(_ u: Upscale, into s: inout KLMetricsSample) {
+            s.metalfxTap = u.tap
+            s.upscale = u.state; s.outW = u.outW; s.outH = u.outH
+            s.path = u.path; s.upscaleNote = u.note
+        }
+        var upscale = Upscale()
         let timer = DispatchSource.makeTimerSource(queue: statsQueue)
         timer.schedule(deadline: .now(), repeating: 0.25, leeway: .milliseconds(50))
         timer.setEventHandler { [weak self] in
@@ -3751,18 +3767,17 @@ final class KleptonCompositor {
             // Once at once, before there is a sample — whoever has just held the two buttons for a second
             // is to see that it worked — and from then on with each new one.
             let fresh = now != 0 && now != seq
-            let p = predictNow()
-            let switched = p != predict
-            predict = p
+            let u = upscaleNow()
+            let switched = u != upscale
+            upscale = u
             guard fresh || !drawn || (switched && !samples.isEmpty) else { return }
             if switched, !fresh, var last = samples.popLast() {
-                last.xrPredict = p.on; last.xrPredictUsed = p.used
+                put(u, into: &last)
                 samples.append(last)
             }
             if fresh {
                 seq = now
                 var s = KLMetricsSample()
-                s.xrPredict = p.on; s.xrPredictUsed = p.used
                 s.fps = m.fps; s.displayHz = m.display_hz
                 s.compiles = m.compiles; s.compilesCached = m.compiles_cached
                 s.gpuBusy = m.gpu_busy; s.gpuGameMs = m.gpu_game_ms; s.gpuCompMs = m.gpu_comp_ms
@@ -3773,13 +3788,9 @@ final class KleptonCompositor {
                 s.memUsedMB = Int(m.mem_used_mb); s.memLeftMB = Int(m.mem_left_mb)
                 s.thermal = ProcessInfo.processInfo.thermalState.rawValue
                 s.eyeW = Int(m.eye_w); s.eyeH = Int(m.eye_h)
-                s.upscale = Int(m.upscale); s.outW = Int(m.out_w); s.outH = Int(m.out_h)
-                s.path = withUnsafeBytes(of: &m.path) {
-                    String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
-                }
-                s.upscaleNote = withUnsafeBytes(of: &m.upscale_note) {
-                    String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
-                }
+                // The upscale as it is now rather than as the sample took it, so a tap is not undone by a
+                // sample a quarter of a second old.
+                put(u, into: &s)
                 samples.append(s)
                 if samples.count > KLMetricsPanel.history { samples.removeFirst(samples.count - KLMetricsPanel.history) }
             }

@@ -2176,31 +2176,26 @@ The composite/timewarp pass — one file, compiled by both compositors
   that is the pose OVRPlugin reports, 10.2 cm back along the handle and pitched
   20.6 degrees off the grip (`tools/rendermodel_frames.py`). An OpenXR guest is
   unaffected either way — it asks for the grip and gets it.
-- `KL_XR_PREDICT=0` — return the head pose as it stands now from the pose
-  entry points instead of predicting it to the `displayTime` the guest named.
+- `KL_XR_PREDICT=1` — predict the head pose to the `displayTime` the guest
+  named instead of returning it as it stands now from the pose entry points.
+  **Off by default since 2026-10-15** (the owner tested games with and without
+  it on the headset and they ran fine either way); the OVRPlugin half of the
+  same default is `KL_OVRP_ONE_POSE`, which is on. The app's Advanced › Test
+  switch *XR prediction* sets `KL_XR_PREDICT=1` and `KL_OVRP_ONE_POSE=0`
+  together; an installation can start it on (`KLEPTON_TEST_ON=KL_XR_PREDICT`,
+  AVP Play's per-game option). The launch line wins over both.
   The prediction is the frontend's (a timestamped device-anchor query, walked
   back 5 ms at a time until the tracker answers), capped 50 ms ahead, and it is
   computed ONCE per (frame, instant): `xrLocateSpace`, `xrLocateViews` and the
   layer placement in `xrEndFrame` all read the same one, because a guest that
   renders from one of them and submits from another otherwise draws from one
-  head and declares another. Off restores exactly what this did before the seam
-  existed, which makes it the A/B for any motion artefact that appeared with it.
-  No host frontend publishes a tracker at all, so on host this knob does
-  nothing and every pose is the latched head.
-  **Switched live in a test build:** with the metrics panel shown (hold Create +
-  Options 1 s), a short tap of Create + Options together switches prediction
-  off and on without a relaunch; the panel's `XR predict` row says which it is
-  (`· no OpenXR` where the game never asks). A switch applies from the next
-  `xrWaitFrame`, never inside a frame (`kl_openxr_set_predict`). It is not
-  stored: each start begins at this variable's value. A player's build has
-  neither the row nor the tap. A build is a test build when it was generated
-  with `KLEPTON_DISPLAY_SUFFIX` or `KLEPTON_DISPLAY_OVERRIDE`, a
-  `KLEPTON_BUNDLE_ID` ending in `-test` or `.test` in any case (regex
-  `[-.]test$`), `KL_TEST_BUILD` in `KLEPTON_TEST_ON`, or `KLEPTON_TEST_BUILD=1`
-  (baked as `KLTestBuild` in Info.plist), or when it is launched with exactly
-  `KL_TEST_BUILD=1`. A bundle id of its own or a `KLEPTON_TEST_ON` alone (at
-  build time or at launch) does not make one: AVP Play sets both for players
-  too. `make testbuild` checks both halves of the rule.
+  head and declares another. Off is exactly what this did before the seam
+  existed. No host frontend publishes a tracker at all, so on host this knob
+  does nothing and every pose is the latched head. The log says the value once,
+  at the first pose a guest asks for: `[xr] head prediction ON|OFF`. Every
+  OpenXR guest goes through it — Android OpenXR games, Steam Link, and
+  Half-Life: Alyx through `kl_lx_openxr.c`. It is no longer switched live from
+  the metrics panel; that tap now switches MetalFX (see the metrics panel).
 - `KL_XR_POSE_TRACE=1` — once a second, the head each pose entry point answered
   with this frame and the head the guest actually submitted, differenced
   pairwise (worst degrees and metres over the second) with a count of the frames
@@ -3691,15 +3686,18 @@ After the release, one piece of his pose core (his commit be18669), as a switch
 that is off (2026-10-13). For a run from `Documents/lx/env.txt`; not a row in
 the window. `runtime/xr/kl_ovrp.c`, the block `ONE POSE PER GUEST FRAME`.
 
-- `KL_OVRP_ONE_POSE=1` (or `index`) — one head pose per guest frame. At the
+- `KL_OVRP_ONE_POSE=1` (or `index`; **the default since 2026-10-15**) — one
+  head pose per guest frame, the OVRPlugin half of "no XR prediction" (see
+  `KL_XR_PREDICT`). `KL_OVRP_ONE_POSE=0` is the way back, which the app's Test
+  switch *XR prediction* sets. At the
   frame's boundary the published head pose is frozen together with the eye
   transform (offsets and cant), and every head-derived answer for the rest of
   that frame returns it: both `ovrp_Update2/3` steps, every
   `ovrp_GetNodePoseState`, the eye view and the head an OpenXR guest reads.
   Hands and controllers stay live. The frame record filed for reprojection is
   taken from the same samples and so carries the frozen pose.
-  **Default off** (unset, `0`, `off`, `live`): nothing is frozen and every read
-  takes the path it took before; his fork has it on. Without it an OVRPlugin
+  **Off** (`0`, `off`, `no`, `false`, `live`): nothing is frozen and every read
+  takes the path it took before; unset or anything else is on, as in his fork. Without it an OVRPlugin
   guest gets one sample per step, so the Physics and the Render step differ, and
   a second Render sample in the same frame differs again. `KL_OVRP_LATCH` and
   the step samples keep running underneath. A read that names a frame index
@@ -3824,6 +3822,17 @@ audio path that has shipped: both are linked in, and
   is then only what `KL_STATS_CARD` makes it. `applyPanelChord`,
   KleptonControllers.swift.
 
+  **A short tap of Create + Options together** (both up again within the
+  second) while the panel is shown switches **MetalFX upscaling** from the next
+  frame, in every build — where MetalFX can upscale: the device has Apple's
+  spatial scaler and the game was started below 100 % resolution
+  (`KleptonMetalFX.canUpscale`). The panel then has a second hint line, "Tap
+  both: MetalFX on / off", and redraws at once after a tap: *MetalFX*, *Path*
+  and *Output* show the new state. It is the same choice as *Settings ›
+  Rendering › MetalFX upscaling* and is stored the same way. Anywhere else the
+  tap does nothing (`[metalfx] tap of Create + Options: nothing to switch` in
+  the log). It replaces the live XR head prediction switch test builds had.
+
   | Row | What it is |
   | --- | --- |
   | FPS / Hz | new pictures of the game shown a second / pictures presented a second (the rate the system shows the app at) |
@@ -3865,15 +3874,17 @@ audio path that has shipped: both are linked in, and
 
 - `KLEPTON_TEST_ON=<name>[,<name>…]` — a BUILD-time variable, read by
   `visionos/gen_xcodeproj.py`: the Test switches (by the name of their
-  variable, e.g. `KL_OVRP_ONE_POSE,KL_AUDIO_SINK2`) that this installation has
+  variable, e.g. `KL_XR_PREDICT,KL_AUDIO_SINK2`) that this installation has
   on from its first start. It lands in Info.plist as `KLTestOn`;
   `KleptonTestSwitches.isOn` takes a choice made in the game's window first and
   this list second, so a switch named here can still be turned off in the game
   (and stays off), and one that is put back follows the installation again.
   Anything that is not a `KL_…` name is dropped. Unset: every switch is off
   until chosen, as before. AVP Play sets it from its setting "Experimental:
-  switch on the new pose and audio implementations when installing"; the log
-  line of such a switch ends in `(on from the installation)`.
+  switch on the new pose and audio implementations when installing" and from
+  a game's own option *XR prediction* (`KL_XR_PREDICT`); the log line of such a
+  switch ends in `(on from the installation)`. `KL_OVRP_ONE_POSE` in the list
+  is no longer a switch of its own (it is on by default) and does nothing.
 - `KLEPTON_RENDER_SCALE=<0.5..1.0>` (build/install environment, read by
   `visionos/gen_xcodeproj.py`) — the render scale the game starts at: it
   replaces the target's `render_scale` as `KL_RENDER_SCALE_DEFAULT` /

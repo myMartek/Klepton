@@ -2953,7 +2953,7 @@ static int64_t klxr_predict_ahead(int64_t display_time) {
 // declines (every host run — `kl_ovrp_set_head_at` is the visionOS
 // compositor's) leaves the delta invalid and every pose is the latched head,
 // which is what this produced before the seam existed and keeps the two entry
-// points agreeing for free. KL_XR_PREDICT=0 is the A/B.
+// points agreeing for free. Off unless KL_XR_PREDICT=1 (see below).
 typedef struct { int valid; float q[4], p[3]; } klxr_head_delta;
 
 // The cache is read and filled from whichever guest threads locate poses
@@ -2993,24 +2993,30 @@ typedef struct { int valid; float q[4], p[3]; } klxr_head_delta;
 //      published, so a thread descheduled across a frame boundary cannot roll
 //      the cache back.
 //
-// The prediction can be switched off and on while the game runs
-// (kl_openxr_set_predict — the metrics panel of a test build). The request is
-// an atomic, and it is LATCHED per frame under g_predict_mu: the first entry
-// point to ask about a new frame decides for the whole frame, so a switch
-// arriving mid-frame cannot leave xrLocateSpace predicted and xrLocateViews
-// not. The request is read BEFORE the lock (its first read is the
+// **Off by default** (since 2026-10-15, after the owner's headset test: games
+// run as well without it). KL_XR_PREDICT=1 turns it on — on the launch line, or
+// from the app's Advanced › Test switch "XR prediction" (KleptonTestSwitches,
+// which an installation can start on: KLEPTON_TEST_ON=KL_XR_PREDICT).
+//
+// The value can still be changed while the game runs (kl_openxr_set_predict;
+// only the self-test does, no control in the app offers it any more). The
+// request is an atomic, and it is LATCHED per frame under g_predict_mu: the
+// first entry point to ask about a new frame decides for the whole frame, so a
+// switch arriving mid-frame cannot leave xrLocateSpace predicted and
+// xrLocateViews not. The request is read BEFORE the lock (its first read is the
 // environment's), and under it there is only the latch, so g_predict_mu stays
 // a leaf.
 static pthread_mutex_t g_predict_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_predict_want = -1;        // -1 until read from KL_XR_PREDICT
-static _Atomic int g_predict_used;
 
 int kl_openxr_predict(void) {
     int on = atomic_load(&g_predict_want);
     if (on >= 0) return on;
-    int from_env = kl_env_on("KL_XR_PREDICT", 1) ? 1 : 0;
+    int from_env = kl_env_on("KL_XR_PREDICT", 0) ? 1 : 0;
     // Two first readers read the same environment; whichever stores, it is that.
-    atomic_compare_exchange_strong(&g_predict_want, &on, from_env);
+    if (atomic_compare_exchange_strong(&g_predict_want, &on, from_env))
+        fprintf(stderr, "  [xr] head prediction %s (KL_XR_PREDICT%s)\n", from_env ? "ON" : "OFF",
+                from_env ? "=1" : " unset or 0, the default");
     return atomic_load(&g_predict_want);
 }
 
@@ -3021,8 +3027,6 @@ void kl_openxr_set_predict(int on) {
     if (was != on)
         fprintf(stderr, "  [xr] head prediction switched %s (from the next frame)\n", on ? "ON" : "OFF");
 }
-
-int kl_openxr_predict_used(void) { return atomic_load(&g_predict_used); }
 
 // Whether `frame` predicts, given what is asked for now (`want`, read before
 // the lock). Under g_predict_mu. Kept in the session beside the cache, so a new
@@ -3054,8 +3058,6 @@ static klxr_head_delta klxr_frame_head_delta(klxr_session *s, int64_t display_ti
     // recentre path locates spaces before its first xrWaitFrame). There is no
     // instant to predict to, so the latched head is the whole answer.
     if (!s || display_time <= 0) return d;
-    if (!atomic_load_explicit(&g_predict_used, memory_order_relaxed))
-        atomic_store(&g_predict_used, 1);
     int want = kl_openxr_predict();            // outside the lock: it may read the environment
     // The key is fixed once, here: the prediction below is FOR this frame,
     // even if xrWaitFrame advances the counter while it runs.
@@ -8537,6 +8539,9 @@ int kl_openxr_space_selftest(FILE *f) {
     // head 10 degrees further, so a runtime that predicts only one of the two
     // fails by that whole angle rather than by a rounding error.
     {
+        // Prediction is off by default; these checks are about what it does when it is on.
+        int predict_was = kl_openxr_predict();
+        kl_openxr_set_predict(1);
         kl_ovrp_set_head_pose(0, 1.6f, 0, 0, 0, 0, 1);
         kl_ovrp_frame_latch();
         kl_ovrp_set_head_at(klxr_st_head_at);
@@ -8663,6 +8668,7 @@ int kl_openxr_space_selftest(FILE *f) {
         ok &= e.valid;
         kl_openxr_set_predict(was);
         kl_ovrp_set_head_at(NULL);
+        kl_openxr_set_predict(predict_was);
     }
 
     // The regression itself, stated as one comparison: moving and turning the

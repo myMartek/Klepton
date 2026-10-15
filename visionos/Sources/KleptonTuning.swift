@@ -12,6 +12,8 @@
 // The environment still sets the starting values, so a run that never opens the
 // panel behaves exactly as it did before this file existed.
 import SwiftUI
+import Metal
+import MetalFX
 import simd
 
 /// One complete set. Value semantics on purpose: the render thread reads a
@@ -477,6 +479,39 @@ final class KleptonMetalFX: ObservableObject {
     private init() {
         enabled = Self.isOn
     }
+
+    /// Whether this device has Apple's spatial scaler at all.
+    static let deviceSupported: Bool =
+        MTLCreateSystemDefaultDevice().map { MTLFXSpatialScalerDescriptor.supportsDevice($0) } ?? false
+
+    /// Whether switching changes the picture: the device has the scaler, and the
+    /// game was started below 100 % (kl_ovrp_eye_texture_scale — the scale its
+    /// eye size was made with; at 100 % there is nothing to upscale).
+    static var canUpscale: Bool {
+        guard deviceSupported else { return false }
+        var rs: Float = 1
+        var w: Int32 = 0, h: Int32 = 0
+        kl_ovrp_eye_texture_scale(&rs, &w, &h)
+        return rs < 0.999 && w > 0 && h > 0
+    }
+
+    /// A tap of Create and Options together while the metrics panel is shown
+    /// (kl_metrics_chord's 2, KleptonControllers): switches upscaling, in every
+    /// build, from the next frame — the same choice as the switch under
+    /// Rendering, so it is stored the same way. Where MetalFX cannot upscale
+    /// (no scaler, or a game started at 100 %) it does nothing. The panel's
+    /// MetalFX, Path and Output rows show what it did.
+    static func tapToggle() {
+        guard canUpscale else {
+            NSLog("[metalfx] tap of Create + Options: nothing to switch (%@)",
+                  deviceSupported ? "the game was started at 100 % resolution" : "no MetalFX on this device")
+            return
+        }
+        DispatchQueue.main.async {
+            shared.enabled.toggle()
+            NSLog("[metalfx] switched %@ with Create + Options", shared.enabled ? "on" : "off")
+        }
+    }
 }
 
 /// "Record what the game waits for": the runtime's account of blocked threads
@@ -492,18 +527,6 @@ enum KleptonDiagnostics {
         guard UserDefaults.standard.bool(forKey: waitersKey) else { return }
         setenv("KL_TRACE_CONDDUMP", "1", 0)
         NSLog("[app] diagnostics: recording what the game waits for (KL_TRACE_CONDDUMP)")
-    }
-}
-
-/// XR head prediction (KL_XR_PREDICT), switched while the game runs — test
-/// builds only. A tap of Create and Options together while the metrics panel
-/// is shown switches it (kl_metrics_chord's 2, KleptonControllers), and the
-/// panel says which it is. The starting value is KL_XR_PREDICT's; the switch is
-/// not stored, so the next start is the environment's again.
-enum KleptonXRPredict {
-    static func toggle() {
-        guard KleptonTestBuild.on else { return }
-        kl_openxr_set_predict(kl_openxr_predict() != 0 ? 0 : 1)
     }
 }
 
@@ -565,11 +588,15 @@ enum KleptonTestSwitches {
                              "Foveation: keine Zone unter halber Auflösung"),
                   note: klT("GL games with foveated rendering. The edge of the picture gets sharper textures and costs about 70% more fragments; watch the frame rate.",
                             "GL-Spiele mit Foveated Rendering. Der Bildrand bekommt schärfere Texturen und kostet etwa 70 % mehr Bildpunkte; auf die Bildrate achten.")),
-            Entry(env: "KL_OVRP_ONE_POSE", value: "1",
-                  title: klT("Head pose: one per frame of the game",
-                             "Kopfpose: eine pro Frame des Spiels"),
-                  note: klT("Games that talk to Meta's own interface, such as Moss or Tetris Effect. The game gets one head pose for a whole frame instead of a newer one several times within it. Does nothing in games that come through OpenXR (Half-Life: Alyx, Steam Link, Doom 3, Walkabout, Beat Saber 1.45). Turn the head quickly in a level and compare: does the picture stay steadier, or does it lag?",
-                            "Spiele, die über Metas eigene Schnittstelle laufen, etwa Moss oder Tetris Effect. Das Spiel bekommt für einen ganzen Frame eine Kopfpose statt mehrmals darin eine neuere. Bewirkt nichts in Spielen, die über OpenXR kommen (Half-Life: Alyx, Steam Link, Doom 3, Walkabout, Beat Saber 1.45). Im Level den Kopf schnell drehen und vergleichen: steht das Bild ruhiger, oder hängt es nach?")),
+            // Off by default since 2026-10-15 on both paths: OpenXR (KL_XR_PREDICT) and Meta's own interface
+            // (KL_OVRP_ONE_POSE, one latched pose per frame, on by default). This switch brings back the
+            // behaviour before: the head predicted to the time the picture is shown, and a fresh pose for
+            // every query. AVP Play's per-game option "XR prediction" starts it on (KLEPTON_TEST_ON=KL_XR_PREDICT).
+            Entry(env: "KL_XR_PREDICT", value: "1",
+                  title: klT("XR prediction", "XR-Vorhersage"),
+                  note: klT("Every game. Off, the game gets the head pose as it is when the frame starts, one per frame. On, as before: games that come through OpenXR (Half-Life: Alyx, Steam Link, Doom 3, Walkabout, Beat Saber 1.45) get the head predicted to the moment the picture is shown, and games that talk to Meta's own interface (Moss, Tetris Effect) a newer pose each time they ask within a frame. Turn the head quickly in a level and compare: does the picture stay steadier, or does it lag?",
+                            "Jedes Spiel. Aus bekommt das Spiel die Kopfpose, wie sie zu Beginn des Frames ist, eine pro Frame. An wie bisher: Spiele, die über OpenXR kommen (Half-Life: Alyx, Steam Link, Doom 3, Walkabout, Beat Saber 1.45), bekommen den Kopf auf den Moment vorhergesagt, in dem das Bild gezeigt wird, und Spiele, die über Metas eigene Schnittstelle laufen (Moss, Tetris Effect), jedes Mal eine neuere Pose, wenn sie innerhalb eines Frames fragen. Im Level den Kopf schnell drehen und vergleichen: steht das Bild ruhiger, oder hängt es nach?"),
+                  also: [("KL_OVRP_ONE_POSE", "0")]),
             Entry(env: "KL_OVRP_EYE_DESC_CAP", value: "1",
                   title: klT("Resolution: the game's own scale stays under the limit",
                              "Auflösung: der eigene Faktor des Spiels bleibt unter der Obergrenze"),
@@ -694,8 +721,8 @@ private struct TestSwitchRow: View {
                  + entry.also.map { " " + $0.0 + "=" + $0.1 }.joined() + ")")
                 .font(.caption).foregroundStyle(.secondary)
             if KleptonTestSwitches.onFromInstall.contains(entry.env) {
-                Text(klT("On from the start in this installation: AVP Play's experimental setting asked for it.",
-                         "In dieser Installation von Anfang an eingeschaltet: Die experimentelle Einstellung von AVP Play hat es so verlangt."))
+                Text(klT("On from the start in this installation: AVP Play's settings asked for it.",
+                         "In dieser Installation von Anfang an eingeschaltet: Die Einstellungen von AVP Play haben es so verlangt."))
                     .font(.caption).foregroundStyle(.orange)
             }
         }

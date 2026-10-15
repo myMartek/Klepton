@@ -1,7 +1,9 @@
 import Foundation
 
-// Test builds: what only a tester is to see or switch (the XR head prediction
-// switch on the metrics panel, KleptonTuning.swift's KleptonXRPredict). A file
+// Test builds: what only a tester is to see or switch. Nothing asks it at the
+// moment — its first user, the live XR head prediction switch on the metrics
+// panel, made way for the MetalFX tap (KleptonMetalFX.tapToggle), which every
+// build has — but the rule stays, for the next control of that kind. A file
 // of its own, with nothing but Foundation, so that the rule can be compiled and
 // checked on the Mac (tests/t_testbuild.swift, `make testbuild`).
 

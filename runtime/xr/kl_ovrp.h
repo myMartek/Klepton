@@ -90,13 +90,13 @@ void kl_ovrp_frame_latch(void);
 // the environment first, then call with the case it was set for (a mismatch
 // fails rather than testing something else). tests/t_posebound.c does that.
 //
-//   CYCLE  KL_OVRP_ONE_POSE=1: one head pose per ovrp_WaitToBeginFrame cycle,
+//   CYCLE  KL_OVRP_ONE_POSE=1 or unset (the default): one head pose per ovrp_WaitToBeginFrame cycle,
 //          it is the one published when the cycle opened, the frame record
 //          carries it, and the eye transform is pinned with it.
 //   INDEX  ...with KL_OVRP_POSE_BOUNDARY=index: the same pattern SPLITS — two
 //          poses per cycle. Passing means the split was seen, i.e. that the
 //          measurement the CYCLE case passes on is able to fail.
-//   OFF    switch unset: nothing is frozen, none of the feature's state
+//   OFF    KL_OVRP_ONE_POSE=0: nothing is frozen, none of the feature's state
 //          becomes valid, and the answers are the per-step ones as before.
 //   XR     KL_OVRP_ONE_POSE=1, a guest that never speaks OVRPlugin
 //          (kl_openxr): the switch is not in force for a guest that never
@@ -105,7 +105,7 @@ void kl_ovrp_frame_latch(void);
 //   MIXED  KL_OVRP_ONE_POSE=1, an OpenXR frame loop whose Meta SDK also calls
 //          ovrp_Update2(step 0, frameIdx 0) in mid-frame (Walkabout): the head
 //          read before and after that call is one pose, nothing frozen.
-//   MIXED_OFF  the same frames with the switch unset — the reference MIXED
+//   MIXED_OFF  the same frames with KL_OVRP_ONE_POSE=0 — the reference MIXED
 //          has to equal.
 enum {
     KL_OVRP_POSEBOUND_CYCLE = 0,

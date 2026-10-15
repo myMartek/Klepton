@@ -33,10 +33,9 @@ struct KLMetricsSample {
     var cpuCores: Float = -1       // CPU the process used, in cores
     var cpuTop: Float = -1         // the busiest thread's share of one core, 0..1
     var cpuTopName = ""
-    /// Test builds only: XR head prediction (kl_openxr_predict) — -1 not shown,
-    /// 0 off, 1 on — and whether the game asks for it at all (an OpenXR game).
-    var xrPredict = -1
-    var xrPredictUsed = false
+    /// Whether a tap of Create + Options switches MetalFX here
+    /// (KleptonMetalFX.canUpscale) — the panel then says so on its last line.
+    var metalfxTap = false
     var memUsedMB = -1
     var memLeftMB = -1
     var thermal = -1               // ProcessInfo.ThermalState's raw value, 0 nominal .. 3 critical
@@ -180,9 +179,9 @@ enum KLMetricsPanel {
         let left: CGFloat = 28, right: CGFloat = 404
         // How to get rid of it, and back: the two menu buttons of the Sense controllers (kl_metrics_chord).
         text(ctx, "Hold Create + Options 1 s to hide", x: left, y: h - 22, font: font(21), color: dim)
-        // A test build's tap of the two (KleptonXRPredict), on the line above.
-        let testLine = samples.last.map { $0.xrPredict >= 0 } ?? false
-        if testLine { text(ctx, "Tap both: XR predict on / off", x: left, y: h - 50, font: font(21), color: dim) }
+        // A tap of the two switches MetalFX where it can upscale (KleptonMetalFX.tapToggle), on the line above.
+        let tapLine = samples.last?.metalfxTap ?? false
+        if tapLine { text(ctx, "Tap both: MetalFX on / off", x: left, y: h - 50, font: font(21), color: dim) }
         // Shown for the first time, before its first second is over.
         guard let now = samples.last else {
             text(ctx, "Measuring …", x: left, y: 112, font: font(56, bold: true), color: bright)
@@ -236,15 +235,9 @@ enum KLMetricsPanel {
         }
         if !now.path.isEmpty { rows.append(("Path", now.path, bright)) }
         if now.upscale == 2, now.outW > 0 { rows.append(("Output", "\(now.outW) × \(now.outH)", green)) }
-        if now.xrPredict >= 0 {
-            // Off is the A/B half, in amber so it is not left that way by mistake; "no OpenXR" where the
-            // game never asks, so a switch that changes nothing does not look as if it did.
-            rows.append(("XR predict", (now.xrPredict != 0 ? "on" : "off") + (now.xrPredictUsed ? "" : " · no OpenXR"),
-                         !now.xrPredictUsed ? dim : now.xrPredict != 0 ? green : amber))
-        }
         // Nine rows fit at the full size; more close up, down to a size still read at a glance, so the
-        // column always ends above the hints at the bottom — one line, two in a test build.
-        let footer: CGFloat = testLine ? 90 : 62
+        // column always ends above the hints at the bottom — one line, two where a tap switches MetalFX.
+        let footer: CGFloat = tapLine ? 90 : 62
         let step = min(41, (h - footer - 164) / CGFloat(max(rows.count - 1, 1)))
         let size = min(27, (step * 0.68).rounded())
         var y: CGFloat = 164

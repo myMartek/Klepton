@@ -1850,8 +1850,8 @@ static float g_eye_rot[2][4] = { { 0, 0, 0, 1 }, { 0, 0, 0, 1 } };
 
 // --- the eye transform, pinned for the guest's frame ------------------------
 //
-// Part of KL_OVRP_ONE_POSE (from rebelancap's fork, commit be18669; off by
-// default here — see the ONE POSE PER GUEST FRAME block further down). Nothing
+// Part of KL_OVRP_ONE_POSE (from rebelancap's fork, commit be18669; on by
+// default since 2026-10-15 — see the ONE POSE PER GUEST FRAME block further down). Nothing
 // below is valid, counted or read until that switch has frozen its first pose.
 //
 // The offsets and the cant together ARE device_from_view, and the frontend
@@ -2600,12 +2600,12 @@ static klovrp_pose klovrp_head_published(void) {
     return h;
 }
 
-// One pose per guest frame (KL_OVRP_ONE_POSE, off by default) — the layer above
+// One pose per guest frame (KL_OVRP_ONE_POSE, on by default) — the layer above
 // this one. Defined below, because it reports its divergence against
 // klovrp_head_published() and measures it with klovrp_quat_degrees; declared
 // here because klovrp_head() is the first thing that has to consult it. `who`
 // is the entry point, for the counters. Returns 0 at once when the switch is
-// off, and the caller takes the path it always took.
+// off, and the caller takes the path it took before the switch existed.
 enum { KLOP_UPDATE2, KLOP_STEP, KLOP_HEAD, KLOP_EYEVIEW, KLOP_N };
 static int klovrp_one_pose_get(klovrp_pose *out, int who);
 
@@ -2639,10 +2639,15 @@ static float klovrp_quat_degrees(const klovrp_pose *a, const klovrp_pose *b) {
 // --- ONE POSE PER GUEST FRAME (KL_OVRP_ONE_POSE) ----------------------------
 //
 // Taken over from rebelancap's fork (commit be18669), where it is on by
-// default. **OFF by default here**: unset, every function below returns at its
-// first line and every caller takes exactly the path it took before.
-// KL_OVRP_ONE_POSE=1 (or `index`) turns it on, per game, as an A/B — for a
-// guest that delimits its frames with ovrp_WaitToBeginFrame, and for no other
+// default. **ON by default here too since 2026-10-15** — it is the OVRPlugin
+// half of "no XR prediction" (KL_XR_PREDICT is off by default on the OpenXR
+// side): one latched sample per frame, never a newer one. The owner tested
+// games with and without prediction on the headset and they ran fine either
+// way. KL_OVRP_ONE_POSE=0 (or `off`, `live`) — which the app's Advanced › Test
+// switch "XR prediction" sets, together with KL_XR_PREDICT=1 — turns it off,
+// and then every function below returns at its first line and every caller
+// takes exactly the path it took before the switch existed. It applies to a
+// guest that delimits its frames with ovrp_WaitToBeginFrame, and to no other
 // (klovrp_one_pose_active): an OpenXR guest has its one pose per frame from
 // kl_ovrp_frame_latch already.
 //
@@ -2759,17 +2764,21 @@ static int klovrp_one_pose_enabled(void) {
     static int on = -1;
     if (on < 0) {
         const char *m = kl_env_str("KL_OVRP_ONE_POSE", NULL);
-        // Off unless asked for. Unset, empty, "0", "off", "no", "false" and
-        // "live" (his name for the old behaviour) all leave it off; "1",
-        // "index", "on" and anything else turn it on.
-        int v = m && m[0] && strcmp(m, "0") && strcasecmp(m, "off") &&
-                strcasecmp(m, "no") && strcasecmp(m, "false") &&
-                strcasecmp(m, "live");
+        // On unless switched off. "0", "off", "no", "false" and "live" (his
+        // name for the old behaviour) turn it off; unset, empty, "1", "index",
+        // "on" and anything else leave it on.
+        int set = m && m[0];
+        int v = !set || (strcmp(m, "0") && strcasecmp(m, "off") &&
+                         strcasecmp(m, "no") && strcasecmp(m, "false") &&
+                         strcasecmp(m, "live"));
         if (v)
             fprintf(stderr, "  [ovrp] one pose per guest frame ON (KL_OVRP_ONE_POSE"
                             "=%s) — takes effect when the guest first calls "
                             "ovrp_WaitToBeginFrame; a guest that never does is "
-                            "left exactly as it is.\n", m);
+                            "left exactly as it is.\n", set ? m : "unset, the default");
+        else
+            fprintf(stderr, "  [ovrp] one pose per guest frame OFF (KL_OVRP_ONE_POSE=%s):"
+                            " a fresh head sample per step, as before the switch\n", m);
         on = v;
     }
     return on;
@@ -3442,7 +3451,7 @@ static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
     (void)prediction;
     int ix = klovrp_step_ix(step);
 
-    // KL_OVRP_ONE_POSE (off by default; both calls return at once then): THE
+    // KL_OVRP_ONE_POSE (on by default; with it off both calls return at once): THE
     // FRAME BOUNDARY, for a guest that speaks OVRPlugin. Whichever step arrives
     // first in a new frame cycle (or with a new frame index, see
     // KL_OVRP_POSE_BOUNDARY) opens the frame and freezes its one pose; the
@@ -5318,7 +5327,7 @@ static uint64_t klovrp_WaitToBeginFrame(long frame_index) {
 //
 // From rebelancap's fork (his kl_ovrp_pose_boundary_selftest; his commit
 // a0e966f puts it in `make check`), adapted to this file. There the feature is
-// on by default and one call checks it. Here it is a switch, off by default and
+// always on and one call checks it. Here it is a switch, on by default and
 // read once into a static, so the caller names the case it has set the
 // environment up for and each case is a process of its own — see
 // tests/t_posebound.c and kl_ovrp.h.
@@ -5565,7 +5574,7 @@ int kl_ovrp_pose_boundary_selftest(FILE *f, int which) {
     int want_on = which != KL_OVRP_POSEBOUND_OFF && which != KL_OVRP_POSEBOUND_MIXED_OFF;
     if (on != want_on) {
         fprintf(f, "  FAIL: this case needs KL_OVRP_ONE_POSE %s, and it reads %s\n",
-                want_on ? "on" : "unset", on ? "on" : "off");
+                want_on ? "on" : "off", on ? "on" : "off");
         return 0;
     }
     // The boundary is only read (and only matters) for a guest that arms.
