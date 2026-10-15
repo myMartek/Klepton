@@ -3438,6 +3438,16 @@ Read by the scripts themselves, never forwarded to the app.
   an empty container: assets, OBB and the guest's saves stay in the old one. The
   staging stamp is keyed on the id, so the next build re-stages by itself rather
   than launching into an empty container — it is just not free.
+- `KLEPTON_DISPLAY_OVERRIDE=<name>` — the whole name under the icon
+  (CFBundleDisplayName), for every target. It takes precedence over the row's
+  `display`, over `KLEPTON_GENERIC_DISPLAY` and over the custom launcher's
+  compact name. `KLEPTON_DISPLAY_NAME` is the older spelling and still works;
+  `KLEPTON_DISPLAY_OVERRIDE` wins if both are set.
+- `KLEPTON_DISPLAY_SUFFIX=<text>` — appended to the name after the override is
+  applied, e.g. `" (Test)"` gives `Beat Saber (Test)`. Use it with
+  `KLEPTON_BUNDLE_ID` to install a test copy beside the one already on the headset
+  without the two icons looking the same. Unset or empty, neither variable
+  changes anything; non-printable characters are dropped.
 - `KLEPTON_TEAM=<id>` — override the signing team;
   `KLEPTON_DEVICE=<udid>` — skip device auto-detection;
   `KLEPTON_ENTITLEMENTS=0` — build without the two memory capabilities (see

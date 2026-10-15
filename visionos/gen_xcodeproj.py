@@ -414,12 +414,18 @@ fwchildren = "\n".join(f'\t\t\t\t{g["ref"]},' for g in guest)
 # the project-level DEBUG condition.
 # With the launcher on, the game builds present a compact trademark-free name; every
 # other build (and every other target) keeps its normal display name from targets.py.
+# KLT['display'] has already been through targets.display_for (the
+# KLEPTON_DISPLAY_OVERRIDE / KLEPTON_DISPLAY_SUFFIX overrides — a second install
+# of the same target beside the first needs a name of its own on the headset);
+# the launcher's compact name takes the same overrides, so an override still
+# wins over it and a suffix is still appended to it.
 _launcher_display = {"hl1": "HL1VR", "hl2": "HL2VR", "portal": "P1VR"}
-_display = (_launcher_display.get(KLT['name'], KLT['display']) if _launcher_on
+_display = (targets_mod.display_for(_launcher_display[KLT['name']])
+            if _launcher_on and KLT['name'] in _launcher_display
             else KLT['display'])
-# A second install of the same target beside the first (the Steam build of a game
-# that is also there from the Meta Store) needs a name of its own on the headset.
-_display = os.environ.get("KLEPTON_DISPLAY_NAME") or _display
+# Inside a quoted pbxproj string: a quote or backslash in an override would end
+# the string early and leave the project unparseable.
+_display = _display.replace("\\", "\\\\").replace('"', '\\"')
 # Trailing newline, glued at line-start to the next setting — the same shape as
 # ENTITLEMENTS_SETTING / ASSETCATALOG_SETTING above, so it lands on its own line in
 # the output and expands to nothing (no blank line) when the flag is off.
