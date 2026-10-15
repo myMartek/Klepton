@@ -424,7 +424,8 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonControllerInput.swift", "KleptonControllerMode.swift",
          "KleptonSurrealInput.swift", "KleptonSurrealBackend.swift", "KleptonSurrealView.swift",
          "KleptonSurrealAim.swift", "KleptonSurrealAimView.swift",
-         "KleptonMetalFXPreset.swift", "KleptonMetalFXAlpha.swift"]
+         "KleptonMetalFXPreset.swift", "KleptonMetalFXAlpha.swift",
+         "KleptonEyeMax.swift"]
 # Steam's connection, sign-in and Steam Cloud (SteamCloudKit/README.md: parts of
 # Glovebox's SteamLauncherKit, MIT), compiled into the app's own module. The
 # folder is a Swift package only so that its tests run on a Mac.
