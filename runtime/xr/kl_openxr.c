@@ -40,6 +40,7 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <mach/mach.h>   // vm_read_overwrite — klxr_note_frame_chains reads guest chains without faulting
 #include <unistd.h>
 #include "kl_openxr.h"
 #include "kl_steamapi.h"
@@ -1149,6 +1150,86 @@ static void klxr_log_chain(const char *where, const void *next) {
     for (int i = 0; i < n_seen; i++) if (seen[i] == where) return;
     if (n_seen < KLXR_CHAIN_SEEN) seen[n_seen++] = where;
     fprintf(stderr, "  [xr] %s: a chained struct was supplied (left unread)\n", where);
+}
+
+// ...and the frame's INPUT chains, by type. What a guest chains onto its
+// xrEndFrame, its layers and its projection views is what it would hand a
+// compositor that asked: depth (XR_KHR_composition_layer_depth), motion vectors
+// (XR_FB_space_warp), depth testing. None is advertised and nothing is read
+// from them; this only names what arrives, once per game for each (site, type),
+// so the ground for depth or space warp can be measured before it is built.
+// The XrFrameEndInfo, its layers and their views are read anyway (they must
+// be valid); the chained nodes are not trusted — every one is read through
+// vm_read_overwrite, which fails instead of faulting (the garbage `next`
+// above), and a walk stops at 8 nodes. Cost: nothing on a frame without a
+// chain; with one, a few reads every frame for the first 300 frames, then every
+// 30th, and none at all once the table is full.
+static const char *klxr_chain_type_name(int32_t t) {
+    switch (t) {
+    case 1000010000: return "XrCompositionLayerDepthInfoKHR";
+    case 1000034000: return "XrCompositionLayerColorScaleBiasKHR";
+    case 1000040000: return "XrCompositionLayerImageLayoutFB";
+    case 1000041001: return "XrCompositionLayerAlphaBlendFB";
+    case 1000053003: return "XrSecondaryViewConfigurationFrameEndInfoMSFT";
+    case 1000066000: return "XrCompositionLayerReprojectionInfoMSFT";
+    case 1000072000: return "XrCompositionLayerSecureContentFB";
+    case 1000122000: return "XrCompositionLayerDepthTestVARJO";
+    case 1000135000: return "XrFrameEndInfoML";
+    case 1000171000: return "XrCompositionLayerSpaceWarpInfoFB";
+    case 1000204000: return "XrCompositionLayerSettingsFB";
+    case 1000212000: return "XrCompositionLayerDepthTestFB";
+    case 1000216000: return "XrLocalDimmingFrameEndInfoMETA";
+    default:         return "unknown to this runtime";
+    }
+}
+#define KLXR_FRAME_CHAIN_SEEN 32
+static struct { const char *site; int32_t type; } g_frame_chain_seen[KLXR_FRAME_CHAIN_SEEN];
+static int g_frame_chain_n;
+static pthread_mutex_t g_frame_chain_mu = PTHREAD_MUTEX_INITIALIZER;
+static void klxr_note_chain_types(const char *site, const void *next, uint32_t layer_type) {
+    for (int depth = 0; next && depth < 8; depth++) {
+        struct { int32_t type; int32_t pad; const void *next; } node;
+        vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)next, sizeof node,
+                              (vm_address_t)&node, &got) != KERN_SUCCESS || got != sizeof node) {
+            node.type = 0; node.next = NULL;    // say it once as type 0, unreadable
+        }
+        int known = 0;
+        for (int i = 0; i < g_frame_chain_n; i++)
+            if (g_frame_chain_seen[i].site == site && g_frame_chain_seen[i].type == node.type) known = 1;
+        if (!known && g_frame_chain_n < KLXR_FRAME_CHAIN_SEEN) {
+            g_frame_chain_seen[g_frame_chain_n].site = site;
+            g_frame_chain_seen[g_frame_chain_n++].type = node.type;
+            if (node.type == 0)
+                fprintf(stderr, "  [xr] chain on %s: unreadable next %p — walk stopped\n", site, next);
+            else if (layer_type)
+                fprintf(stderr, "  [xr] chain on %s (layer type %u): XrStructureType %d (%s) — not read\n",
+                        site, layer_type, node.type, klxr_chain_type_name(node.type));
+            else
+                fprintf(stderr, "  [xr] chain on %s: XrStructureType %d (%s) — not read\n",
+                        site, node.type, klxr_chain_type_name(node.type));
+        }
+        next = node.next;
+    }
+}
+static void klxr_note_frame_chains(const XrFrameEndInfo *info, uint64_t frame) {
+    if (g_frame_chain_n >= KLXR_FRAME_CHAIN_SEEN) return;
+    if (frame >= 300 && frame % 30) return;
+    pthread_mutex_lock(&g_frame_chain_mu);
+    klxr_note_chain_types("xrEndFrame", info->next, 0);
+    for (uint32_t i = 0; i < info->layerCount && info->layers; i++) {
+        const XrCompositionLayerBaseHeader *l = info->layers[i];
+        if (!l) continue;
+        if (l->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+            const XrCompositionLayerProjection *p = (const XrCompositionLayerProjection *)l;
+            klxr_note_chain_types("projection layer", p->next, 0);
+            for (uint32_t v = 0; v < p->viewCount && v < 4 && p->views; v++)
+                klxr_note_chain_types("projection view", p->views[v].next, 0);
+        } else {
+            klxr_note_chain_types("other layer", l->next, (uint32_t)l->type);
+        }
+    }
+    pthread_mutex_unlock(&g_frame_chain_mu);
 }
 
 // ...and the one chained struct that must NOT merely be logged. The guest asks
@@ -6116,6 +6197,7 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     if (!s->running) KLXR_RET(KLXR_ERROR_SESSION_NOT_RUNNING);
     if (!s->frame_begun) KLXR_RET(KLXR_ERROR_CALL_ORDER_INVALID);
     s->frame_begun = 0;
+    klxr_note_frame_chains(info, (uint64_t)s->frames_ended);
     s->frames_ended++;
 
     // Back-pressure for a GLES guest that out-runs the GPU. xrWaitFrame paces by
