@@ -2261,7 +2261,8 @@ static const char *klj_stream_bytes(klj_stream *st) {
 // Lines appended to the guest's boot.config as Unity reads it — the engine's
 // own switches, which on Android it takes from this file and nowhere else.
 //
-// Eye of the Temple (x5361030930653377, Unity 2019.4.36f1) skins on the GPU
+// Eye of the Temple (x5361030930653377, Unity 2019.4.36f1) and Shave & Stuff
+// (x7532973430077887) skin on the GPU
 // with a compute shader, because the ES 3.2 we describe makes Unity set its
 // compute capability from the version alone (MAX_COMPUTE_* are not consulted).
 // ANGLE's ES 3.0 context cannot compile one: "Shader Internal-Skinning.main:
@@ -2271,7 +2272,9 @@ static const char *klj_stream_bytes(klj_stream *st) {
 // KL_UNITY_BOOT_EXTRA="k=v;k=v" overrides the per-target default; "" for none.
 static const char *klj_boot_config_extra(void) {
     const char *t = kl_driver_target_name();
-    const char *dflt = t && strcmp(t, "x5361030930653377") == 0
+    const char *dflt = t &&
+        (strcmp(t, "x5361030930653377") == 0 ||
+         strcmp(t, "x7532973430077887") == 0)
         ? "disable-gpu-skinning=1" : "";
     return kl_env_str("KL_UNITY_BOOT_EXTRA", dflt);
 }

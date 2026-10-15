@@ -583,7 +583,71 @@ static const kl_gp_word k_pistol_whip_score_null_exit[] = {
       "bl <raise NullReferenceException> -> b 0x11e6064: OnNewGameScore's normal return" },
 };
 
+// Shave & Stuff 1.12.3.2 (x7532973430077887) — permit the selected base
+// scenario to start when the optional remote configuration service is absent.
+//
+// The title reaches its character/salon selector and accepts controller input,
+// but GameManager.CanStartGame remains false after Firebase/Gamestoty remote
+// configuration fails on this host.  The property checks three pieces of
+// already-created local state and is used only as the readiness gate before
+// starting the scenario currently selected by the game.  Returning true here
+// does not select a scenario, manufacture an entitlement, or touch IAP state;
+// locked salons and DLC continue to be decided by their own data.
+//
+// The two prologue words alone are a weak fingerprint — `str x20, [sp, #-0x20]!;
+// stp x19, x30, [sp, #0x10]` opens a great many functions, and every guest with
+// a libil2cpp.so is checked against this row. So the group also carries
+// CharacterSelectionPanel's eight words below as unchanged rows (expect == to):
+// it applies only where both sites match, which pins it to this build. The rows
+// read the ORIGINAL words, so this group sits ahead of the one that rewrites them.
+static const kl_gp_word k_shave_stuff_can_start_offline[] = {
+    { 0x268af68, 0xf81e0ff4, 0x52800020,
+      "GameManager.CanStartGame: mov w0, #1 when remote config is unavailable" },
+    { 0x268af6c, 0xa9017bf3, 0xd65f03c0,
+      "GameManager.CanStartGame: return selected local scenario readiness" },
+    { 0x2660d0c, 0xf9402a74, 0xf9402a74, "fingerprint only (CharacterSelectionPanel)" },
+    { 0x2660d10, 0xaa1303e0, 0xaa1303e0, "fingerprint only" },
+    { 0x2660d14, 0xaa1f03e1, 0xaa1f03e1, "fingerprint only" },
+    { 0x2660d18, 0x94295c3e, 0x94295c3e, "fingerprint only" },
+    { 0x2660d1c, 0xb4000560, 0xb4000560, "fingerprint only" },
+    { 0x2660d20, 0xaa1f03e1, 0xaa1f03e1, "fingerprint only" },
+    { 0x2660d24, 0x94297ecf, 0x94297ecf, "fingerprint only" },
+    { 0x2660d28, 0xb0010773, 0xb0010773, "fingerprint only" },
+};
+
+// The unlocked Barbershop card does reach CharacterSelectionPanel.OnPointerClick
+// and CreativeModeManager.PickCharacter: the selection and its progress state
+// are already committed at 0x2660d08.  Immediately afterwards the panel tries
+// to instantiate its optional selectionFxPrefab.  This serialized reference is
+// null in the Quest asset set as loaded on this host, so every generated null
+// guard converges on 0x2660dc8 and raises NullReferenceException.  The exception
+// escapes the pointer callback and leaves the selector's busy ring on screen.
+//
+// Return normally immediately after PickCharacter.  This drops only that
+// cosmetic selection effect; it does not touch ChapterDreads (the sole value
+// of IapPurchaseItem), chapter progression, saved unlocks, or purchase state.
+// The eight-word epilogue is copied from this method's own normal ABI restore.
+static const kl_gp_word k_shave_stuff_missing_selection_fx[] = {
+    { 0x2660d0c, 0xf9402a74, 0xa9457bf3, "restore x19/x30 after PickCharacter" },
+    { 0x2660d10, 0xaa1303e0, 0xa94453f5, "restore x21/x20 after PickCharacter" },
+    { 0x2660d14, 0xaa1f03e1, 0xf9401ff6, "restore x22 after PickCharacter" },
+    { 0x2660d18, 0x94295c3e, 0x6d42a3e9, "restore d9/d8 after PickCharacter" },
+    { 0x2660d1c, 0xb4000560, 0x6d41abeb, "restore d11/d10 after PickCharacter" },
+    { 0x2660d20, 0xaa1f03e1, 0x6d40b3ed, "restore d13/d12 after PickCharacter" },
+    { 0x2660d24, 0x94297ecf, 0xfc4607ee, "restore d14 and stack after PickCharacter" },
+    { 0x2660d28, 0xb0010773, 0xd65f03c0, "return without optional selection effect" },
+};
+
 static const kl_gp_patch k_patches[] = {
+    // Order matters: can-start-offline fingerprints the words selection-fx rewrites.
+    { "shave-stuff-can-start-offline", "libil2cpp.so",
+      "the already-selected base salon can start without optional remote config",
+      k_shave_stuff_can_start_offline,
+      sizeof k_shave_stuff_can_start_offline / sizeof *k_shave_stuff_can_start_offline },
+    { "shave-stuff-missing-selection-fx", "libil2cpp.so",
+      "a missing cosmetic selection prefab does not abort the selected base salon",
+      k_shave_stuff_missing_selection_fx,
+      sizeof k_shave_stuff_missing_selection_fx / sizeof *k_shave_stuff_missing_selection_fx },
     { "pistol-whip-score-null-exit", "libil2cpp.so",
       "missing optional end-of-run score state does not abort the scene transition",
       k_pistol_whip_score_null_exit,

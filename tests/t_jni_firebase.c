@@ -7,6 +7,7 @@
 #include "kl_jni_slots.h"
 #include "kl_va.h"
 #include "guest/kl_driver.h"
+#include "jni/kl_jni_int.h"
 
 #define SLOT(n, name) JNI_##name = n,
 enum { KL_JNI_SLOTS(SLOT) };
@@ -17,6 +18,9 @@ enum { KL_JNI_SLOTS(SLOT) };
 #define OPTIONS "com/google/firebase/FirebaseOptions"
 #define GOOGLE "com/google/android/gms/common/GoogleApiAvailability"
 #define HELPER "com/google/firebase/app/internal/cpp/GoogleApiAvailabilityHelper"
+#define GAMESTOTY "com/Gamestoty/GamestotyJava"
+#define GS_INIT "(Ljava/lang/String;Ljava/lang/String;)V"
+#define GS_EVENT "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"
 static void *env;
 static void **jni;
 static kl_va args(uint64_t *values, int count) {
@@ -61,11 +65,34 @@ int main(void) {
     kl_driver_init(&other, NULL, 0);
     assert(!get(REG, "getInstance", "()L" REG ";", &none)); exception(NULL);
     assert(!get(GOOGLE, "getInstance", "()L" GOOGLE ";", &none)); exception(NULL);
+    assert(!klj_firebase_binding(GAMESTOTY, "Init", GS_INIT));
     kl_jni_set_permissive(0);
 
-    const kl_target target = {.name = "x9386827918099701"};
-    kl_driver_init(&target, NULL, 0);
+    // BattleGroupVR2 and Shave & Stuff both reach Firebase's C++ registration
+    // path before their first scene and get the same backend-unavailable
+    // answers. Gamestoty, Shave & Stuff's own analytics bridge, is that title's
+    // alone: BattleGroupVR2 must still see it unbound.
+    const char *targets[] = {"x9386827918099701", "x7532973430077887"};
     void *identity = NULL;
+    for (int t = 0; t < 2; t++) {
+    const kl_target target = {.name = targets[t]};
+    kl_driver_init(&target, NULL, 0);
+    int shave = t == 1;
+    assert(!klj_firebase_binding(GAMESTOTY, "Init", GS_INIT) == !shave);
+    assert(!klj_firebase_binding(GAMESTOTY, "SendEvent", GS_EVENT) == !shave);
+    if (shave) {
+        kl_va init = args((uint64_t[]){(uintptr_t)kl_jni_new_string("game-key"),
+                                      (uintptr_t)kl_jni_new_string("build")}, 2);
+        JNI(CallStaticVoidMethodV, void (*)(void *, void *, void *, kl_va *))
+            (env, kl_jni_class(GAMESTOTY), method(GAMESTOTY, "Init", GS_INIT, 1), &init);
+        exception(NULL);
+        kl_va event = args((uint64_t[]){(uintptr_t)kl_jni_new_string("scene-loaded"),
+                                       (uintptr_t)kl_jni_new_string("{}"),
+                                       (uintptr_t)kl_jni_new_string("[]")}, 3);
+        JNI(CallStaticVoidMethodV, void (*)(void *, void *, void *, kl_va *))
+            (env, kl_jni_class(GAMESTOTY), method(GAMESTOTY, "SendEvent", GS_EVENT, 1), &event);
+        exception(NULL);
+    }
     for (int cycle = 0; cycle < 3; cycle++) {
         kl_jni_local_frame_push();
         void *reg = get(REG, "getInstance", "()L" REG ";", &none);
@@ -99,6 +126,8 @@ int main(void) {
         assert(kl_jni_pending_ui_tasks() == 0);
         kl_jni_local_frame_pop();
     }
-    puts("PASS: Firebase startup/teardown survives repeated calls; unavailable backend returns errors only for BattleGroupVR2.");
+    }
+    puts("PASS: Firebase startup/teardown survives repeated calls; unavailable backend returns "
+         "errors only for BattleGroupVR2 and Shave & Stuff; Gamestoty is Shave & Stuff's alone.");
     return 0;
 }

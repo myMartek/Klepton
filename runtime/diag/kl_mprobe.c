@@ -4,6 +4,7 @@
 #include <string.h>
 #include "klepton.h"
 #include "kl_mprobe.h"
+#include "kl_ovrp.h"
 
 // ---- the slice of IL2CPP's embedding API this needs ----
 // All exported by libil2cpp.so (checked with nm), so they resolve through the
@@ -114,6 +115,178 @@ static Il2CppObject *invoke_on(Il2CppObject *self, const MethodInfo *m,
 
 static Il2CppObject *invoke(const MethodInfo *m, void **args, const char *what) {
     return invoke_on(NULL, m, args, what);   // static methods
+}
+
+// Shave & Stuff uses BNG.InputBridge for UI and gameplay input. Its controller
+// poses come from OculusXRPlugin, but every one of its managed input paths
+// overwrites the BNG fields with zero before UI/gameplay reads them. Keep only
+// this title's bridge in sync with the same physical controller snapshot sent
+// through ovrp_GetControllerState4. InputSource 5 is deliberately outside the
+// enum's 0...4 switch so BNG does not erase these values on the next frame.
+// This runs after a guest frame, so the game observes a one-frame-old sample.
+//
+// The offsets below were measured on 1.12.3.2 (version code 197). Before the
+// first write the object is checked against them: its class must be
+// InputBridge, large enough for the highest offset, and every field this table
+// names that IL2CPP can resolve must sit where it was measured. One that has
+// moved means another build, and the bridge then stays off for the run rather
+// than writing into the wrong fields.
+static const struct { const char *name; size_t off; } k_bng_layout[] = {
+    { "InputSource", 24 },      { "LeftGrip", 52 },        { "LeftGripDown", 56 },
+    { "RightGrip", 60 },        { "RightGripDown", 64 },   { "LeftTrigger", 68 },
+    { "LeftTriggerUp", 73 },    { "LeftTriggerDown", 74 }, { "RightTrigger", 76 },
+    { "RightTriggerUp", 80 },   { "RightTriggerDown", 81 },
+    { "LeftThumbstickDown", 85 },  { "LeftThumbstickUp", 86 },
+    { "RightThumbstickDown", 87 }, { "RightThumbstickUp", 88 },
+    { "LeftThumbstick", 89 },   { "RightThumbstick", 90 },
+    { "AButton", 91 },          { "BButton", 104 },        { "XButton", 107 },
+    { "YButton", 110 },         { "StartButton", 113 },    { "BackButton", 115 },
+    { "LeftThumbstickAxis", 120 }, { "RightThumbstickAxis", 128 },
+    { "IsOculusDevice", 212 },  { "IsOculusQuest", 213 },
+};
+#define BNG_LAYOUT_END 214      // one past the highest byte written below
+
+static int shave_bridge_layout_ok(Il2CppObject *bridge) {
+    Il2CppClass *k = il.object_get_class(bridge);
+    const char *name = k ? il.class_get_name(k) : NULL;
+    if (!name || strcmp(name, "InputBridge")) {
+        fprintf(stderr, "  [mprobe] BNG bridge: object is %s, not InputBridge — off\n",
+                name ? name : "?");
+        return 0;
+    }
+    kl_image *img = kl_find_image("libil2cpp.so");
+    typedef void *(*field_fn)(Il2CppClass *, const char *);
+    typedef size_t (*f_off_fn)(void *);
+    typedef int32_t (*size_fn)(Il2CppClass *);
+    field_fn field = img ? (field_fn)kl_sym(img, "il2cpp_class_get_field_from_name") : NULL;
+    f_off_fn f_off = img ? (f_off_fn)kl_sym(img, "il2cpp_field_get_offset") : NULL;
+    size_fn isize = img ? (size_fn)kl_sym(img, "il2cpp_class_instance_size") : NULL;
+    if (isize && isize(k) < BNG_LAYOUT_END) {
+        fprintf(stderr, "  [mprobe] BNG bridge: InputBridge is %d bytes, the measured "
+                        "layout needs %d — off\n", isize(k), BNG_LAYOUT_END);
+        return 0;
+    }
+    unsigned named = 0, n = sizeof k_bng_layout / sizeof *k_bng_layout;
+    for (unsigned i = 0; field && f_off && i < n; i++) {
+        void *f = field(k, k_bng_layout[i].name);
+        if (!f) continue;
+        size_t at = f_off(f);
+        if (at != k_bng_layout[i].off) {
+            fprintf(stderr, "  [mprobe] BNG bridge: InputBridge.%s is at %zu, measured "
+                            "%zu — not the 1.12.3.2 layout, off\n",
+                    k_bng_layout[i].name, at, k_bng_layout[i].off);
+            return 0;
+        }
+        named++;
+    }
+    fprintf(stderr, "  [mprobe] BNG bridge: on, %u of %u measured fields confirmed by name\n",
+            named, n);
+    return 1;
+}
+
+static void shave_input_bridge(void) {
+    extern const char *kl_driver_target_name(void);
+    const char *target = kl_driver_target_name();
+    if (!target || strcmp(target, "x7532973430077887")) return;
+    if (!mprobe_init()) return;
+
+    static const MethodInfo *get_instance;
+    static void *ui_bridge_field;
+    static void (*static_get)(void *, void *);
+    static int resolved;
+    if (!resolved) {
+        resolved = 1;
+        get_instance = find_method("BNG", "InputBridge", "get_Instance", 0);
+        kl_image *img = kl_find_image("libil2cpp.so");
+        typedef void *(*field_fn)(Il2CppClass *, const char *);
+        field_fn field = img ? (field_fn)kl_sym(
+            img, "il2cpp_class_get_field_from_name") : NULL;
+        static_get = img ? (void (*)(void *, void *))kl_sym(
+            img, "il2cpp_field_static_get_value") : NULL;
+        Il2CppClass *ui = find_class("", "UiPointerHelper");
+        if (field && ui) ui_bridge_field = field(ui, "inputBridge");
+    }
+    // UiPointerHelper.IsUiPointerTriggerPressed reads this static pointer, not
+    // InputBridge._instance directly. Scene changes may recreate it, so fetch
+    // it every frame and only fall back to the singleton while UI is starting.
+    Il2CppObject *bridge = NULL;
+    if (ui_bridge_field && static_get) static_get(ui_bridge_field, &bridge);
+    if (!bridge) bridge = invoke(get_instance, NULL, "BNG.InputBridge.Instance");
+    if (!bridge) return;
+    static int layout = -1;     // checked once: the class is the same every scene
+    if (layout < 0) layout = shave_bridge_layout_ok(bridge);
+    if (!layout) return;
+
+    uint32_t lb = 0, rb = 0;
+    float left = 0, right = 0, lg = 0, rg = 0;
+    float lsx = 0, lsy = 0, rsx = 0, rsy = 0;
+    kl_ovrp_controller_input(0, &lb, NULL, &left, &lg, &lsx, &lsy);
+    kl_ovrp_controller_input(1, &rb, NULL, &right, &rg, &rsx, &rsy);
+    uint8_t *p = (uint8_t *)bridge;
+    *(int32_t *)(p + 24) = 5;                    // bypass BNG's zeroing switch
+    p[212] = 1;                                  // IsOculusDevice
+    p[213] = 1;                                  // IsOculusQuest
+
+    memcpy(p + 52, &lg, sizeof lg);               // LeftGrip
+    memcpy(p + 60, &rg, sizeof rg);               // RightGrip
+    memcpy(p + 68, &left, sizeof left);
+    memcpy(p + 76, &right, sizeof right);
+    memcpy(p + 120, &lsx, sizeof lsx);             // LeftThumbstickAxis
+    memcpy(p + 124, &lsy, sizeof lsy);
+    memcpy(p + 128, &rsx, sizeof rsx);             // RightThumbstickAxis
+    memcpy(p + 132, &rsy, sizeof rsy);
+
+    static float old_left, old_right, old_lg, old_rg;
+    static uint32_t old_lb, old_rb;
+    const float threshold = 0.1f;
+    int was_left = old_left >= threshold, now_left = left >= threshold;
+    int was_right = old_right >= threshold, now_right = right >= threshold;
+    p[56] = (uint8_t)(old_lg < threshold && lg >= threshold);
+    p[64] = (uint8_t)(old_rg < threshold && rg >= threshold);
+    p[73] = (uint8_t)(was_left && !now_left);     // LeftTriggerUp
+    p[74] = (uint8_t)(!was_left && now_left);     // LeftTriggerDown
+    p[80] = (uint8_t)(was_right && !now_right);   // RightTriggerUp
+    p[81] = (uint8_t)(!was_right && now_right);   // RightTriggerDown
+
+#define BNG_BUTTON(off, down, up, word, old, mask) do {                    \
+        int now = ((word) & (mask)) != 0;                                  \
+        int was = ((old) & (mask)) != 0;                                   \
+        p[(off)] = (uint8_t)now;                                           \
+        p[(down)] = (uint8_t)(!was && now);                                \
+        p[(up)] = (uint8_t)(was && !now);                                  \
+    } while (0)
+    BNG_BUTTON(91, 92, 93, rb, old_rb, KL_OVRP_RAW_A);
+    BNG_BUTTON(104, 105, 106, rb, old_rb, KL_OVRP_RAW_B);
+    BNG_BUTTON(107, 108, 109, lb, old_lb, KL_OVRP_RAW_X);
+    BNG_BUTTON(110, 111, 112, lb, old_lb, KL_OVRP_RAW_Y);
+#undef BNG_BUTTON
+
+    int menu = ((lb | rb) & (KL_OVRP_RAW_START | KL_OVRP_RAW_BACK)) != 0;
+    int old_menu = ((old_lb | old_rb) &
+                    (KL_OVRP_RAW_START | KL_OVRP_RAW_BACK)) != 0;
+    p[94] = (uint8_t)menu;                       // MenuButton
+    p[113] = (uint8_t)menu;                      // StartButton
+    p[114] = (uint8_t)(!old_menu && menu);       // StartButtonDown
+    p[115] = (uint8_t)menu;                      // BackButton
+    p[116] = (uint8_t)(!old_menu && menu);       // BackButtonDown
+
+    int lstick = (lb & KL_OVRP_RAW_LTHUMBSTICK) != 0;
+    int rstick = (rb & KL_OVRP_RAW_RTHUMBSTICK) != 0;
+    int old_lstick = (old_lb & KL_OVRP_RAW_LTHUMBSTICK) != 0;
+    int old_rstick = (old_rb & KL_OVRP_RAW_RTHUMBSTICK) != 0;
+    p[85] = (uint8_t)(!old_lstick && lstick);
+    p[86] = (uint8_t)(old_lstick && !lstick);
+    p[87] = (uint8_t)(!old_rstick && rstick);
+    p[88] = (uint8_t)(old_rstick && !rstick);
+    p[89] = (uint8_t)lstick;
+    p[90] = (uint8_t)rstick;
+
+    old_left = left;
+    old_right = right;
+    old_lg = lg;
+    old_rg = rg;
+    old_lb = lb;
+    old_rb = rb;
 }
 
 static float invoke_float(const MethodInfo *m, void **args, const char *what) {
@@ -1174,6 +1347,7 @@ void kl_mprobe_nexus_frame_budget(unsigned frame) {
 }
 
 void kl_mprobe_tick(unsigned frame) {
+    shave_input_bridge();
     // Independent of KL_PROBE_INPUT and of KL_PROBE_FROM: this one has to land
     // BEFORE the throw it exists to describe, and the throw here is on the
     // first frame. It runs once, on the first tick that finds IL2CPP up.

@@ -394,6 +394,8 @@ final class KleptonControllers {
     // Frozen for this gameplay session. Launcher changes apply to the next start.
     let mode = KleptonControllerMode.selected()
     private let surreal = KleptonSurrealBackend.shared
+    // Shave & Stuff only: a reported trigger press is a full pull (see the poll).
+    private static let triggerPressIsFull = klTargetName() == "x7532973430077887"
 
     init() {
         surreal.setSettings(.stored())
@@ -1272,7 +1274,15 @@ final class KleptonControllers {
 
             var st = KleptonHandState()
             st.fromController = true
-            st.indexTrigger = value("Trigger")
+            // On this title the Sense trigger reports its digital press, but
+            // the accompanying analog sample peaks around 0.15. OVRInput uses
+            // the float (not merely the raw button bit) as its UI click, so the
+            // ray highlights controls without ever clicking them. Preserve the
+            // analog travel for every other target; for Shave & Stuff only, a
+            // reported press is the fully pressed Touch trigger Android would
+            // have supplied.
+            st.indexTrigger = Self.triggerPressIsFull && pressed("Trigger")
+                ? 1 : value("Trigger")
             st.handTrigger  = pressed("Grip") ? 1 : 0
             // **The thumbstick is a DPAD element, not two axes.** `GCInput`
             // models a stick as one `GCDirectionPadElement` carrying `xAxis` and

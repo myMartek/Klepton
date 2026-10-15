@@ -20,6 +20,7 @@
 #define FB_LOG "com/google/firebase/app/internal/cpp/Log"
 #define FB_GOOGLE_HELPER "com/google/firebase/app/internal/cpp/GoogleApiAvailabilityHelper"
 #define GOOGLE_API "com/google/android/gms/common/GoogleApiAvailability"
+#define GAMESTOTY "com/Gamestoty/GamestotyJava"
 
 static klj_val registrar(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
@@ -64,6 +65,13 @@ static klj_val app_not_initialized(void *env, void *self, const klj_val *a, int 
     klj_raise("java/lang/IllegalStateException", "FirebaseApp has not been initialized");
     return (klj_val){0};
 }
+static klj_val gamestoty_unavailable(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    // This SDK is an optional analytics/attribution bridge. Android would
+    // initialize its Java backend here; visionOS has no matching service.
+    KLJ_LOG_ONCE("Gamestoty analytics backend unavailable — initialization skipped");
+    return (klj_val){0};
+}
 
 // Exact methods from the observed version-registration path and the SDK's
 // default-app/dependency failure paths. Other Firebase calls remain unhandled.
@@ -78,11 +86,22 @@ static const klj_binding bindings[] = {
     {FB_APP, "getInstance", "(Ljava/lang/String;)L" FB_APP ";", app_not_initialized},
     {NULL, NULL, NULL, NULL}
 };
+// Shave & Stuff's own analytics bridge, answered for that title alone.
+static const klj_binding gamestoty_bindings[] = {
+    {GAMESTOTY, "Init", "(Ljava/lang/String;Ljava/lang/String;)V", gamestoty_unavailable},
+    {GAMESTOTY, "SendEvent", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+     gamestoty_unavailable},
+    {NULL, NULL, NULL, NULL}
+};
 
 const klj_binding *klj_firebase_binding(const char *cls, const char *name, const char *sig) {
     const char *target = kl_driver_target_name();
-    if (!target || strcmp(target, "x9386827918099701") != 0) return NULL;
+    if (!target) return NULL;
+    int shave = strcmp(target, "x7532973430077887") == 0;
+    if (!shave && strcmp(target, "x9386827918099701") != 0) return NULL;
     for (const klj_binding *b = bindings; b->cls; b++)
+        if (!strcmp(cls, b->cls) && !strcmp(name, b->name) && !strcmp(sig, b->sig)) return b;
+    for (const klj_binding *b = gamestoty_bindings; shave && b->cls; b++)
         if (!strcmp(cls, b->cls) && !strcmp(name, b->name) && !strcmp(sig, b->sig)) return b;
     return NULL;
 }

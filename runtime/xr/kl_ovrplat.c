@@ -1878,12 +1878,18 @@ static uint64_t klplat_AssetDetails_GetLanguage_any(const void *h) {
 // its purchases, then its asset files, and only then loads its first level.
 // An empty list says "nothing is for sale here and nothing was bought" —
 // less than the truth, never more: its paid second part stays locked.
-// Default on for that title alone; the switch overrides in either direction.
+// Shave & Stuff (x7532973430077887) has the same serial dependency: after its
+// application entitlement succeeds, its base-salon setup waits for the product
+// and purchase lists before it creates GameManager.  An empty pair keeps the
+// sole paid chapter locked while allowing normal progression in the base game.
+// Default on only for those two titles; the switch overrides either way.
 static int klplat_iap_empty(void) {
     static int on = -1;
     if (on < 0) {
         const char *t = kl_driver_target_name();
-        on = kl_env_on("KL_PLAT_IAP_EMPTY", t && strcmp(t, "x3484270071659289") == 0);
+        on = kl_env_on("KL_PLAT_IAP_EMPTY", t &&
+                       (strcmp(t, "x3484270071659289") == 0 ||
+                        strcmp(t, "x7532973430077887") == 0));
     }
     return on;
 }
@@ -2218,7 +2224,13 @@ static int klplat_user_listed(const char *t) {
                                 // completes, GetLoggedInUser fails and the
                                 // game's online start gives up in its loading
                                 // scene (fix 37, 2026-10-14; not run here).
-                                "x2582932495064035" };
+                                "x2582932495064035",
+                                // Shave & Stuff: entitlement succeeds, but
+                                // GetLoggedInUser returns 0 and its salon cards
+                                // remain behind a permanent loading spinner.
+                                // The offline user supplies only player identity;
+                                // ownership and purchases remain separate.
+                                "x7532973430077887" };
     // Beat Saber from 1.45 on (Unity 6; kl_guest_beatsaber_openxr): its start
     // asks for the user FIRST and goes no further without one — no entitlement
     // request, no scene, one draw a frame of black and silence (on device,

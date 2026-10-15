@@ -196,6 +196,21 @@ static int addr_mapped(const void *p, size_t len) {
 struct poke_cap_row { const char *ver; uint32_t singleton; uint32_t field; int use;
                       const char *target; };
 static const struct poke_cap_row k_poke_caps[] = {
+    // Unity 2021.3.45f2 — Shave & Stuff 1.12.3.2
+    // (x7532973430077887, 2026-10-15). The base game runs after CPU skinning,
+    // but dynamic hair colours and parts of the salon menu sample stale unit-0
+    // textures while the engine reports "Invalid texture unit!" continuously.
+    // Measured from this title's own libunity by the recipe above:
+    //   0x1487c52  "OpenGL Error: Invalid texture unit!"
+    //   0xb8fc34   bl 0x4b0fc4            ; the singleton getter
+    //   0xb8fc38   ldr w8, [x0, #0xec]    ; the cap
+    //   0xb8fc3c   cmp w8, w22 / b.ls     ; reject units >= cap
+    //   0x4b0fc4   adrp x8, 0x18f4000 / ldr x0, [x8, #0xf40]
+    // 0x18f4f40 is in the final RW LOAD's BSS (file-backed end 0x1892c78,
+    // memory end 0x1982250). The 12-byte unit cache starts at 0x28 and its
+    // active-unit field is at 0x330, leaving exactly 64 safe entries.
+    { "2021.3.45f2", 0x18f4f40, 0xec, 1, "x7532973430077887" },
+
     // Space Channel 5 VR 1.0.5 / Unity 2021.3.24f1, measured from its ELF:
     // 7c06c0 queries MAX_COMBINED_TEXTURE_IMAGE_UNITS, then 7c06dc clamps
     // to 32 and 7c06e0 writes field ec. SetTexture at 7a3a14 rejects against
@@ -391,6 +406,20 @@ void kl_guest_poke_texture_unit_cap(void) {
         }
         if (!pv) poke_n = 64;
         if (poke_n > 64) poke_n = 64; // the measured engine cache has 64 slots
+    }
+    // Shave & Stuff: the same two guards, from the instructions in its row's
+    // comment (getter 0x4b0fc4, the cap check 0xb8fc38), and the same 64-slot
+    // ceiling, which KL_POKE_CAP may lower but not raise.
+    if (row->target && !strcmp(row->target, "x7532973430077887")) {
+        static const uint32_t getter[] = {0x9000a228, 0xf947a100};
+        static const uint32_t limit[] = {0xb940ec08, 0x6b16011f};
+        if (kl_span(u) < 0xb8fc40 ||
+            memcmp(ub + 0x4b0fc4, getter, sizeof getter) ||
+            memcmp(ub + 0xb8fc38, limit, sizeof limit)) {
+            if (first) fprintf(stderr, "  [poke] Shave & Stuff texture cap: SKIPPED (binary guard mismatch)\n");
+            return;
+        }
+        if (poke_n > 64) poke_n = 64;
     }
 
     if ((size_t)POKE_SINGLETON + sizeof(void *) > kl_span(u)) {

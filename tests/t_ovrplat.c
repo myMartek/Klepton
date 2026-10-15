@@ -10,12 +10,24 @@
 // thousand — so it goes to /dev/null; the verdict and any failure are on
 // stdout.
 #include <stdio.h>
+#include <stdlib.h>
 #include "../runtime/xr/kl_ovrplat.h"
+
+int kl_ovrplat_offline_user_for(const char *target);   // the start window's question
 
 int main(void) {
     if (!freopen("/dev/null", "w", stderr)) return 2;
     printf("=== Oculus Platform completion queue ===\n");
     int ok = kl_ovrplat_queue_selftest(stdout);
+    // The offline user is a per-title list: a title on it gets one, a title
+    // that is not does not (Shave & Stuff joined it with fix 41).
+    unsetenv("KL_PLAT_USER");
+    int listed = kl_ovrplat_offline_user_for("x7532973430077887") == 1 &&
+                 kl_ovrplat_offline_user_for("x9386827918099701") == 1 &&
+                 kl_ovrplat_offline_user_for("ovrplat-test-unlisted") == 0 &&
+                 kl_ovrplat_offline_user_for(NULL) == 0;
+    printf("%s: the offline user is offered to listed titles only\n", listed ? "PASS" : "FAIL");
+    ok = ok && listed;
     printf("%s: no completion lost, no held message rewritten, no slot torn, pool bounded\n",
            ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

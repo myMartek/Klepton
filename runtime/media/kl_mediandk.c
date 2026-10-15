@@ -316,7 +316,15 @@ static int klm_extractor_enabled(void) {
     static int on = -1;
     if (on < 0) {
         int vk = kl_vulkan_guest_active();
-        on = kl_env_on("KL_MEDIA_EXTRACTOR", g_video_default > 0 ? 1 : !vk);
+        const char *target = kl_driver_target_name();
+        // Shave & Stuff's rotating promo panel is the only video used before
+        // play. On this GLES path Unity submits thousands of decoded frames but
+        // consumes only a handful, leaving the panel visibly torn and adding
+        // needless decode work. Refuse that optional clip by default for this
+        // title; the "Videos" setting and KL_MEDIA_EXTRACTOR=1 still turn it on.
+        int shave = target && !strcmp(target, "x7532973430077887");
+        int default_on = g_video_default > 0 ? 1 : shave ? 0 : !vk;
+        on = kl_env_on("KL_MEDIA_EXTRACTOR", default_on);
         if (on && vk)
             fprintf(stderr, "  [media] video is enabled for this Vulkan "
                             "guest (the target's default or the setting)\n");
