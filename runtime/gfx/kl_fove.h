@@ -81,6 +81,10 @@ int   kl_fove_pend_selftest(void);
 // t_fove: kl_fove's MSL patch applied to `src` with the default
 // knobs; a malloc'd patched copy, or NULL when the source is left alone.
 char *kl_fove_patch_for_test(const char *src);
+// t_fove: KL_FOVE_SUBPASS_HELPERS for the next kl_fove_patch_for_test calls
+// (1, the default: a helper's subpass read gets the physical position; 0: the
+// old behaviour). kf_read_env sets the same knob from the environment.
+void  kl_fove_set_subpass_helpers_for_test(int on);
 
 // The guest's OWN eye-size scene target ("intermediate") that reaches an eye
 // image — e.g. Batman: Arkham Shadow's render pipeline draws its 2-layer MSAA

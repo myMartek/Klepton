@@ -3075,9 +3075,10 @@ records are never written):
   got the remapped screen position and read the scene depth at the wrong texel.
   In Moss that turned the soft shadow in the book's fold into a hard black band,
   with foveation on only. With `1`, a helper whose only uses of the position are
-  `uint2(<pos>.xy)` is passed the saved physical position (`kl_fove_phys`) at
-  its call sites; a helper that uses the position for anything else keeps the
-  remapped one. `0` = the old behaviour (A/B control). Proof line: `[fove]
+  `<tex>.read(uint2(<pos>.xy)…` from one of its own texture parameters is passed
+  the saved physical position (`kl_fove_phys`) at its call sites; a helper that
+  uses the position for anything else keeps the remapped one. `t_fove` covers
+  both settings (`kl_fove_set_subpass_helpers_for_test`). `0` = the old behaviour (A/B control). Proof line: `[fove]
   shader …: N subpass-input read(s) kept at the PHYSICAL position (M through a
   helper's call)`, and in the 10 s line `fragment entry points patched N (K with
   subpass reads, …)` with K > 0 for Moss (before the fix: 0). **For a test

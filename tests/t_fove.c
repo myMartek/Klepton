@@ -205,13 +205,45 @@ int main(void) {
                          "{\n    main_00002aac_8392f5e1_out out = {};\n"
                          "    float f = VulkanSubpassDepthFetch(s.D, gl_FragCoord, gl_ViewIndex);\n"
                          "    float o = Other(gl_FragCoord);\n    return out;\n}\n";
+        kl_fove_set_subpass_helpers_for_test(1);
         char *ph = kl_fove_patch_for_test(hs);
         CHECK(ph && strstr(ph, "float4 kl_fove_phys = gl_FragCoord;") &&
               strstr(ph, "VulkanSubpassDepthFetch(s.D, kl_fove_phys, gl_ViewIndex)") &&
               strstr(ph, "Other(gl_FragCoord)") &&
               strstr(ph, "D.read(uint2(gl_FragCoord.xy), gl_ViewIndex, 0)"),
-              "subpass read in a helper not fed the physical position:\n%s", ph ? ph : "(null)");
+              "KL_FOVE_SUBPASS_HELPERS=1: subpass read in a helper not fed the physical position:\n%s", ph ? ph : "(null)");
         free(ph);
+        // KL_FOVE_SUBPASS_HELPERS=0, the A/B control: the old behaviour, the
+        // helper is called with the remapped position and nothing is saved.
+        kl_fove_set_subpass_helpers_for_test(0);
+        char *ph0 = kl_fove_patch_for_test(hs);
+        CHECK(ph0 && strstr(ph0, "VulkanSubpassDepthFetch(s.D, gl_FragCoord, gl_ViewIndex)") &&
+              !strstr(ph0, "kl_fove_phys") &&
+              strstr(ph0, "map_physical_to_screen_coordinates(gl_FragCoord.xy, gl_ViewIndex)"),
+              "KL_FOVE_SUBPASS_HELPERS=0: the helper call was changed:\n%s", ph0 ? ph0 : "(null)");
+        free(ph0);
+        kl_fove_set_subpass_helpers_for_test(1);
+        // Only a `.read(uint2(pos.xy)…)` from one of the helper's own TEXTURE
+        // parameters counts: not a texture reached through another parameter,
+        // not some other uint2 of the position. A texture type whose template
+        // arguments hold a comma still counts.
+        const char *hn = "static inline float ViaMember(constant Buf& b, thread float4& gl_FragCoord)\n"
+                         "{\n    return b.T.read(uint2(gl_FragCoord.xy)).x;\n}\n\n"
+                         "static inline float NotARead(texture2d<float> T, thread float4& gl_FragCoord)\n"
+                         "{\n    return T.sample(S, float2(uint2(gl_FragCoord.xy))).x;\n}\n\n"
+                         "static inline float Templ(texture2d<float, access::read> T, thread float4& gl_FragCoord)\n"
+                         "{\n    return T.read(uint2(gl_FragCoord.xy)).x;\n}\n\n"
+                         "fragment main0_out main0(float4 gl_FragCoord [[position]])\n"
+                         "{\n    main0_out out = {};\n"
+                         "    float a = ViaMember(b, gl_FragCoord);\n"
+                         "    float c = NotARead(t, gl_FragCoord);\n"
+                         "    float d = Templ(t, gl_FragCoord);\n    return out;\n}\n";
+        char *pn = kl_fove_patch_for_test(hn);
+        CHECK(pn && strstr(pn, "ViaMember(b, gl_FragCoord)") && strstr(pn, "NotARead(t, gl_FragCoord)") &&
+              strstr(pn, "Templ(t, kl_fove_phys)"),
+              "helper read matching: only a read from the helper's own texture parameter may count:\n%s",
+              pn ? pn : "(null)");
+        free(pn);
     }
     // The pending-expand table: buffers released without -commit leave nothing.
     int pb = kl_fove_pend_selftest();

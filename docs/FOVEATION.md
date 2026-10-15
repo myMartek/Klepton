@@ -334,9 +334,11 @@ Reads that must stay PHYSICAL keep the original position
   Moss that showed as a hard black band in place of the soft shadow in the
   book's fold, with foveation on only (Moss's eye: a 2-layer x4 MSAA scene, a
   depth-read subpass, both under one map). So a helper that takes the
-  position as `thread float4& <pos>` and uses it ONLY as `uint2(<pos>.xy)` is
-  passed `kl_fove_phys` at its call sites in the entry body instead; a helper
-  that also uses the position for anything else keeps the remapped one.
+  position as `thread float4& <pos>` and uses it ONLY as
+  `<tex>.read(uint2(<pos>.xy)…`, with `<tex>` one of its own texture
+  parameters, is passed `kl_fove_phys` at its call sites in the entry body
+  instead; a helper that uses the position for anything else (or reads a
+  texture it does not take as a parameter) keeps the remapped one.
   Moss's Archive level: 22 of 28 patched fragment entry points have such a
   call (0 were kept physical before). `KL_FOVE_SUBPASS_HELPERS=0` restores the
   old behaviour as an A/B control.

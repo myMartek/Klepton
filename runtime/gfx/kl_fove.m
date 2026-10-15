@@ -428,6 +428,31 @@ static void kf_dump(const char *src, size_t n, uint64_t h, const char *tag) {
     fclose(f);
 }
 
+// Whether `id` (length n) names a parameter in the list [pb, pe) whose type is a
+// texture (`texture…` / `depth…`): the receiver of a subpass read in a helper.
+// A template argument list may hold commas, so the type's start is found with
+// '<' / '>' balanced.
+static int kf_param_is_texture(const char *pb, const char *pe, const char *id, size_t n) {
+    for (const char *p = pb; p + n <= pe; p++) {
+        if (strncmp(p, id, n)) continue;
+        if (p > pb && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) continue;
+        char after = p + n < pe ? p[n] : ')';
+        if (isalnum((unsigned char)after) || after == '_') continue;
+        if (after != ',' && after != ')' && after != ' ' && after != '[') continue;
+        const char *t = p;
+        int ang = 0;
+        while (t > pb) {
+            if (t[-1] == '>') ang++;
+            else if (t[-1] == '<') ang--;
+            else if ((t[-1] == ',' || t[-1] == '(') && ang == 0) break;
+            t--;
+        }
+        while (t < p && (*t == ' ' || *t == '\n')) t++;
+        if (!strncmp(t, "texture", 7) || !strncmp(t, "depth", 5)) return 1;
+    }
+    return 0;
+}
+
 // Returns a patched copy (malloc'd) or NULL to leave the source alone.
 static char *kf_patch_msl(const char *s, size_t n) {
     __atomic_add_fetch(&g_st.libs, 1, __ATOMIC_RELAXED);
@@ -513,8 +538,8 @@ static char *kf_patch_msl(const char *s, size_t n) {
     // The scan above starts at the entry's brace and never sees it, so the
     // helper got the REMAPPED (screen) position and read the physical-layout
     // depth at the wrong texel. A helper whose only uses of <name> are that
-    // spelling is fed the saved physical position at its call sites in the
-    // entry body instead.
+    // spelling, read from one of its own texture parameters, is fed the saved
+    // physical position at its call sites in the entry body instead.
     enum { KF_HC_N = 64 };
     const char *hc[KF_HC_N];
     int nhc = 0;
@@ -536,6 +561,12 @@ static char *kf_patch_msl(const char *s, size_t n) {
                 lp--;
             }
             if (lp <= s || lp[-1] != '(') continue;
+            const char *pc = lp;                 // the parameter list's ')'
+            for (int pd = 1; *pc && pc < f; pc++) {
+                if (*pc == '(') pd++;
+                else if (*pc == ')' && --pd == 0) break;
+            }
+            if (*pc != ')') continue;
             const char *ne = lp - 1, *nb = ne;
             while (nb > s && (isalnum((unsigned char)nb[-1]) || nb[-1] == '_')) nb--;
             if (nb == ne || (size_t)(ne - nb) > 120) continue;
@@ -553,7 +584,14 @@ static char *kf_patch_msl(const char *s, size_t n) {
                 if ((q > s && (isalnum((unsigned char)q[-1]) || q[-1] == '_')) ||
                     isalnum((unsigned char)q[name_l]) || q[name_l] == '_') continue;
                 uses++;
-                if (q - bo >= 6 && !strncmp(q - 6, "uint2(", 6) && !strncmp(q + name_l, ".xy)", 4)) reads++;
+                // Only `<tex>.read(uint2(<name>.xy)…` with <tex> a texture parameter of
+                // this helper: the subpass emulation, not some other uint2 of the position.
+                if (q - bo >= 12 && !strncmp(q - 6, "uint2(", 6) && !strncmp(q + name_l, ".xy)", 4) &&
+                    !strncmp(q - 12, ".read(", 6)) {
+                    const char *te = q - 12, *tb = te;
+                    while (tb > bo && (isalnum((unsigned char)tb[-1]) || tb[-1] == '_')) tb--;
+                    if (tb < te && kf_param_is_texture(lp, pc, tb, (size_t)(te - tb))) reads++;
+                }
             }
             if (!reads || reads != uses) continue;
             // Every call of it in the entry body: the bare <name> argument.
@@ -754,6 +792,7 @@ static char *kf_patch_msl(const char *s, size_t n) {
 
 // t_fove: the patch on a source string, with the defaults (slot 20, patch on).
 char *kl_fove_patch_for_test(const char *src) { return src ? kf_patch_msl(src, strlen(src)) : NULL; }
+void kl_fove_set_subpass_helpers_for_test(int on) { g_subp_helpers = on != 0; }
 
 static NSString *kf_patched_source(NSString *src) {
     if (!src) return nil;
