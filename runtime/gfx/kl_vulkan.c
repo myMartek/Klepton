@@ -121,6 +121,12 @@ unsigned long long kl_vulkan_xr_image(unsigned w, unsigned h, unsigned l,
 }
 void *kl_vulkan_xr_image_mtl(unsigned long long img) { (void)img; return NULL; }
 int   kl_vulkan_fove_indirect_selftest(void) { return -1; }
+// Not an entry point but a variable, read by kl_mtl_foveate.m (part of every
+// runtime link) and declared there, not in the header — so "every entry point
+// in the header" above does not cover it, and its absence
+// here was again a LINK failure on a checkout with no MoltenVK. Zero: no Vulkan
+// pass ever runs, so there is never a drawn area to centre a fovea in.
+uint32_t g_klvk_scene_view_w, g_klvk_scene_view_h;
 
 #else  /* MoltenVK headers present */
 
