@@ -22,6 +22,18 @@ static int assetcfg_number(const char *s, unsigned long long *out) {
     return 1;
 }
 
+// The store's metadata of an asset file, as the installer copied it: a short
+// token, no blanks (Deadpool VR's is its build's version, 1.0.40.356975.Quest).
+static int assetcfg_meta_ok(const char *t) {
+    size_t n = strlen(t);
+    if (n == 0 || n >= sizeof ((kl_assetcfg_entry *)0)->meta) return 0;
+    for (const char *p = t; *p; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+              *p == '.' || *p == '_' || *p == '-' || *p == '+'))
+            return 0;
+    return 1;
+}
+
 static int assetcfg_tag_ok(const char *t) {
     size_t n = strlen(t);
     if (n == 0 || n > 31) return 0;
@@ -71,7 +83,7 @@ int kl_assetcfg_parse_line(const char *line, kl_assetcfg_entry *e, const char **
         tok[n++] = t;
     }
     if (strcmp(tok[0], "asset") != 0) { *why = "not an 'asset' line"; return -1; }
-    if (n != 4 && n != 5) { *why = "want: asset <id> <file> <size> [<tag>]"; return -1; }
+    if (n < 4) { *why = "want: asset <id> <file> <size> [<tag>] [meta=<text>]"; return -1; }
 
     memset(e, 0, sizeof *e);
     unsigned long long id;
@@ -82,9 +94,22 @@ int kl_assetcfg_parse_line(const char *line, kl_assetcfg_entry *e, const char **
     snprintf(e->file, sizeof e->file, "%s", tok[2]);
     if (!assetcfg_number(tok[3], &e->size)) { *why = "size is not a decimal number above 0"; return -1; }
 
-    if (n == 5) {
-        if (!assetcfg_tag_ok(tok[4])) { *why = "language tag is not [A-Za-z0-9_-]{1,31}"; return -1; }
-        snprintf(e->tag, sizeof e->tag, "%s", tok[4]);
+    // After the size: a language tag and a meta=<text>, each at most once, in
+    // either order.
+    const char *tag = NULL;
+    for (int i = 4; i < n; i++) {
+        if (strncmp(tok[i], "meta=", 5) == 0) {
+            if (e->meta[0]) { *why = "meta= given twice"; return -1; }
+            if (!assetcfg_meta_ok(tok[i] + 5)) { *why = "meta is not [A-Za-z0-9._+-]{1,63}"; return -1; }
+            snprintf(e->meta, sizeof e->meta, "%s", tok[i] + 5);
+        } else {
+            if (tag) { *why = "want: asset <id> <file> <size> [<tag>] [meta=<text>]"; return -1; }
+            if (!assetcfg_tag_ok(tok[i])) { *why = "language tag is not [A-Za-z0-9_-]{1,31}"; return -1; }
+            tag = tok[i];
+        }
+    }
+    if (tag) {
+        snprintf(e->tag, sizeof e->tag, "%s", tag);
     } else {
         const char *base = strrchr(e->file, '/');
         base = base ? base + 1 : e->file;
@@ -131,10 +156,13 @@ int kl_assetcfg_resolve(kl_assetcfg_entry *e, const char *data_dir, const char *
         *why = "the file leads out of the OBB directory";
         return -1;
     }
-    if (S_ISREG(st.st_mode) && (unsigned long long)st.st_size == e->size) {
-        snprintf(e->path, sizeof e->path, "%s", real);
+    // The path stays the one under data_dir as the guest knows it, not the
+    // resolved one: on visionOS the container is /var/mobile/..., which
+    // realpath spells /private/var/mobile/..., and a game that compares the
+    // path we report with the one its own engine built from its OBB directory
+    // (Deadpool VR does) finds no match in the second spelling.
+    if (S_ISREG(st.st_mode) && (unsigned long long)st.st_size == e->size)
         e->installed = 1;
-    }
     return 0;
 }
 

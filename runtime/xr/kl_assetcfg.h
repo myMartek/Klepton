@@ -7,11 +7,16 @@
 // KL_ASSET_FILES_PATH. Written by the installer (AVP Play's recipe). One entry
 // per line, fields separated by blanks:
 //
-//   asset <store asset id> <file> <size in bytes> [<language tag>]
+//   asset <store asset id> <file> <size in bytes> [<language tag>] [meta=<text>]
 //
 //   # Marvel's Deadpool VR: its voice-over packs, loaded by libUE4.so
-//   asset 1234567890123456 de.lang 412345678 de
-//   asset 2345678901234567 fr.lang 398765432
+//   asset 26412782438311256 de.lang 3256791074 de meta=1.0.40.356975.Quest
+//   asset 26412785891644244 fr.lang 3085743950 meta=1.0.40.356975.Quest
+//
+// meta= is the asset file's metadata in the store, which the guest reads with
+// ovr_AssetDetails_GetMetadata ("" without it). Deadpool VR takes a language
+// pack as installed only when it equals its own build's version
+// (UGameVersion::GetGameVersionString: 1.0.40.356975.Quest for versionCode 8742).
 //
 // <file> is relative to the game's OBB directory (kl_jni_obb_dir), or an
 // absolute path inside it. The tag defaults to the file name up to its first
@@ -22,7 +27,8 @@
 // zero; a path with a "." or ".." component, an empty component, a blank or
 // control character or a backslash; an absolute path outside the OBB directory,
 // or one that leads out of it through a symbolic link; a tag outside
-// [A-Za-z0-9_-]{1,31}; a second line with an id or file already listed.
+// [A-Za-z0-9_-]{1,31}; a meta outside [A-Za-z0-9._+-]{1,63}, or a tag or meta
+// given twice; a second line with an id or file already listed.
 //
 // An accepted entry is INSTALLED only when its file is a regular file of
 // exactly the size given. Anything else is listed as not installed, and
@@ -44,7 +50,8 @@ typedef struct {
     unsigned long long size;         // the size the file must have
     char file[256];                  // as written in the list
     char tag[32];                    // the language tag
-    char path[1024];                 // absolute: the real path when installed
+    char meta[64];                   // the store's metadata of the file, or ""
+    char path[1024];                 // absolute, under data_dir as the guest spells it
     int  installed;                  // a regular file of exactly `size` bytes
 } kl_assetcfg_entry;
 

@@ -42,6 +42,15 @@ int main(void) {
           "a subdirectory; the tag from the base name");
     CHECK(parse("asset 18446744073709551615 x.lang 1", &e) == 1 && e.id == 18446744073709551615ull,
           "the largest id");
+    CHECK(parse("asset 26412782438311256 de.lang 3256791074 de meta=1.0.40.356975.Quest", &e) == 1 &&
+          strcmp(e.tag, "de") == 0 && strcmp(e.meta, "1.0.40.356975.Quest") == 0,
+          "Deadpool VR's line: tag and the store's metadata (its build version)");
+    CHECK(parse("asset 5 fr.lang 10 meta=1.0.40.356975.Quest", &e) == 1 &&
+          strcmp(e.tag, "fr") == 0 && strcmp(e.meta, "1.0.40.356975.Quest") == 0,
+          "meta= without a tag; the tag from the file name");
+    CHECK(parse("asset 5 fr.lang 10 meta=v2 fr", &e) == 1 && strcmp(e.meta, "v2") == 0 &&
+          strcmp(e.tag, "fr") == 0, "meta= before the tag");
+    CHECK(parse("asset 5 fr.lang 10", &e) == 1 && e.meta[0] == 0, "no meta= is \"\"");
     CHECK(parse("", &e) == 0 && parse("\n", &e) == 0 && parse("   \t\n", &e) == 0 &&
           parse("# asset 1 de.lang 2", &e) == 0 && parse("   # x", &e) == 0,
           "blank and comment lines are no entry");
@@ -74,6 +83,11 @@ int main(void) {
         "asset 1 de.lang 2 abcdefghijklmnopqrstuvwxyz0123456",
         "asset 1 .lang 2",                       // no tag in the name
         "asset 1 de\x01.lang 2",
+        "asset 1 de.lang 2 meta=",                // meta
+        "asset 1 de.lang 2 meta=a;b",
+        "asset 1 de.lang 2 meta=a meta=b",
+        "asset 1 de.lang 2 de fr",
+        "asset 1 de.lang 2 meta=0123456789012345678901234567890123456789012345678901234567890123",
     };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
         CHECK(parse(bad[i], &e) == -1, "malformed line accepted: \"%s\"", bad[i]);
@@ -127,10 +141,21 @@ int main(void) {
     parse("asset 1 de.lang 100", &e);
     kl_assetcfg_resolve(&e, obb, NULL);
     snprintf(p, sizeof p, "%s/de.lang", obb);
-    CHECK(e.installed && strcmp(e.path, p) == 0, "installed at its real absolute path (%s)", e.path);
+    CHECK(e.installed && strcmp(e.path, p) == 0, "installed at its absolute path (%s)", e.path);
     parse("asset 8 alias.lang 100", &e);
     kl_assetcfg_resolve(&e, obb, NULL);
-    CHECK(e.installed && strcmp(e.path, p) == 0, "a link inside resolves to the real file (%s)", e.path);
+    snprintf(q, sizeof q, "%s/alias.lang", obb);
+    CHECK(e.installed && strcmp(e.path, q) == 0, "a link inside keeps the name it is listed under (%s)", e.path);
+    // The OBB directory as the guest spells it, through a symbolic link
+    // (/tmp -> /private/tmp here, /var -> /private/var on the headset): the
+    // path reported is in that spelling, not the resolved one, because the
+    // game compares it with the path its own engine built.
+    char obb_link[PATH_MAX + 8];
+    snprintf(obb_link, sizeof obb_link, "%s/obb", base);
+    parse("asset 1 de.lang 100", &e);
+    snprintf(q, sizeof q, "%s/de.lang", obb_link);
+    CHECK(kl_assetcfg_resolve(&e, obb_link, NULL) == 0 && e.installed && strcmp(e.path, q) == 0,
+          "installed under the OBB directory's own spelling (%s, want %s)", e.path, q);
     parse("asset 3 es.lang 100", &e);
     kl_assetcfg_resolve(&e, obb, NULL);
     snprintf(q, sizeof q, "%s/es.lang", obb);

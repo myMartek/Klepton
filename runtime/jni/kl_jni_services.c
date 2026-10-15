@@ -703,6 +703,16 @@ static void klj_locale_parts(char *lang, size_t lang_sz, char *country, size_t c
 // AConfiguration_getLanguage out of native_app_glue.
 void kl_jni_locale_parts(char *lang, size_t lang_sz, char *country, size_t country_sz) {
     klj_locale_parts(lang, lang_sz, country, country_sz);
+    // Said once, where the platform calls are traced (KL_PLAT_TRACE): the
+    // language the guest is told, and where it came from.
+    static int said;
+    if (!said && kl_ovrplat_trace_on()) {
+        said = 1;
+        const char *host = getenv("LANG"), *dev = getenv("KL_DEVICE_LANG");
+        fprintf(stderr, "  [plat-trace] locale -> %s_%s (LANG=%s, KL_DEVICE_LANG=%s, KL_LOCALE_DEVICE=%s)\n",
+                lang, country, host ? host : "(unset)", dev ? dev : "(unset)",
+                getenv("KL_LOCALE_DEVICE") ? getenv("KL_LOCALE_DEVICE") : "(unset)");
+    }
 }
 
 // A Locale object carries its own two parts rather than deferring to the host

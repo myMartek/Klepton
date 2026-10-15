@@ -71,4 +71,8 @@ int kl_ovrplat_queue_selftest(FILE *f);
 // Where it did not, nothing changes for any title.
 int kl_ovrplat_asset_files_configured(void);
 
+// KL_PLAT_TRACE=1: whether the asset-file, language-pack and locale answers
+// are traced (default off). See kl_ovrplat.c.
+int kl_ovrplat_trace_on(void);
+
 #endif

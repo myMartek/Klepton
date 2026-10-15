@@ -1910,19 +1910,34 @@ puts the camera on the ground with its hands underneath it.
 - `KL_ASSET_FILES_PATH=<file>` — (`runtime/xr/kl_assetcfg.h`,
   `runtime/xr/kl_ovrplat.c`) the installation's list of the title's asset
   files; without it, `android-files/klepton-asset-files.txt` if that file
-  exists. One `asset <store asset id> <file> <size> [<tag>]` per line, `#`
-  comments; `<file>` relative to the OBB directory (or absolute inside it),
-  the tag defaulting to the file name up to its first `.`. Example (Marvel's
-  Deadpool VR): `asset 1234567890123456 de.lang 412345678 de`. A listed file
-  that is a regular file of exactly that size is reported installed at its
-  real path (`ovr_AssetFile_GetList`, `StatusById`/`StatusByName`,
-  `ovr_AssetDetails_*`, `ovr_LanguagePack_GetCurrent`/`SetCurrent`); any
-  other listed file is "available" in a status answer and absent from the
-  list. Malformed lines, `.`/`..` components and paths outside the OBB
-  directory (also through a symbolic link) are rejected and logged. Downloads
-  stay refused. Where configured, `KL_LOCALE_DEVICE` defaults to 1 and
+  exists. One `asset <store asset id> <file> <size> [<tag>] [meta=<text>]` per
+  line, `#` comments; `<file>` relative to the OBB directory (or absolute
+  inside it), the tag defaulting to the file name up to its first `.`, `meta=`
+  the file's store metadata (`ovr_AssetDetails_GetMetadata`, `""` without it).
+  Example (Marvel's Deadpool VR, versionCode 8742):
+  `asset 26412782438311256 de.lang 3256791074 de meta=1.0.40.356975.Quest`.
+  A listed file that is a regular file of exactly that size is reported
+  installed (`ovr_AssetFile_GetList`, `StatusById`/`StatusByName`,
+  `ovr_AssetDetails_*`, `ovr_LanguagePack_GetCurrent`/`SetCurrent`) at its path
+  in the guest's spelling, `/sdcard/Android/obb/<package>/<file>`; any other
+  listed file is "available" in a status answer and absent from the list.
+  Malformed lines, `.`/`..` components and paths outside the OBB directory
+  (also through a symbolic link) are rejected and logged. Downloads stay
+  refused. Where configured, `KL_LOCALE_DEVICE` defaults to 1 and
   `ovr_GetLoggedInUserLocale` gives the same locale as `java.util.Locale`.
   Not configured: every title behaves as before.
+  **Deadpool VR needs all three parts** (measured on the headset, 2026-10-16):
+  its `ULanguagePacksSubsystem` takes a pack only when the metadata equals its
+  own `UGameVersion::GetGameVersionString` (`1.0.40.356975.Quest` = the APK's
+  versionName), finds the language by the file name's ending (`de.lang`), and
+  mounts the pak only when the path starts with `/sdcard/Android/obb/<package>/`
+  (any other absolute path it appends to its `Content/Paks` directory: the
+  language can be picked, the menus turn German, and no voice plays).
+- `KL_PLAT_TRACE=1` — (`runtime/xr/kl_ovrplat.c`) log every distinct
+  asset-file, language-pack and locale call the guest makes with its arguments
+  and our answer, every `ovr_*` name it resolves, and the locale it is told.
+  Off by default. With `KL_TRACE_FS=fail` it shows which file a language pack's
+  sound engine then could not open.
 - `KL_LOCALE_DEVICE=0|1` — (`runtime/jni/kl_jni_services.c`) tell the guest the
   device's own language (`KL_DEVICE_LANG`, set by the app from the system's
   first preferred language, e.g. `de_DE`) instead of en_US, where `LANG` is not
