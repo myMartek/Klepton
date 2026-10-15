@@ -1100,12 +1100,26 @@ struct MetalFXSwitch: View {
 // The default is the target's: the device's language where a game is known to
 // depend on it (wrath2), English — what every game got so far — elsewhere, so
 // that nothing changes language unasked. Read once, at boot.
+//
+// A game whose installation lists its language packs (KL_ASSET_FILES_PATH, or
+// android-files/klepton-asset-files.txt, written by the installer; see
+// runtime/xr/kl_assetcfg.h) defaults to the device's language as well: it is
+// told which packs are installed, and picks one by the language it is told
+// (Deadpool VR). Without such a list the default is unchanged.
 final class KleptonLanguage: ObservableObject {
     static let shared = KleptonLanguage()
     private static let key = "klepton.gameLanguage"      // "device" | "en"
 
+    static let assetFilesListed: Bool = {
+        if let env = ProcessInfo.processInfo.environment["KL_ASSET_FILES_PATH"], !env.isEmpty { return true }
+        var isDir: ObjCBool = false
+        let list = URL(fileURLWithPath: Paths.container)
+            .appendingPathComponent("android-files/klepton-asset-files.txt").path
+        return FileManager.default.fileExists(atPath: list, isDirectory: &isDir) && !isDir.boolValue
+    }()
+
     static let targetDefault: String =
-        String(cString: kl_app_target_name_or_default()) == "wrath2" ? "device" : "en"
+        String(cString: kl_app_target_name_or_default()) == "wrath2" || assetFilesListed ? "device" : "en"
 
     /// The device's first language in its own words ("Deutsch"), for the picker.
     static let deviceLanguageName: String = {

@@ -14,6 +14,7 @@
 #include "guest/kl_driver.h"   // target name, for the per-target KL_PLAT_USER default
 #include "kl_env.h"
 #include "kl_ovrplat.h"
+#include "kl_assetcfg.h"
 
 #define KL_OVRPLAT_MAX 512
 static struct { const char *name; unsigned calls; int drm; } g_plat[KL_OVRPLAT_MAX];
@@ -255,12 +256,44 @@ static int plat_is_checkout(const char *name) {
 // disk, remembered in a file of ours beside them (klplat_langpack_current);
 // choosing one that is not there is an error, as before — nothing is fetched
 // from here, and nothing in this family is for sale.
+//
+// Marvel's Deadpool VR (x3240283705987790) has the same `<tag>.lang` voice
+// packs, loaded by libUE4.so, and greyed out every language but the one it
+// had loaded. It is the first title whose list comes from its INSTALLATION
+// rather than from a directory listing: the installer writes the store's own
+// asset id, file name and size of every pack (kl_assetcfg.h), and a pack is
+// installed only when its file is there at exactly that size. Any title with
+// such a list takes this path — the list is the installer's statement that
+// these files are the title's free asset files — and a title without one is
+// untouched. Downloads stay refused either way.
+static int klplat_asset_cfg_path(char *out, size_t cap) {
+    const char *env = getenv(KL_ASSETCFG_ENV);
+    if (env && env[0]) return snprintf(out, cap, "%s", env) < (int)cap;
+    const char *root = kl_jni_files_dir();
+    return root && root[0] && snprintf(out, cap, "%s/%s", root, KL_ASSETCFG_FILE) < (int)cap;
+}
+int kl_ovrplat_asset_files_configured(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *env = getenv(KL_ASSETCFG_ENV);
+        char path[PATH_MAX];
+        struct stat st;
+        int v = (env && env[0]) ||
+                (klplat_asset_cfg_path(path, sizeof path) && stat(path, &st) == 0 && S_ISREG(st.st_mode));
+        if (v) fprintf(stderr, "  [plat] asset files listed by the installation (%s): "
+                               "asset-file questions are answered from that list\n",
+                       env && env[0] ? KL_ASSETCFG_ENV : KL_ASSETCFG_FILE);
+        on = v;
+    }
+    return on;
+}
 static int plat_is_obb_langpack_target(void) {
     static int v = -1;
     if (v < 0) {
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_PLAT_LANGPACK_LIST", t && (strcmp(t, "x5812519008825194") == 0 ||
-                                                     strcmp(t, "wrath2") == 0));
+        v = kl_env_on("KL_PLAT_LANGPACK_LIST", (t && (strcmp(t, "x5812519008825194") == 0 ||
+                                                      strcmp(t, "wrath2") == 0)) ||
+                                               kl_ovrplat_asset_files_configured());
     }
     return v;
 }
@@ -493,7 +526,8 @@ enum {
 // first time the slot carries a list, reused after, never freed — the same
 // lifetime as the slot itself. NULL `elems` for every other message.
 enum { KLPLAT_SLOT_FREE = 0, KLPLAT_SLOT_QUEUED, KLPLAT_SLOT_POPPED };
-#define KLPLAT_LANG_MAX 8              // language packs scanned, and per list
+#define KLPLAT_LANG_MAX KL_ASSETCFG_MAX // language packs per list (an installation's list)
+#define KLPLAT_LANG_SCAN_MAX 8         // ...and found by listing the OBB directory
 typedef struct klplat_msg {
     uint32_t type; uint64_t request; int32_t payload; const char *str; int err;
     int kind;
@@ -520,6 +554,11 @@ static pthread_mutex_t g_msg_mu = PTHREAD_MUTEX_INITIALIZER;
 // under g_msg_mu. Here because a list message copies them in as it is queued.
 static klplat_asset g_lang[KLPLAT_LANG_MAX];
 static int          g_nlang;
+// ...and, where the installation lists them (kl_assetcfg.h), every pack it
+// lists, installed or not, so a status question about one that is not on the
+// disk is answered "available" rather than refused. Under g_msg_mu.
+static klplat_asset g_lang_listed[KLPLAT_LANG_MAX];
+static int          g_nlang_listed;
 
 // A free slot, growing the pool by a block when there is none — up to
 // KLPLAT_MSG_MAX_BLOCKS, past which there is no slot (NULL). Under g_msg_mu.
@@ -795,8 +834,61 @@ static const char *klplat_obb_lang_pkg(void) {
 // in one critical section. No handle the guest holds points into g_lang: a
 // list message carries its own copy (klplat_enqueue_lang_list), as a status
 // message does.
+//
+// Where the installation lists the packs (kl_ovrplat_asset_files_configured), the list
+// is that one instead of the directory's: the store's ids, and installed only
+// at exactly the listed size (klplat_read_asset_cfg).
+static int klplat_read_asset_cfg(klplat_asset *found, klplat_asset *listed, int *nlisted) {
+    *nlisted = 0;
+    kl_assetcfg_entry *e = calloc(KL_ASSETCFG_MAX, sizeof *e);
+    char path[PATH_MAX];
+    if (!e || !klplat_asset_cfg_path(path, sizeof path)) { free(e); return 0; }
+    // Rejected lines are said the first time, not at every rescan.
+    static int logged;
+    int m = kl_assetcfg_load(path, kl_jni_obb_dir(), e, KL_ASSETCFG_MAX, logged ? NULL : stderr);
+    if (m < 0 && !logged)
+        fprintf(stderr, "  [plat] asset-file list %s cannot be read (or the OBB directory %s is "
+                        "not absolute): no asset files reported\n", path, kl_jni_obb_dir());
+    logged = 1;
+    int n = 0;
+    for (int i = 0; i < m; i++) {
+        klplat_asset *a = &listed[(*nlisted)++];
+        memset(a, 0, sizeof *a);
+        a->id = e[i].id;
+        snprintf(a->path, sizeof a->path, "%s", e[i].path);
+        snprintf(a->tag, sizeof a->tag, "%s", e[i].tag);
+        a->status = e[i].installed ? "installed" : "available";
+        if (e[i].installed) found[n++] = *a;
+    }
+    free(e);
+    return n;
+}
 static int klplat_scan_obb_langpacks(void) {
-    klplat_asset found[KLPLAT_LANG_MAX];
+    if (kl_ovrplat_asset_files_configured()) {
+        klplat_asset *found = calloc(2 * KLPLAT_LANG_MAX, sizeof *found);
+        if (!found) return 0;
+        klplat_asset *listed = found + KLPLAT_LANG_MAX;
+        int nlisted, n = klplat_read_asset_cfg(found, listed, &nlisted);
+        static int said_n = -1, said_listed = -1;
+        int say = 0;
+        pthread_mutex_lock(&g_msg_mu);
+        for (int i = 0; i < n; i++) g_lang[i] = found[i];
+        g_nlang = n;
+        for (int i = 0; i < nlisted; i++) g_lang_listed[i] = listed[i];
+        g_nlang_listed = nlisted;
+        if (said_n != n || said_listed != nlisted) { said_n = n; said_listed = nlisted; say = 1; }
+        pthread_mutex_unlock(&g_msg_mu);
+        if (say)
+            for (int i = 0; i < nlisted; i++)
+                fprintf(stderr, "  [plat] asset file %llu '%s' (%s): %s\n",
+                        (unsigned long long)listed[i].id, listed[i].path, listed[i].tag,
+                        strcmp(listed[i].status, "installed") == 0
+                            ? "on disk at the listed size -> installed"
+                            : "not on disk at the listed size -> not installed (it cannot be fetched from here)");
+        free(found);
+        return n;
+    }
+    klplat_asset found[KLPLAT_LANG_SCAN_MAX];
     int n = 0;
     const char *root = kl_jni_files_dir();
     char dir[PATH_MAX];
@@ -839,20 +931,22 @@ static int klplat_scan_obb_langpacks(void) {
 }
 // A status request about one of them: the details ride on the message, as for
 // batman. A name or id that is not one of these files is not a language pack,
-// and the refusal stands.
+// and the refusal stands. A pack the installation lists that is not on the
+// disk at its size is "available": not installed, and not fetched from here.
+static int klplat_langpack_is(const klplat_asset *a, const char *name, uint64_t id) {
+    const char *base = strrchr(a->path, '/');
+    return name ? (base && strcmp(base + 1, name) == 0) : a->id == id;
+}
 static uint64_t klplat_obb_langpack_status(const char *what, uint32_t type,
                                            const char *name, uint64_t id) {
     klplat_scan_obb_langpacks();
     klplat_asset a;
     int have = 0;
     pthread_mutex_lock(&g_msg_mu);
-    for (int i = 0; i < g_nlang && !have; i++) {
-        const char *base = strrchr(g_lang[i].path, '/');
-        if (name ? (base && strcmp(base + 1, name) == 0) : g_lang[i].id == id) {
-            a = g_lang[i];
-            have = 1;
-        }
-    }
+    for (int i = 0; i < g_nlang && !have; i++)
+        if (klplat_langpack_is(&g_lang[i], name, id)) { a = g_lang[i]; have = 1; }
+    for (int i = 0; i < g_nlang_listed && !have; i++)
+        if (klplat_langpack_is(&g_lang_listed[i], name, id)) { a = g_lang_listed[i]; have = 1; }
     pthread_mutex_unlock(&g_msg_mu);
     if (!have) return klplat_drm(what);
     return klplat_request_asset(what, type, KLPLAT_KIND_NONE, &a);
@@ -2983,9 +3077,22 @@ static uint64_t klplat_GetLoggedInUserID(void) {
 // ovrRequest), the locale the store would report for the signed-in user. There
 // is no platform user here, but the guest reads the string to pick a language,
 // and a NULL would crash the read — so answer the host's, defaulting to en_US.
+//
+// On a headset nothing sets LANG. For a title whose installation lists its
+// asset files — language packs, chosen by the language it is told — the answer
+// is the one java.util.Locale and AConfiguration give (kl_jni_locale_parts:
+// the device's language where KL_LOCALE_DEVICE is on, else en_US), so the
+// platform and the engine do not name two languages. Every other title keeps
+// the LANG-only answer it always had.
 static uint64_t klplat_GetLoggedInUserLocale(void) {
     plat_hit("ovr_GetLoggedInUserLocale");
     static char loc[16];
+    const char *host = getenv("LANG");
+    if (!loc[0] && (!host || !host[0]) && kl_ovrplat_asset_files_configured()) {
+        char lang[16], country[16];
+        kl_jni_locale_parts(lang, sizeof lang, country, sizeof country);
+        snprintf(loc, sizeof loc, country[0] ? "%s_%s" : "%s", lang, country);
+    }
     if (!loc[0]) {
         const char *lang = getenv("LANG");            // e.g. "en_US.UTF-8"
         int i = 0;

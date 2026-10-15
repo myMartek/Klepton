@@ -26,6 +26,7 @@
 #include "kl_env.h"
 #include "guest/kl_driver.h"   // the target name, for the device-language default
 #include "kl_ovrp.h"
+#include "kl_ovrplat.h"           // whether the installation lists language packs
 #include "kl_avdec.h"
 #include "kl_egl.h"
 #include "kl_ndk.h"
@@ -668,11 +669,15 @@ static void klj_locale_parts(char *lang, size_t lang_sz, char *country, size_t c
     // language menu — FGenericPlatformMisc::GetDefaultLanguage decides text
     // and voices — and stayed English with the German pack installed
     // (2026-10-11). KL_LOCALE_DEVICE=1 turns it on for any game, =0 off.
+    // It is on by default, too, for a title whose installation lists its
+    // language packs (kl_ovrplat_asset_files_configured: Deadpool VR picks its
+    // voice-over pack by this language); without such a list nothing changes.
     if (!env || !*env) {
         static int from_device = -1;
         if (from_device < 0) {
             const char *t = kl_driver_target_name();
-            from_device = kl_env_on("KL_LOCALE_DEVICE", t && strcmp(t, "wrath2") == 0);
+            from_device = kl_env_on("KL_LOCALE_DEVICE", (t && strcmp(t, "wrath2") == 0) ||
+                                                        kl_ovrplat_asset_files_configured());
         }
         if (from_device) env = getenv("KL_DEVICE_LANG");
     }

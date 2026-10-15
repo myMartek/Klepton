@@ -1905,11 +1905,30 @@ puts the camera on the ground with its hands underneath it.
   as well (Asgard's Wrath 2 asks them): the current pack is a choice between
   the files on the disk, kept in `android-files/klepton-language-pack.txt`;
   with nothing chosen it is the pack of the language the game is told.
+  Default 1 also for any title whose installation lists its asset files
+  (`KL_ASSET_FILES_PATH`, below); the list then replaces the directory listing.
+- `KL_ASSET_FILES_PATH=<file>` — (`runtime/xr/kl_assetcfg.h`,
+  `runtime/xr/kl_ovrplat.c`) the installation's list of the title's asset
+  files; without it, `android-files/klepton-asset-files.txt` if that file
+  exists. One `asset <store asset id> <file> <size> [<tag>]` per line, `#`
+  comments; `<file>` relative to the OBB directory (or absolute inside it),
+  the tag defaulting to the file name up to its first `.`. Example (Marvel's
+  Deadpool VR): `asset 1234567890123456 de.lang 412345678 de`. A listed file
+  that is a regular file of exactly that size is reported installed at its
+  real path (`ovr_AssetFile_GetList`, `StatusById`/`StatusByName`,
+  `ovr_AssetDetails_*`, `ovr_LanguagePack_GetCurrent`/`SetCurrent`); any
+  other listed file is "available" in a status answer and absent from the
+  list. Malformed lines, `.`/`..` components and paths outside the OBB
+  directory (also through a symbolic link) are rejected and logged. Downloads
+  stay refused. Where configured, `KL_LOCALE_DEVICE` defaults to 1 and
+  `ovr_GetLoggedInUserLocale` gives the same locale as `java.util.Locale`.
+  Not configured: every title behaves as before.
 - `KL_LOCALE_DEVICE=0|1` — (`runtime/jni/kl_jni_services.c`) tell the guest the
   device's own language (`KL_DEVICE_LANG`, set by the app from the system's
   first preferred language, e.g. `de_DE`) instead of en_US, where `LANG` is not
   set — which on a headset is always. Default 1 for `wrath2`, whose text and
-  voices follow the device and nothing else, else 0. The start window's "Game
+  voices follow the device and nothing else, and for a title with an asset-file
+  list (`KL_ASSET_FILES_PATH`), else 0. The start window's "Game
   language" choice sets it. `.lang` voice packs in the OBB directory are part
   of the read-through OBB index either way.
 - `KL_OVRP_ENQ_OWNS_OVERLAYS=0|1` — while the guest is filing panels through
