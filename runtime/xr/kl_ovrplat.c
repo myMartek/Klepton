@@ -19,20 +19,37 @@
 static struct { const char *name; unsigned calls; int drm; } g_plat[KL_OVRPLAT_MAX];
 static unsigned g_nplat;
 static unsigned g_drm_calls;
+// Resolution (dlsym, main thread) and calls (any guest thread) race on this
+// table exactly as kl_ovrp.c's did: two concurrent inserts can split a slot and
+// leave a NULL name for a later strcmp. The lock covers lookup and insert; the
+// counters are atomic, so a hit needs nothing past the lookup. g_nplat is
+// published with release only once its slot is filled, so the report — which
+// runs on the way to abort() and does not take the lock — reads whole slots.
+static pthread_mutex_t g_plat_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static int plat_slot(const char *name) {
-    for (unsigned i = 0; i < g_nplat; i++)
-        if (strcmp(g_plat[i].name, name) == 0) return (int)i;
-    if (g_nplat >= KL_OVRPLAT_MAX) return -1;
-    g_plat[g_nplat].name  = strdup(name);
-    g_plat[g_nplat].calls = 0;
-    g_plat[g_nplat].drm   = 0;
-    return (int)g_nplat++;
+    pthread_mutex_lock(&g_plat_mu);
+    int rc = -1;
+    unsigned n = __atomic_load_n(&g_nplat, __ATOMIC_RELAXED);
+    for (unsigned i = 0; i < n; i++)
+        if (strcmp(g_plat[i].name, name) == 0) { rc = (int)i; goto out; }
+    if (n >= KL_OVRPLAT_MAX) goto out;
+    const char *dup = strdup(name);
+    if (!dup) goto out;
+    g_plat[n].name  = dup;
+    g_plat[n].calls = 0;
+    g_plat[n].drm   = 0;
+    __atomic_store_n(&g_nplat, n + 1, __ATOMIC_RELEASE);
+    rc = (int)n;
+out:
+    pthread_mutex_unlock(&g_plat_mu);
+    return rc;
 }
 
-static void plat_hit(const char *name) {
+// The slot's call count including this one; 0 when the table is full.
+static unsigned plat_hit(const char *name) {
     int s = plat_slot(name);
-    if (s >= 0) g_plat[s].calls++;
+    return s >= 0 ? __atomic_add_fetch(&g_plat[s].calls, 1, __ATOMIC_RELAXED) : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,8 +315,11 @@ static int plat_is_drm(const char *name) {
 // and a permissive run would produce it silently.
 static uint64_t klplat_drm(const char *name) {
     int s = plat_slot(name);
-    if (s >= 0) { g_plat[s].calls++; g_plat[s].drm = 1; }
-    g_drm_calls++;
+    if (s >= 0) {
+        __atomic_add_fetch(&g_plat[s].calls, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_plat[s].drm, 1, __ATOMIC_RELAXED);
+    }
+    __atomic_add_fetch(&g_drm_calls, 1, __ATOMIC_RELAXED);
     fprintf(stderr,
             "\n[klepton] REFUSED: the guest called '%s'.\n"
             "  This is an entitlement / purchase-ownership query. Klepton does not\n"
@@ -316,10 +336,9 @@ static uint64_t klplat_drm(const char *name) {
 
 // Everything else: named, so the guest says which of the 1335 it wants.
 static uint64_t klplat_called(const char *name) {
-    plat_hit(name);
+    unsigned calls = plat_hit(name);
     if (kl_permissive()) {
-        int s = plat_slot(name);
-        if (s >= 0 && g_plat[s].calls == 1)
+        if (calls == 1)
             fprintf(stderr, "  [plat] call (permissive, returning 0): %s\n", name);
         return 0;
     }
@@ -3014,7 +3033,7 @@ void *kl_ovrplat_sym(const char *name) {
     // show what the guest went looking for even on a run where nothing aborted.
     // Resolving is still only a measurement — the refusal is at the call.
     if (plat_is_drm(name)) {
-        if (s >= 0) g_plat[s].drm = 1;
+        if (s >= 0) __atomic_store_n(&g_plat[s].drm, 1, __ATOMIC_RELAXED);
         return kl_named_stub(name, (void *)klplat_drm);
     }
     for (size_t i = 0; i < sizeof g_plat_impl / sizeof g_plat_impl[0]; i++)
@@ -3050,29 +3069,36 @@ void *kl_ovrplat_sym(const char *name) {
 }
 
 void kl_ovrplat_report(FILE *f) {
+    // No lock (see g_plat_mu): this runs on the way to abort(). The count is
+    // acquired once, so every slot below it is complete.
     static int done;
-    if (done || !g_nplat) return;
-    done = 1;
+    unsigned n = __atomic_load_n(&g_nplat, __ATOMIC_ACQUIRE);
+    if (!n || __atomic_exchange_n(&done, 1, __ATOMIC_ACQ_REL)) return;
+#define KLPLAT_CALLS(i) __atomic_load_n(&g_plat[i].calls, __ATOMIC_RELAXED)
+#define KLPLAT_DRM(i)   __atomic_load_n(&g_plat[i].drm, __ATOMIC_RELAXED)
     unsigned called = 0, drm = 0;
-    for (unsigned i = 0; i < g_nplat; i++) {
-        if (g_plat[i].calls) called++;
-        if (g_plat[i].drm)   drm++;
+    for (unsigned i = 0; i < n; i++) {
+        if (KLPLAT_CALLS(i)) called++;
+        if (KLPLAT_DRM(i))   drm++;
     }
     fprintf(f, "\n=== Oculus Platform surface ===\n");
-    fprintf(f, "  resolved: %u, of which called: %u\n", g_nplat, called);
+    fprintf(f, "  resolved: %u, of which called: %u\n", n, called);
     if (drm) {
+        unsigned refused = __atomic_load_n(&g_drm_calls, __ATOMIC_RELAXED);
         fprintf(f, "  --- entitlement / ownership (REFUSED by policy) ---\n");
-        for (unsigned i = 0; i < g_nplat; i++)
-            if (g_plat[i].drm)
+        for (unsigned i = 0; i < n; i++)
+            if (KLPLAT_DRM(i))
                 fprintf(f, "    %-52s %s\n", g_plat[i].name,
-                        g_plat[i].calls ? "CALLED" : "resolved only");
-        fprintf(f, "  (%u DRM call%s refused)\n", g_drm_calls, g_drm_calls == 1 ? "" : "s");
+                        KLPLAT_CALLS(i) ? "CALLED" : "resolved only");
+        fprintf(f, "  (%u DRM call%s refused)\n", refused, refused == 1 ? "" : "s");
     }
     fprintf(f, "  --- called ---\n");
-    for (unsigned i = 0; i < g_nplat; i++)
-        if (g_plat[i].calls && !g_plat[i].drm)
-            fprintf(f, "    %-52s x%u\n", g_plat[i].name, g_plat[i].calls);
+    for (unsigned i = 0; i < n; i++)
+        if (KLPLAT_CALLS(i) && !KLPLAT_DRM(i))
+            fprintf(f, "    %-52s x%u\n", g_plat[i].name, KLPLAT_CALLS(i));
     fprintf(f, "  --- resolved but never called ---\n");
-    for (unsigned i = 0; i < g_nplat; i++)
-        if (!g_plat[i].calls && !g_plat[i].drm) fprintf(f, "    %s\n", g_plat[i].name);
+    for (unsigned i = 0; i < n; i++)
+        if (!KLPLAT_CALLS(i) && !KLPLAT_DRM(i)) fprintf(f, "    %s\n", g_plat[i].name);
+#undef KLPLAT_CALLS
+#undef KLPLAT_DRM
 }
