@@ -1882,14 +1882,27 @@ static uint64_t klplat_AssetDetails_GetLanguage_any(const void *h) {
 // application entitlement succeeds, its base-salon setup waits for the product
 // and purchase lists before it creates GameManager.  An empty pair keeps the
 // sole paid chapter locked while allowing normal progression in the base game.
-// Default on only for those two titles; the switch overrides either way.
+//
+// Beat Saber 1.40 (beatsaber140) is the third. At start it lists its add-on
+// files (ovr_AssetFile_GetList); when that list does not cover its songs — an
+// installation without the purchased songs, a player who bought none — it asks
+// ovr_IAP_GetViewerPurchases. Refused, the health warning's "fetching owned
+// songs" waits out its own timeout (about 5 s, "Fetching songs failed" and an
+// OperationCanceledException in the log), and the OK button only leaves the
+// warning when it ends: the warning scene stays up for those seconds instead of
+// the black loading screen. With every song on disk the list says "All
+// Entitled" and the question is never asked, which is why only some
+// installations showed it (2026-10-15).
+//
+// Default on for those titles alone; the switch overrides in either direction.
 static int klplat_iap_empty(void) {
     static int on = -1;
     if (on < 0) {
         const char *t = kl_driver_target_name();
         on = kl_env_on("KL_PLAT_IAP_EMPTY", t &&
                        (strcmp(t, "x3484270071659289") == 0 ||
-                        strcmp(t, "x7532973430077887") == 0));
+                        strcmp(t, "x7532973430077887") == 0 ||
+                        strcmp(t, "beatsaber140") == 0));
     }
     return on;
 }

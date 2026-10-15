@@ -70,7 +70,12 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   `ovr_IAP_GetProductsBySKU` and `ovr_IAP_GetViewerPurchases` with an EMPTY
   list instead of refusing the request. For a title whose start waits for the
   answer; nothing is reported as for sale or as bought. Default on for Tales
-  from the Galaxy's Edge (`x3484270071659289`) alone.
+  from the Galaxy's Edge (`x3484270071659289`), Shave & Stuff
+  (`x7532973430077887`), and Beat Saber 1.40 (`beatsaber140`). Beat Saber asks
+  for its purchases when its add-on files do not cover its songs (an
+  installation without them); refused, the health warning waits about 5 s for
+  "owned songs" after OK, with the warning scene still up, before it loads the
+  menu.
 - `KL_PLAT_IAP_CONFIRMED=0|1` — (`runtime/xr/kl_ovrplat.c`) answer
   `ovr_IAP_GetViewerPurchases` with the SKUs in `klepton-entitlements.txt`,
   as they are — the purchases the store confirmed, written on the Mac. For a
