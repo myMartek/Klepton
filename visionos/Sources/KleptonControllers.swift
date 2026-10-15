@@ -244,10 +244,17 @@ struct KLSenseTune {
     /// log line and the source agree on where each degree came from.
     static let psvr2Tilt: Float = 5.037
     static let hiltPitch: Float =
-        ProcessInfo.processInfo.environment["KL_SENSE_PITCH"].flatMap { Float($0) } ?? -37
+        ProcessInfo.processInfo.environment["KL_SENSE_PITCH"].flatMap { Float($0) }
+            ?? targetHand?.pitch ?? -37
+
+    /// A title's own hand placement, where the general one is visibly off.
+    /// LES MILLS BODYCOMBAT: its gloves sat above the player's hands; the owner
+    /// set these with HandTuneView while playing (on device, 2026-10-15).
+    static let targetHand: (pitch: Float, pos: SIMD3<Float>)? =
+        klTargetName() == "x4015163475201433" ? (-30, SIMD3<Float>(-0.010, 0.005, 0.055)) : nil
 
     var rot = klEulerXYZ(SIMD3<Float>(psvr2Tilt + hiltPitch, 0, 0))
-    var pos = SIMD3<Float>(-0.005, 0.02, -0.02)
+    var pos = KLSenseTune.targetHand?.pos ?? SIMD3<Float>(-0.005, 0.02, -0.02)
     /// `KL_SENSE_PIVOT="x,y,z"` — the point, in the grip's own frame, that
     /// `rot` should turn ABOUT. Zero (the default) turns about the reported
     /// origin, which is what this path has always done.

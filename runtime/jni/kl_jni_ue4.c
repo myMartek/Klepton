@@ -1641,10 +1641,25 @@ static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
 //
 // Tales from the Galaxy's Edge is the GLES guest this was written for: its two
 // opening movies, and a picture that stayed black behind them (2026-10-11).
+static klj_val klj_MP14_getVideoLastFrame_locked(klj_media *m, uint32_t tex);
 static klj_val klj_MP14_getVideoLastFrame(void *env, void *self, const klj_val *a, int n) {
     (void)env;
     klj_media *m = klj_media_of(self);
     if (!m || !m->dec) return (klj_val){.j = 0};
+    // Held until the upload below is done: kl_avdec_frame hands back the
+    // decoder's own buffer, and its decode thread writes the next frame into
+    // it whenever one is ready — mid-copy, without this, which puts a later
+    // frame (or half of one) into the texture early. Read off the code, not
+    // seen on a UE4 title, and the decode thread waits on the upload while it
+    // is held, so KL_UE4_MEDIA_FRAME_LOCK=0|1 is off by default.
+    static int frame_lock = -1;
+    if (frame_lock < 0) frame_lock = kl_env_on("KL_UE4_MEDIA_FRAME_LOCK", 0);
+    if (frame_lock) kl_avdec_frame_lock(m->dec);
+    klj_val r = klj_MP14_getVideoLastFrame_locked(m, n > 0 ? (uint32_t)a[0].j : 0);
+    if (frame_lock) kl_avdec_frame_unlock(m->dec);
+    return r;
+}
+static klj_val klj_MP14_getVideoLastFrame_locked(klj_media *m, uint32_t tex) {
     unsigned long long serial = 0;
     int w = 0, h = 0;
     const void *px = kl_avdec_frame(m->dec, &w, &h, NULL, &serial);
@@ -1653,7 +1668,6 @@ static klj_val klj_MP14_getVideoLastFrame(void *env, void *self, const klj_val *
         m->res_changed = 1;
         m->last_w = w; m->last_h = h;
     }
-    uint32_t tex = n > 0 ? (uint32_t)a[0].j : 0;
     klj_media_trace("getVideoLastFrame", (long long)tex);
     // How the guest uses this, said every few hundred calls: how often it
     // asks, how many of those were new frames, and into how many DIFFERENT

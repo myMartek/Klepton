@@ -28,6 +28,7 @@
 #include "kl_ndk.h"
 #include "kl_va.h"
 #include "kl_jni_int.h"
+#include "guest/kl_driver.h"
 
 // ---- UI thread queue ----
 // runOnUiThread posts to the main looper and returns; it does not run the
@@ -198,6 +199,24 @@ static klj_val klj_Handler_init(void *env, void *clazz, const klj_val *a, int n)
     if (h) {
         h->looper   = n > 0 ? a[0].l : NULL;
         h->callback = n > 1 ? a[1].l : NULL;
+        // A Handler keeps its Looper alive, as in Java. The one a HandlerThread's
+        // getLooper() hands out is a LOCAL the guest drops once the Handler is
+        // built; unpinned, it was retired at the next frame pop and its slot
+        // recycled, klj_looper_of() then found no looper, and a message sent
+        // later went to the main queue instead of the HandlerThread. LES MILLS
+        // BODYCOMBAT's level-start clip (Unity VideoPlayer, sent after its
+        // decoder was set up) showed nothing on device that way, 2026-10-15,
+        // while the boot clips — sent straight after the Handler was made — played.
+        // Moving a message to another thread is a change any game could see,
+        // so KL_JNI_PIN_LOOPER=0|1 is on by default for that title only.
+        static int pin = -1;
+        if (pin < 0) {
+            const char *t = kl_driver_target_name();
+            pin = kl_env_on("KL_JNI_PIN_LOOPER", t && strcmp(t, "x4015163475201433") == 0);
+        }
+        klj_object *lo = klj_as_object(h->looper);
+        if (pin && lo && lo->data && strcmp(lo->cls, "android/os/Looper") == 0)
+            kl_jni_pin_object(h->looper);
     }
     klj_as_object(obj)->data = h;
     if (h && h->callback) {

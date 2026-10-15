@@ -116,6 +116,7 @@ static size_t g_scratch_frames;
 
 // Counters, for the report and for the watchdog.
 static _Atomic uint64_t g_last_render_ns;
+static _Atomic uint64_t g_last_render_frames;   // what that callback asked for
 static _Atomic uint64_t g_frames_played, g_frames_silent;
 static _Atomic uint32_t g_underruns;
 static unsigned long    g_writes, g_short_writes, g_restarts;
@@ -246,6 +247,7 @@ static OSStatus render_cb(void *ref, AudioUnitRenderActionFlags *flags,
                           AudioBufferList *io) {
     (void)ref; (void)ts; (void)bus;
     atomic_store_explicit(&g_last_render_ns, now_ns(), memory_order_relaxed);
+    atomic_store_explicit(&g_last_render_frames, nframes, memory_order_relaxed);
 
     if (!io || io->mNumberBuffers < 1) return noErr;
     float *dst = (float *)io->mBuffers[0].mData;
@@ -809,6 +811,36 @@ static int mix_unlock(void) {
     return v;
 }
 
+// Where the reader IS, for pacing, rather than where it last jumped to. The
+// device takes its frames a whole IO buffer at a time (10 ms here — visionOS
+// would not grant 5), so the read cursor, and with it every write that waits
+// for room, moves in 10 ms steps: FMOD's 5.3 ms blocks were taken back two at a
+// time, its mixer clock advanced in 10 ms jumps, and Unity's VideoPlayer —
+// which times a clip with sound by that clock — took frames a refresh late
+// several times a second at 100 Hz (LES MILLS BODYCOMBAT's trainer clips,
+// 2026-10-15). Between two callbacks the device is playing at its rate, so the
+// position is carried forward by the clock, never past the frames that
+// callback took. Only the room a writer waits for uses it; the guard against
+// writing in the past keeps the real cursor. KL_AUDIO_SMOOTH=0|1.
+static int smooth_pacing(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *t = kl_driver_target_name();
+        v = kl_env_on("KL_AUDIO_SMOOTH", t && strcmp(t, "x4015163475201433") == 0);
+    }
+    return v;
+}
+static uint64_t pacing_reader(uint64_t r) {
+    if (!smooth_pacing()) return r;
+    uint64_t t = atomic_load_explicit(&g_last_render_ns, memory_order_relaxed);
+    uint64_t n = atomic_load_explicit(&g_last_render_frames, memory_order_relaxed);
+    uint64_t now = now_ns();
+    if (!t || now <= t) return r;
+    double rate = g_out_rate > 0 ? g_out_rate : 48000.0;
+    uint64_t adv = (uint64_t)((double)(now - t) * rate / 1e9);
+    return r + (adv < n ? adv : n);
+}
+
 size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
     if (!g_open || !pcm || !bytes) return 0;
     unsigned in_frame = g_in_ch * 2;              // 16-bit, checked at open
@@ -890,7 +922,8 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
         uint64_t r = atomic_load_explicit(&g_r, memory_order_acquire);
         uint64_t here = pos + written;
         if (here < r) here = r;                       // never write in the past
-        uint64_t ahead = here - r;
+        uint64_t rp = pacing_reader(r);
+        uint64_t ahead = here > rp ? here - rp : 0;
         size_t room = ahead < g_target ? (size_t)(g_target - ahead) : 0;
         if (ahead < g_cap && g_cap - (size_t)ahead < room) room = g_cap - (size_t)ahead;
         size_t take = frames - written;
@@ -937,7 +970,7 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
             nap_ms(2);
             pthread_mutex_lock(&g_wlock);
         } else {
-            nap_ms(2);
+            nap_ms(smooth_pacing() ? 1 : 2);
         }
     }
     // Slots shift when a source is released, which can happen during an

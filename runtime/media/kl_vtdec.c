@@ -67,6 +67,14 @@ struct kl_vtdec {
                                 // kl_vtdec_want_nv12
     int bgra;                   // sessions request 32BGRA (KL_VTDEC_BGRA=1, or
                                 // the Simulator); 0 = decoder's native format
+    int reorder;                // frames out in presentation order — see
+                                // kl_vtdec_want_reorder
+    // ...by holding the newest decoded frames back, sorted on pts, and passing
+    // the earliest on to the ring once more than `reorder_depth` are held:
+    // VideoToolbox's own kVTDecodeFrame_EnableTemporalProcessing left 55 of
+    // 120 frames of a B-frame test clip out of order on the host.
+    klvt_frame hold[8];
+    int hold_count, reorder_depth;
 
     // The most recent copy of each parameter set. Kept rather than pointed at:
     // they arrive inside a guest buffer that is reused the moment we return,
@@ -156,6 +164,22 @@ static void klvt_teardown_session(kl_vtdec *d) {
     if (d->fmt) { CFRelease(d->fmt); d->fmt = NULL; }
 }
 
+// Under d->lock. A full ring means the guest is not pulling as fast as we
+// decode. For live video the right answer is to drop the OLDEST — a late frame
+// has no value — and to say so, because silent dropping reads as a decoder
+// that is merely slow.
+static void klvt_ring_put(kl_vtdec *d, klvt_frame f) {
+    if (d->ring_count == KLVT_RING) {
+        CVPixelBufferRelease(d->ring[d->ring_head].pb);
+        d->ring_head = (d->ring_head + 1) % KLVT_RING;
+        d->ring_count--;
+        d->n_dropped++;
+    }
+    int slot = (d->ring_head + d->ring_count) % KLVT_RING;
+    d->ring[slot] = f;
+    d->ring_count++;
+}
+
 static void klvt_output(void *decompressionOutputRefCon, void *sourceFrameRefCon,
                         OSStatus status, VTDecodeInfoFlags flags,
                         CVImageBufferRef image, CMTime pts, CMTime duration) {
@@ -176,20 +200,23 @@ static void klvt_output(void *decompressionOutputRefCon, void *sourceFrameRefCon
     d->width  = (int)CVPixelBufferGetWidth(image);
     d->height = (int)CVPixelBufferGetHeight(image);
 
-    // A full ring means the guest is not pulling as fast as we decode. For live
-    // video the right answer is to drop the OLDEST — a late frame has no value
-    // — and to say so, because silent dropping reads as a decoder that is
-    // merely slow.
-    if (d->ring_count == KLVT_RING) {
-        CVPixelBufferRelease(d->ring[d->ring_head].pb);
-        d->ring_head = (d->ring_head + 1) % KLVT_RING;
-        d->ring_count--;
-        d->n_dropped++;
+    klvt_frame f = { (CVPixelBufferRef)CFRetain(image),
+                     (int64_t)(CMTimeGetSeconds(pts) * 1e6 + 0.5) };
+    if (d->reorder) {
+        // Sorted insert; then the earliest goes on once enough are held that
+        // nothing still to come can precede it.
+        int i = d->hold_count;
+        while (i > 0 && d->hold[i - 1].pts_us > f.pts_us) { d->hold[i] = d->hold[i - 1]; i--; }
+        d->hold[i] = f;
+        d->hold_count++;
+        if (d->hold_count > d->reorder_depth) {
+            klvt_ring_put(d, d->hold[0]);
+            memmove(d->hold, d->hold + 1, (size_t)(d->hold_count - 1) * sizeof d->hold[0]);
+            d->hold_count--;
+        }
+    } else {
+        klvt_ring_put(d, f);
     }
-    int slot = (d->ring_head + d->ring_count) % KLVT_RING;
-    d->ring[slot].pb = (CVPixelBufferRef)CFRetain(image);
-    d->ring[slot].pts_us = (int64_t)(CMTimeGetSeconds(pts) * 1e6 + 0.5);
-    d->ring_count++;
     pthread_mutex_unlock(&d->lock);
 }
 
@@ -604,6 +631,8 @@ void kl_vtdec_flush(kl_vtdec *d) {
     if (!d) return;
     if (d->sess) VTDecompressionSessionFinishDelayedFrames(d->sess);
     pthread_mutex_lock(&d->lock);
+    for (int i = 0; i < d->hold_count; i++) { CVPixelBufferRelease(d->hold[i].pb); d->n_taken++; }
+    d->hold_count = 0;
     while (d->ring_count) {
         CVPixelBufferRelease(d->ring[d->ring_head].pb);
         d->ring[d->ring_head].pb = NULL;
@@ -684,4 +713,27 @@ void kl_vtdec_report(FILE *f) {
 // submit — so calling it at configure time, before any access unit, is enough.
 void kl_vtdec_want_nv12(kl_vtdec *d, int on) {
     if (d) d->nv12 = on ? 1 : 0;
+}
+
+void kl_vtdec_want_reorder(kl_vtdec *d, int on) {
+    if (!d) return;
+    d->reorder = on ? 1 : 0;
+    // KL_VTDEC_REORDER_DEPTH: frames held back. 4 covers x264's three B-frames
+    // with pyramid; more costs only latency, which a file player does not feel.
+    int n = kl_env_int("KL_VTDEC_REORDER_DEPTH", 4);
+    d->reorder_depth = n < 1 ? 1 : n > 7 ? 7 : n;
+}
+
+void kl_vtdec_finish(kl_vtdec *d) {
+    // Only a reordering session holds frames back; any other is left exactly
+    // as it was at end of stream.
+    if (!d || !d->reorder) return;
+    if (d->sess) {
+        VTDecompressionSessionFinishDelayedFrames(d->sess);
+        VTDecompressionSessionWaitForAsynchronousFrames(d->sess);
+    }
+    pthread_mutex_lock(&d->lock);
+    for (int i = 0; i < d->hold_count; i++) klvt_ring_put(d, d->hold[i]);
+    d->hold_count = 0;
+    pthread_mutex_unlock(&d->lock);
 }

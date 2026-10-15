@@ -80,14 +80,17 @@ static uint64_t klovrp_called(const char *name) {
     // old value-returning entry points (ovrp_GetNodePose and the like) are not
     // reached at such a version — the guest's C# prefers their successors — and
     // if one is, the line below names it.
-    //   default "unsupported" for x3634830803298285 and x1642239225880682, else "abort"
+    //   default "unsupported" for x3634830803298285, x1642239225880682 and
+    //   x4015163475201433 (LES MILLS BODYCOMBAT, told its own 1.98.0), else "abort"
     static int soft = -1;
     if (soft < 0) {
         const char *t = kl_driver_target_name();
         const char *e = kl_env_str("KL_OVRP_UNANSWERED", NULL);
-        // ...and Richie's Plank Experience, told its own 1.101.1 for the same reason.
+        // ...and Richie's Plank Experience, told its own 1.101.1 for the same reason,
+        // and LES MILLS BODYCOMBAT, told its own 1.98.0.
         soft = e && *e ? !strcmp(e, "unsupported") : (t && (!strcmp(t, "x3634830803298285") ||
-                                                             !strcmp(t, "x1642239225880682")));
+                                                             !strcmp(t, "x1642239225880682") ||
+                                                             !strcmp(t, "x4015163475201433")));
     }
     if (soft) {
         if (s >= 0 && g_ovrp[s].calls == 1)
@@ -645,6 +648,11 @@ static const char *klovrp_version_str(void) {
         // number it says True; on a Mac host run exactly one entry point came up
         // that had no answer (ovrp_IsControllerDrivenHandPosesEnabled, below).
         else if (t && strcmp(t, "x1642239225880682") == 0)  v = "1.101.1";
+        // LES MILLS BODYCOMBAT ships 1.98.0 and has a mixed-reality switch in its
+        // menu. Told 1.60.0, OVRPlugin's C# answers its passthrough request
+        // itself — "Failed to initialize Insight Passthrough ... Failure_Unsupported"
+        // without calling in — and the room stays black (on device, 2026-10-15).
+        else if (t && strcmp(t, "x4015163475201433") == 0)  v = "1.98.0";
         else                                                v = KLOVRP_VERSION_DEFAULT;
     }
     return v;
@@ -1094,9 +1102,26 @@ static uint64_t klovrp_GetPredictedDisplayTime(int node, double *out) {
 // NULL is explicitly tolerated). A static string is therefore both safe and
 // required if we want the name answered at all; "Oculus Quest 2" is what the
 // real plugin returns on the device we are presenting as everywhere else.
+//
+// LES MILLS BODYCOMBAT is told "Oculus Quest", a name Meta's own plugin does
+// return (strings(1) on the 1.98.0 it ships lists "Oculus Quest",
+// "Oculus Quest2", "Meta Quest Pro"). The game picks the pose of its pointer
+// ray, hand model and wrist watch by the HMD's InputDevice name — which the
+// Oculus XR plugin takes from here — out of a table whose Quest entries are
+// "Oculus Quest" and "Oculus Headset2". "Oculus Quest 2" matched neither, the
+// game fell back to its default settings, and on device (2026-10-15) the ray
+// pointed straight down and the watch sat upside down above the hand.
+static const char *klovrp_product_name(void) {
+    static const char *v;
+    if (!v) {
+        const char *t = kl_driver_target_name();
+        v = t && strcmp(t, "x4015163475201433") == 0 ? "Oculus Quest" : "Oculus Quest 2";
+    }
+    return v;
+}
 static const char *klovrp_GetSystemProductName(void) {
     ovrp_hit("ovrp_GetSystemProductName");
-    return "Oculus Quest 2";
+    return klovrp_product_name();
 }
 
 // The 2-form of the same answer: ovrpResult + const char** out — real
@@ -1106,7 +1131,7 @@ static const char *klovrp_GetSystemProductName(void) {
 static uint64_t klovrp_GetSystemProductName2(const char **out) {
     ovrp_hit("ovrp_GetSystemProductName2");
     if (!out) return -1001;
-    *out = "Oculus Quest 2";
+    *out = klovrp_product_name();
     return OVRP_SUCCESS;
 }
 
@@ -1470,6 +1495,10 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         // multisampling it is held at (KL_VK_MAX_SAMPLES): at 3072 and 2x the app
         // stood at 4.4 to 4.7 of its 8.2 GB.
         if (t && strcmp(t, "x3634830803298285") == 0) cap_dflt = 4000;
+        // LES MILLS BODYCOMBAT: a light scene on GL with no multisampling of its
+        // own. At 3072 (the display asked for 4633) its owner called the picture
+        // "viel zu niedrig" on device, 2026-10-15.
+        if (t && strcmp(t, "x4015163475201433") == 0) cap_dflt = 4000;
         // Batman: Arkham Shadow: 4608, the eye size rebelancap runs it at with
         // foveation "high" (kl_fove) — see the note on its row in
         // visionos/targets.py. Unfoveated he measured 4032 as its rung and 5120
@@ -7504,8 +7533,9 @@ int  kl_ovrp_eyeless_black(void) { return g_eyeless_black && !g_eye_layer_live; 
 // still the answer wherever this is off.
 //   KL_OVRP_PASSTHROUGH=0|1 — default 1 for TRIANGLE STRATEGY
 //       (x5340130476095884), whose mixed-reality mode this was written for
-//       (2026-10-12), for Demeo (x3634830803298285) and for Richie's Plank
-//       Experience (x1642239225880682), else 0: no other
+//       (2026-10-12), for Demeo (x3634830803298285), for Richie's Plank
+//       Experience (x1642239225880682) and for LES MILLS BODYCOMBAT
+//       (x4015163475201433), else 0: no other
 //       game has been seen with a "yes".
 //
 // A Unity guest (OVROverlay / OVRPassthroughLayer) does not put the layer in
@@ -7522,7 +7552,8 @@ static int klovrp_pt_on(void) {
         const char *t = kl_driver_target_name();
         on = kl_env_on("KL_OVRP_PASSTHROUGH", t && (!strcmp(t, "x5340130476095884") ||
                                                     !strcmp(t, "x3634830803298285") ||
-                                                    !strcmp(t, "x1642239225880682")));
+                                                    !strcmp(t, "x1642239225880682") ||
+                                                    !strcmp(t, "x4015163475201433")));
         if (on)
             fprintf(stderr, "  [ovrp] passthrough: offered to the guest — the room shows "
                             "through the eye picture while it submits a passthrough layer\n");

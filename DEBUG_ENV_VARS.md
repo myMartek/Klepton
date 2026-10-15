@@ -119,7 +119,9 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   passthrough layer; while one is in the guest's submit list the eye picture is
   no longer forced opaque — its alpha says where the room shows — and the black
   of `KL_MIXED_BLACK` is left out. Default 1 for TRIANGLE STRATEGY
-  (`x5340130476095884`) and Demeo (`x3634830803298285`), 0 for everyone else,
+  (`x5340130476095884`), Demeo (`x3634830803298285`), Richie's Plank Experience
+  (`x1642239225880682`) and LES MILLS BODYCOMBAT (`x4015163475201433`), 0 for
+  everyone else,
   who are told "unsupported" as before. A layer filed through
   `ovrp_EnqueueSubmitLayer2` (Unity) counts like one in `ovrp_EndFrame4`'s
   list. Log lines start `[ovrp] passthrough:`.
@@ -793,8 +795,10 @@ The guest's own memory management, and the three seams that used to disable it.
   uses the location it is told for a sampler as the texture unit; with the
   linker's own numbering that can be 32 or more, which the engine refuses
   ("Invalid texture unit!") — text as filled boxes. Default 1 for
-  `x2773034772778845` (Premium Bowling, Unity 6000.3.22f1) and
-  `x2582932495064035` (Real VR Fishing, as its fix was sent in), else 0.
+  `x2773034772778845` (Premium Bowling, Unity 6000.3.22f1),
+  `x2582932495064035` (Real VR Fishing, as its fix was sent in) and
+  `x4015163475201433` (LES MILLS BODYCOMBAT, every TextMeshPro glyph a block),
+  else 0.
 - `KL_FS_JAR_FILE=0|1` — a path of the form `jar:file:///…` with no `!/`
   entry part is read as the plain path it wraps; Unity's Android file layer
   strips that scheme itself. Default 1 for `x3635172946605196` (BRINK
@@ -948,6 +952,51 @@ on visionOS 2 merely because a format was named. The guest still samples RGB:
 whole promise kept in hardware. See `runtime/media/kl_vtdec.h`; the sampled
 result is gated against the BGRA path by `make vidtex`.
 
+- `KL_MEDIA_SOUND=0|1` — (`kl_mediandk.c`, `kl_avdec.m`) offer a clip's sound
+  to a Unity VideoPlayer as a second extractor track: AVFoundation decodes the
+  first audio track to 16-bit PCM (at most stereo), the track says
+  `audio/raw`, and the codec behind it passes each buffer through. Default on
+  for LES MILLS BODYCOMBAT (x4015163475201433), whose workout clips carry
+  their trainer's voice; off elsewhere, where every clip stays silent as
+  before. Each codec says `[media] sound codec summary` when it is deleted.
+- `KL_VTDEC_REORDER=0|1`, `KL_VTDEC_REORDER_DEPTH=<n>` — (`kl_vtdec.c`) hand
+  decoded frames out in presentation order, as Android's MediaCodec does, by
+  holding the newest `n` (default 4, at most 7) back sorted on pts. In decode
+  order a file with B-frames shows a frame before one that precedes it — a
+  picture that jumps back every few seconds. VideoToolbox's own temporal
+  processing did not reorder (55 of 120 frames out of order on a host test
+  clip; 0 with the hold). Default on for LES MILLS BODYCOMBAT
+  (x4015163475201433), whose workout and tip clips carry B-frames.
+- `KL_VIDEO_EVEN=0|1` — (`kl_mediandk.c`, `klm_even_cadence`) a clip whose
+  frame rate lies strictly between half the display's and the display's own
+  (60 fps on a 100 Hz panel, 30 on 50) is put on a grid of two refreshes: each
+  frame takes its nearest slot's presentation time and a frame whose slot is
+  taken is left out (one in six at 60 on 100). Every frame then stands equally
+  long instead of 20-20-10 ms. Says `[media] even cadence: …` when it engages;
+  the codec summary counts what it left out. Default on for LES MILLS
+  BODYCOMBAT (x4015163475201433); at 120 Hz it never engages.
+- `KL_VIDEO_RETIRE=<n>` — (`kl_mediandk.c`, `klm_retire`) keep the last `n`
+  video frames a SurfaceTexture showed alive after the next one is latched
+  (0..8). Destroying one at once returned its pixel buffer to VideoToolbox's
+  pool, which wrote a later frame into it while guest frames already submitted
+  still sampled it — a picture that jumped forward and back for a refresh.
+  Default 6 for LES MILLS BODYCOMBAT (x4015163475201433), where it was found
+  (2026-10-15), and 0 — the old immediate destroy — for everyone else until
+  another title is seen with it. The reader heartbeat also counts latches
+  whose pts `went back`.
+- `KL_UE4_MEDIA_FRAME_LOCK=0|1` — (`kl_jni_ue4.c`,
+  `klj_MP14_getVideoLastFrame`) hold `kl_avdec_frame_lock` while the UE4
+  MediaPlayer14 path uploads the decoder's frame into the guest's texture, so
+  the decode thread cannot write the next frame into the buffer mid-copy (a
+  later frame, or half of one, shown early). The same kind of fault as
+  `KL_VIDEO_RETIRE`, read off the code rather than seen on a UE4 title; the
+  decode thread waits on the upload while it is held. Default 0.
+- `KL_JNI_PIN_LOOPER=0|1` — (`kl_jni_looper.c`, `Handler.<init>`) a Handler
+  keeps its Looper alive, as in Java. The Looper a HandlerThread hands out is
+  a local reference the guest drops once its Handler is built; unpinned, its
+  slot was recycled and later messages went to the main queue instead of the
+  HandlerThread. Default 1 for LES MILLS BODYCOMBAT (x4015163475201433), whose
+  level-start clip showed nothing that way (2026-10-15), else 0.
 - `KL_VTDEC_BGRA=1` — request `kCVPixelFormatType_32BGRA` from VideoToolbox
   and take the IOSurface-pbuffer route into ANGLE instead. The A/B for the
   native path, and the escape hatch should VideoToolbox ever hand back a
@@ -1748,7 +1797,8 @@ puts the camera on the ground with its hands underneath it.
 - `KL_UNITY_BOOT_EXTRA="<k=v;k=v>"` — lines appended to a Unity guest's
   `bin/Data/boot.config` as `AssetManager.open` serves it (the file on disk is
   untouched); `;` separates lines, empty means none. Default empty, except
-  Eye of the Temple (x5361030930653377): `disable-gpu-skinning=1`, because its
+  Eye of the Temple (x5361030930653377) and LES MILLS BODYCOMBAT
+  (x4015163475201433): `disable-gpu-skinning=1`, because their
   compute-shader skinning cannot compile on ANGLE's ES 3.0 context
   ("Internal-Skinning.main: GLSL compilation failed") and every skinned mesh,
   the whip among them, was never drawn.
@@ -2264,6 +2314,12 @@ The composite/timewarp pass — one file, compiled by both compositors
   environment variable wins, then the saved settings, then these defaults.
 
 
+- `KL_HAND_TUNE=1` — keep an installed game's start window open once the
+  game is up, showing the hand-position sliders (`HandTuneView` in
+  `KleptonTuning.swift`): the Sense controller's pitch and offset, applied to
+  every pose while they are dragged and logged as `[tune] hand position:`.
+  LES MILLS BODYCOMBAT's owner set its values this way; they are its default
+  (`KLSenseTune.targetHand`).
 - `KL_SENSE_PREDICT_MS=<ms>` — how far into the future a Sense-controller pose
   may be predicted. 0 is the measured pose; the default 50 is the same horizon
   `kl_openxr` clamps the HEAD to, so both poses a guest reads are bounded by one
@@ -2428,6 +2484,14 @@ reads no knobs).
   music from a wrong resample ratio or swapped channels. Records what the
   producer accepted, contiguously, so pauses are elided and the file is
   shorter than the run.
+- `KL_AUDIO_SMOOTH=0|1` — (`runtime/media/kl_audio.c`, `pacing_reader`) let a
+  writer waiting for room see the read position carried forward by the clock
+  between two device callbacks, instead of where the last callback left it.
+  The device takes a whole IO buffer at a time (10 ms on visionOS, which would
+  not grant 5), so FMOD's 5.3 ms blocks were otherwise taken back two at a time
+  and its mixer clock — the one Unity's VideoPlayer times a clip with sound by —
+  advanced in 10 ms jumps, one refresh at 100 Hz. Default on for LES MILLS
+  BODYCOMBAT (x4015163475201433).
 - `KL_AUDIO_LATENCY_MS=<n>` — how much audio the ring aims to hold (default
   80, clamped 10..500). This is the whole latency budget — the ring itself is
   a second long so a hiccup cannot wrap it, but the *fill target* is what the

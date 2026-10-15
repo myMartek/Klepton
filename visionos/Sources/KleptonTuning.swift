@@ -61,7 +61,11 @@ final class KleptonTuning: ObservableObject {
         t.gripPos   = SIMD3<Float>(pos[0], pos[1], pos[2])
         ui = t
         live = t
+        seeded = t
     }
+
+    /// The set this run started with — what HandTuneView's reset goes back to.
+    private(set) var seeded = KLTune()
 
     /// The snapshot the pose path uses. Called once per controller pose.
     func snapshot() -> KLTune {
@@ -160,6 +164,72 @@ struct TuningView: View {
                 .font(.system(.caption2, design: .monospaced))
         }
     }
+}
+
+/// The hand position as a player adjusts it: the Sense controller's pitch and
+/// offset from TuningView, in the start window that stays open beside the game
+/// (BootView.handTuneAfterStart), under names that say which way a hand moves.
+/// The pose path re-reads the tune every pose, so each slider moves the hands
+/// while it is dragged. The offset is in the controller's own frame, its X
+/// mirrored for the left hand, as everywhere else.
+struct HandTuneView: View {
+    @ObservedObject private var tune = KleptonTuning.shared
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(klT("Hand position", "Handposition")).font(.title2.bold())
+            Text(klT("Moves the game's hands against your real ones while you play. "
+                     + "Takes effect at once; tell the values below to whoever builds the game.",
+                     "Verschiebt die Hände im Spiel gegenüber deinen echten, während du spielst. "
+                     + "Wirkt sofort; die Werte unten bitte weitergeben."))
+                .font(.callout).foregroundStyle(.secondary)
+            row(klT("Higher / lower", "Höher / tiefer"), $tune.ui.sensePos.y)
+            row(klT("Forward / back", "Nach vorn / zurück"),
+                Binding(get: { -tune.ui.sensePos.z }, set: { tune.ui.sensePos.z = -$0 }))
+            row(klT("Outward / inward", "Nach außen / innen"), $tune.ui.sensePos.x)
+            HStack {
+                Text(klT("Tilt", "Neigung")).frame(width: 190, alignment: .leading)
+                Slider(value: $tune.ui.sensePitch, in: -90 ... 30, step: 0.5,
+                       onEditingChanged: { if !$0 { say() } })
+                Text(String(format: "%+6.1f°", tune.ui.sensePitch))
+                    .font(.system(.body, design: .monospaced)).frame(width: 90)
+            }
+            Text(String(format: "Höhe %+.3f m · vorn %+.3f m · außen %+.3f m · Neigung %+.1f°",
+                        tune.ui.sensePos.y, -tune.ui.sensePos.z, tune.ui.sensePos.x,
+                        tune.ui.sensePitch))
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+            HStack {
+                Button(klT("Reset", "Zurücksetzen")) {
+                    let s = tune.seeded
+                    tune.ui.sensePos = s.sensePos
+                    tune.ui.sensePitch = s.sensePitch
+                    say()
+                }
+                Spacer()
+                Button(klT("Done — close this window", "Fertig – Fenster schließen")) {
+                    say(); onClose()
+                }
+            }
+        }
+        .padding(32)
+        .frame(maxWidth: 720)
+    }
+
+    private func row(_ label: String, _ value: Binding<Float>) -> some View {
+        HStack {
+            Text(label).frame(width: 190, alignment: .leading)
+            Slider(value: value, in: -0.12 ... 0.12, step: 0.005,
+                   onEditingChanged: { if !$0 { say() } })
+            Text(String(format: "%+.1f cm", value.wrappedValue * 100))
+                .font(.system(.body, design: .monospaced)).frame(width: 90)
+        }
+    }
+
+    /// Into the game's log as well, so the values that were settled on can be
+    /// read back without the headset.
+    private func say() { NSLog("[tune] hand position: \(tune.asEnvironment())") }
 }
 
 // ---- Rendering: foveated guest rendering as a setting ----------------------

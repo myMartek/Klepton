@@ -1699,10 +1699,13 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
     // entry its own error hook or event fires next. Max Mustard
     // (x5269080709783454) aborted here on GameAnalytics.addErrorEvent right
     // after its splash; HARD BULLET (x8116626111777808) on
-    // AmplitudePlugin.setLibraryName when Start is pressed in its main menu.
+    // AmplitudePlugin.setLibraryName when Start is pressed in its main menu;
+    // LES MILLS BODYCOMBAT (x4015163475201433) on Cognitive3D's
+    // com/c3d/androidjavaplugin/Plugin.initSessionData during its first scene.
     // KL_JNI_DROP_ANALYTICS=0 restores the abort.
     static const char *const k_dropped[] = { "com/gameanalytics/",
-                                             "com/amplitude/" };
+                                             "com/amplitude/",
+                                             "com/c3d/" };
     for (unsigned i = 0; i < sizeof k_dropped / sizeof *k_dropped; i++)
         if (strncmp(w->cls, k_dropped[i], strlen(k_dropped[i])) == 0 &&
             kl_env_on("KL_JNI_DROP_ANALYTICS", 1)) {

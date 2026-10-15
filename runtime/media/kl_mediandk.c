@@ -25,6 +25,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "klepton.h"
 #include "kl_ndk.h"
@@ -33,6 +34,7 @@
 #include "kl_vulkan.h"
 #include "kl_glfb.h"
 #include "kl_driver.h"
+#include "kl_ovrp.h"
 
 void kl_unresolved_named(const char *name);     // kl_shim.c
 
@@ -246,6 +248,10 @@ typedef struct {
     uint32_t magic;
     char    *source;        // for the report: what it was asked to open
     kl_avdemux *dm;         // the demuxer, when a container was opened (else NULL)
+    // Which tracks the guest selected: bit 0 the picture, bit 1 the sound.
+    // Until it selects any, the picture alone — what this extractor always did.
+    unsigned sel;
+    int      sel_set;
 } klm_extractor;
 
 static klm_extractor *klm_ex(void *ex) {
@@ -494,13 +500,46 @@ static int klm_AMediaExtractor_setDataSourceCustom(void *ex, void *src) {
 // are the values the NDK defines for "no more samples" / "no such track", not
 // invented ones, so a guest that ignored the setDataSource status still walks a
 // consistent empty stream rather than reading uninitialised memory.
+// The clip's sound as a second track (track 1), "audio/raw": AVFoundation has
+// already decoded it (kl_avdemux_audio_*), so the codec behind it only hands
+// the PCM through (klm_pcm_*). Before this every clip was silent — the
+// extractor had one track. KL_MEDIA_SOUND=0|1; on by default for LES MILLS
+// BODYCOMBAT (x4015163475201433), whose workout clips carry their trainer's
+// voice (on device, 2026-10-15), and off elsewhere until a title is seen with it.
+static int klm_sound_enabled(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_MEDIA_SOUND", t && !strcmp(t, "x4015163475201433"));
+    }
+    return on;
+}
+static int klm_ex_has_sound(klm_extractor *x) {
+    return x && x->dm && klm_sound_enabled() && kl_avdemux_audio_info(x->dm, NULL, NULL);
+}
 static size_t klm_AMediaExtractor_getTrackCount(void *ex) {
     klm_extractor *x = klm_ex(ex);
-    return (x && x->dm) ? 1 : 0;
+    if (!x || !x->dm) return 0;
+    return klm_ex_has_sound(x) ? 2 : 1;
 }
 static void *klm_AMediaExtractor_getTrackFormat(void *ex, size_t i) {
     klm_extractor *x = klm_ex(ex);
-    if (!x || !x->dm || i != 0) return NULL;
+    if (!x || !x->dm) return NULL;
+    if (i == 1 && klm_ex_has_sound(x)) {
+        int rate = 0, ch = 0; long long dur = 0;
+        kl_avdemux_audio_info(x->dm, &rate, &ch);
+        kl_avdemux_info(x->dm, NULL, NULL, NULL, &dur, NULL);
+        klm_format *f = klm_AMediaFormat_new();
+        if (!f) return NULL;
+        klm_AMediaFormat_setString(f, g_key_mime, "audio/raw");
+        klm_AMediaFormat_setInt32(f, g_key_sample_rate, rate);
+        klm_AMediaFormat_setInt32(f, g_key_channel_count, ch);
+        klm_AMediaFormat_setInt32(f, g_key_duration, (int32_t)dur);
+        klm_AMediaFormat_setInt32(f, "pcm-encoding", 2);          // ENCODING_PCM_16BIT
+        klm_AMediaFormat_setInt32(f, "max-input-size", 1024 * ch * 2);
+        return f;
+    }
+    if (i != 0) return NULL;
     int w = 0, h = 0; const char *mime = NULL; long long dur = 0; float fps = 0;
     kl_avdemux_info(x->dm, &w, &h, &mime, &dur, &fps);
     klm_format *f = klm_AMediaFormat_new();
@@ -526,34 +565,62 @@ static void *klm_AMediaExtractor_getTrackFormat(void *ex, size_t i) {
 }
 static int klm_AMediaExtractor_selectTrack(void *ex, size_t i) {
     klm_extractor *x = klm_ex(ex);
-    if (!x || !x->dm || i != 0) return AMEDIA_ERROR_INVALID_PARAMETER;
-    return AMEDIA_OK;               // the single video track is already reading
+    if (!x || !x->dm || i >= klm_AMediaExtractor_getTrackCount(ex))
+        return AMEDIA_ERROR_INVALID_PARAMETER;
+    if (!x->sel_set) { x->sel = 0; x->sel_set = 1; }
+    x->sel |= 1u << i;
+    return AMEDIA_OK;
+}
+// Which selected track holds the next sample in time — Android's extractor
+// interleaves its selected tracks by timestamp. -1 when all are at their end.
+static int klm_ex_current(klm_extractor *x) {
+    unsigned sel = x->sel_set ? x->sel : 1u;
+    long long tv = (sel & 1u) ? kl_avdemux_sample_time_us(x->dm) : -1;
+    long long ta = (sel & 2u) ? kl_avdemux_audio_time_us(x->dm) : -1;
+    if (tv < 0 && ta < 0) return -1;
+    if (tv < 0) return 1;
+    if (ta < 0) return 0;
+    return ta < tv ? 1 : 0;
 }
 static ssize_t klm_AMediaExtractor_readSampleData(void *ex, uint8_t *buf, size_t cap) {
     klm_extractor *x = klm_ex(ex);
     if (!x || !x->dm) return -1;
-    return (ssize_t)kl_avdemux_read(x->dm, buf, (unsigned long)cap);
+    int t = klm_ex_current(x);
+    if (t == 1) return (ssize_t)kl_avdemux_audio_read(x->dm, buf, (unsigned long)cap);
+    if (t == 0) return (ssize_t)kl_avdemux_read(x->dm, buf, (unsigned long)cap);
+    return -1;
 }
 static int klm_AMediaExtractor_getSampleTrackIndex(void *ex) {
     klm_extractor *x = klm_ex(ex);
     if (!x || !x->dm) return -1;
-    return kl_avdemux_sample_time_us(x->dm) < 0 ? -1 : 0;
+    return klm_ex_current(x);
 }
 static int64_t klm_AMediaExtractor_getSampleTime(void *ex) {
     klm_extractor *x = klm_ex(ex);
     if (!x || !x->dm) return -1;
-    return (int64_t)kl_avdemux_sample_time_us(x->dm);
+    int t = klm_ex_current(x);
+    if (t == 1) return (int64_t)kl_avdemux_audio_time_us(x->dm);
+    if (t == 0) return (int64_t)kl_avdemux_sample_time_us(x->dm);
+    return -1;
 }
 static bool klm_AMediaExtractor_advance(void *ex) {
     klm_extractor *x = klm_ex(ex);
     if (!x || !x->dm) return false;
-    return kl_avdemux_advance(x->dm) != 0;
+    int t = klm_ex_current(x);
+    if (t == 1) kl_avdemux_audio_advance(x->dm);
+    else if (t == 0) kl_avdemux_advance(x->dm);
+    else return false;
+    return klm_ex_current(x) >= 0;
 }
 static int klm_AMediaExtractor_seekTo(void *ex, int64_t us, int mode) {
     (void)mode;
     klm_extractor *x = klm_ex(ex);
     if (!x || !x->dm) return AMEDIA_ERROR_UNSUPPORTED;
-    return kl_avdemux_seek_us(x->dm, (long long)us) ? AMEDIA_OK : AMEDIA_ERROR_UNSUPPORTED;
+    unsigned sel = x->sel_set ? x->sel : 1u;
+    int ok = 1;
+    if (sel & 1u) ok &= kl_avdemux_seek_us(x->dm, (long long)us) != 0;
+    if (sel & 2u) kl_avdemux_audio_seek_us(x->dm, (long long)us);
+    return ok ? AMEDIA_OK : AMEDIA_ERROR_UNSUPPORTED;
 }
 
 // ---------------------------------------------------------------------------
@@ -714,9 +781,28 @@ typedef struct {
     pthread_t dispatch;
     int       running;
     int       pending;          // listener calls owed to the guest
+    // Per reader, where KLM_FIRST is per run: a game whose FIRST clip plays
+    // and a later one stays empty (LES MILLS BODYCOMBAT's level-start clip,
+    // 2026-10-15) said nothing at all about the later one.
+    int       said_pub, said_latch, said_fail;
+    int       serial;           // which reader of the run this is
+    uint64_t  beat_ns;          // last updateTexImage heartbeat
+    // Evenness of the picture: wall time between two latched frames against
+    // the pts step between them. A late latch is one that came more than a
+    // half frame after its pts said it should; reset with every heartbeat.
+    uint64_t  latch_ns;
+    int64_t   latch_pts_ns;
+    // Images taken off the texture but kept alive a few latches longer
+    // (klm_retire): the GPU may still be drawing a guest frame that samples one.
+    void     *retired[8];
+    int       n_retired;
+    unsigned  n_backward;       // latched pts went back (reset per heartbeat)
+    unsigned  n_late;
+    uint64_t  worst_gap_ns;
 } klm_reader;
 
 #define KLM_READER_MAGIC 0x4b4c5244u   /* 'KLRD' */
+static void klm_retire_all(klm_reader *r);
 
 static klm_reader *g_reader;        // for the report; this guest makes one
 // Lifetime totals. The per-object counters die with the object, and the run
@@ -788,8 +874,10 @@ static int klm_AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format,
     }
     *out = r;
     g_reader = r;
-    fprintf(stderr, "  [media] AImageReader %dx%d format 0x%x usage 0x%llx, "
-                    "%d images\n", w, h, format, (unsigned long long)usage,
+    static int serial;
+    r->serial = ++serial;
+    fprintf(stderr, "  [media] AImageReader #%d %dx%d format 0x%x usage 0x%llx, "
+                    "%d images\n", r->serial, w, h, format, (unsigned long long)usage,
             max_images);
     return AMEDIA_OK;
 }
@@ -861,10 +949,11 @@ static void klm_AImageReader_delete(void *reader) {
         r->count--;
     }
     if (r->is_surface_texture)
-        fprintf(stderr,"  [media] SurfaceTexture summary: queued=%u latched=%u skipped=%u upload_failed=%u empty_updates=%u first_pts_ns=%lld last_pts_ns=%lld\n",
-            r->n_queued,r->n_latched,r->n_dropped,r->n_upload_failed,r->n_empty_updates,
+        fprintf(stderr,"  [media] SurfaceTexture summary (reader #%d): queued=%u latched=%u skipped=%u upload_failed=%u empty_updates=%u first_pts_ns=%lld last_pts_ns=%lld\n",
+            r->serial,r->n_queued,r->n_latched,r->n_dropped,r->n_upload_failed,r->n_empty_updates,
             (long long)r->first_pts_ns,(long long)r->timestamp_ns);
     if (r->latched_image) kl_glfb_image_destroy(r->latched_image);
+    klm_retire_all(r);
     kl_ndk_window_free(r->window);
     pthread_mutex_destroy(&r->lock);
     pthread_cond_destroy(&r->cv);
@@ -899,8 +988,51 @@ static void klm_reader_publish(klm_reader *r, CVPixelBufferRef pb, int64_t pts_u
                         "— onImageAvailable fires next\n",
               CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb),
               (long long)pts_us);
+    if (!r->said_pub) {
+        r->said_pub = 1;
+        fprintf(stderr, "  [media] reader #%d: first frame %zux%zu published (listener %s)\n",
+                r->serial, CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb),
+                r->have_listener ? "set" : "NOT set");
+    }
     pthread_cond_signal(&r->cv);
     pthread_mutex_unlock(&r->lock);
+}
+
+// A frame taken off the texture is not destroyed at once. Destroying it gives
+// its pixel buffer back to the decoder's pool, and VideoToolbox writes a LATER
+// frame into it straight away — while guest frames already submitted (the
+// guest renders up to three ahead) still sample it on the GPU. What they then
+// show is a frame from further on in the clip, for one refresh: the picture
+// jumps forward and back. LES MILLS BODYCOMBAT's trainer clips did exactly
+// that (on device, 2026-10-15). So the last few images are kept alive. Any
+// guest on this path renders ahead the same way, but only this one has been
+// seen with it, so the others keep the immediate destroy until one is.
+// KL_VIDEO_RETIRE=<n> (0..8; default 6 for LES MILLS BODYCOMBAT
+// (x4015163475201433), else 0, which destroys at once as before).
+static int klm_retire_depth(void) {
+    static int n = -1;
+    if (n < 0) {
+        const char *t = kl_driver_target_name();
+        n = (int)kl_env_int("KL_VIDEO_RETIRE", t && !strcmp(t, "x4015163475201433") ? 6 : 0);
+        if (n < 0) n = 0;
+        if (n > 8) n = 8;
+    }
+    return n;
+}
+static void klm_retire(klm_reader *r, void *image) {
+    if (!image) return;
+    int depth = klm_retire_depth();
+    if (!depth) { kl_glfb_image_destroy(image); return; }
+    if (r->n_retired == depth) {
+        kl_glfb_image_destroy(r->retired[0]);
+        memmove(r->retired, r->retired + 1, (size_t)(depth - 1) * sizeof r->retired[0]);
+        r->n_retired--;
+    }
+    r->retired[r->n_retired++] = image;
+}
+static void klm_retire_all(klm_reader *r) {
+    for (int i = 0; i < r->n_retired; i++) kl_glfb_image_destroy(r->retired[i]);
+    r->n_retired = 0;
 }
 
 // SurfaceTexture's producer window is a real reader window, so codec release
@@ -922,25 +1054,71 @@ void kl_mediandk_texture_listener(void *reader, void *context, void (*callback)(
 }
 int kl_mediandk_texture_update(void *reader) {
     klm_reader *r = reader;
-    if (!r || r->magic != KLM_READER_MAGIC || !r->texture) return 0;
+    if (!r || r->magic != KLM_READER_MAGIC) return 0;
+    // The game's side of klm_codec_beat: that it still asks for frames at all.
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+        if (!r->beat_ns || now - r->beat_ns >= 2000000000ull) {
+            r->beat_ns = now;
+            fprintf(stderr, "  [media] reader #%d updateTexImage: queued=%u latched=%u "
+                            "empty_updates=%u upload_failed=%u | late latches %u, "
+                            "worst gap %.1f ms, went back %u\n", r->serial,
+                    r->n_queued, r->n_latched, r->n_empty_updates, r->n_upload_failed,
+                    r->n_late, (double)r->worst_gap_ns / 1e6, r->n_backward);
+            r->n_late = 0; r->worst_gap_ns = 0; r->n_backward = 0;
+        }
+    }
+    if (!r->texture) {
+        if (!r->said_fail) {
+            r->said_fail = 1;
+            fprintf(stderr, "  [media] reader #%d: updateTexImage with no texture attached\n",
+                    r->serial);
+        }
+        return 0;
+    }
     void *image = NULL;
     if (klm_AImageReader_acquireLatestImage(r, &image) != AMEDIA_OK) { r->n_empty_updates++; return 0; }
     klm_image *im = image;
     void *next = kl_glfb_image_from_pixels(im->pixels, NULL, NULL);
     int64_t timestamp = im->pts_us * 1000;
     klm_AImage_delete(im);
-    if (!next) { r->n_upload_failed++; return 0; }
-    if (!kl_glfb_image_bind_texture(next, r->texture)) {
+    if (!next || !kl_glfb_image_bind_texture(next, r->texture)) {
         r->n_upload_failed++;
-        kl_glfb_image_destroy(next);
+        if (!r->said_fail) {
+            r->said_fail = 1;
+            fprintf(stderr, "  [media] reader #%d: a decoded frame could not be %s texture %u\n",
+                    r->serial, next ? "bound to" : "made into an image for", r->texture);
+        }
+        if (next) kl_glfb_image_destroy(next);
         return 0;
     }
-    if (r->latched_image) kl_glfb_image_destroy(r->latched_image);
+    klm_retire(r, r->latched_image);
     r->latched_image = next;
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+        if (r->latch_ns && timestamp < r->latch_pts_ns) r->n_backward++;
+        if (r->latch_ns && timestamp > r->latch_pts_ns) {
+            uint64_t gap = now - r->latch_ns;
+            int64_t step = timestamp - r->latch_pts_ns;
+            if (gap > r->worst_gap_ns) r->worst_gap_ns = gap;
+            if ((int64_t)gap > step + step / 2) r->n_late++;
+        }
+        r->latch_ns = now;
+        r->latch_pts_ns = timestamp;
+    }
     r->timestamp_ns = timestamp;
     if (!r->n_latched) r->first_pts_ns=timestamp;
     r->n_latched++;
     KLM_FIRST(said_texture, "SurfaceTexture latched decoded frame into texture %u\n", r->texture);
+    if (!r->said_latch) {
+        r->said_latch = 1;
+        fprintf(stderr, "  [media] reader #%d: first frame latched into texture %u\n",
+                r->serial, r->texture);
+    }
     return 1;
 }
 long long kl_mediandk_texture_timestamp(void *reader) {
@@ -960,6 +1138,7 @@ void kl_mediandk_texture_detach(void *reader) {
     klm_reader *r = reader;
     if (!r || r->magic != KLM_READER_MAGIC) return;
     if (r->latched_image) kl_glfb_image_destroy(r->latched_image);
+    klm_retire_all(r);
     r->latched_image = NULL;
     r->texture = 0;
 }
@@ -1026,14 +1205,146 @@ typedef struct {
     int      out_w, out_h;
 
     unsigned n_in, n_out, n_rendered;
+    uint64_t beat_ns;           // last klm_codec_beat line
+
+    // "audio/raw": a clip's sound, already PCM (see the extractor), so this
+    // codec hands each input buffer through as an output buffer, in order.
+    int      pcm, pcm_rate, pcm_ch;
+    int      pcm_fmt_said;      // INFO_OUTPUT_FORMAT_CHANGED handed out
+
+    // Even cadence (klm_even_cadence): the clip's frame period as measured, the
+    // grid slot of the last frame handed out, and how many were left out.
+    int64_t  ec_last_src_pts, ec_period_us, ec_last_slot;
+    int      ec_have_slot;
+    unsigned ec_dropped;
+    struct { uint8_t *buf; size_t cap, len; int64_t pts_us; uint32_t flags;
+             int state; unsigned seq; } pq[KLM_OUT_SLOTS];   // state: 0 free, 1 ready, 2 out
+    unsigned pq_seq;
 } klm_codec;
 
 #define KLM_CODEC_MAGIC 0x4b4c4344u    /* 'KLCD' */
+
+static uint64_t klm_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+// Every two seconds while a surface-configured codec is driven: what went in,
+// what came out, what was rendered to its reader, and what the game took from
+// that reader. A clip that shows its first frame and then stands still
+// (LES MILLS BODYCOMBAT's level-start clip, 2026-10-15) is one of these
+// numbers stopping, and the summaries at delete never come for a player the
+// game keeps. Silence from here means the guest stopped calling the codec.
+static void klm_codec_beat(klm_codec *c, const char *where) {
+    if (!c || !c->surface) return;
+    uint64_t now = klm_now_ns();
+    if (c->beat_ns && now - c->beat_ns < 2000000000ull) return;
+    c->beat_ns = now;
+    klm_reader *r = c->surface;
+    fprintf(stderr, "  [media] codec %dx%d -> reader #%d (%s): in=%u out=%u rendered=%u "
+                    "input_waits=%u | reader queued=%u acquired=%u latched=%u dropped=%u "
+                    "empty_updates=%u upload_failed=%u listener_owed=%d\n",
+            c->out_w, c->out_h, r->serial, where, c->n_in, c->n_out, c->n_rendered,
+            c->n_input_waits, r->n_queued, r->n_acquired, r->n_latched, r->n_dropped,
+            r->n_empty_updates, r->n_upload_failed, r->pending);
+}
 // MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar — NV12, the
 // one layout buffer mode produces (klm_linearize).
 #define KLM_COLOR_FormatYUV420SemiPlanar 21
 
 static klm_codec *g_codec;
+
+// ---- the pass-through codec behind "audio/raw" -----------------------------
+static void klm_pcm_reset(klm_codec *c) {
+    for (int i = 0; i < KLM_OUT_SLOTS; i++) { c->pq[i].state = 0; c->pq[i].len = 0; }
+    for (int i = 0; i < KLM_IN_BUFFERS; i++) c->in[i].in_use = 0;
+}
+static int klm_pcm_free_slot(klm_codec *c) {
+    for (int i = 0; i < KLM_OUT_SLOTS; i++) if (!c->pq[i].state) return i;
+    return -1;
+}
+static ssize_t klm_pcm_dequeue_input(klm_codec *c, int64_t timeoutUs) {
+    for (int64_t waited = 0;; waited += 1000) {
+        pthread_mutex_lock(&c->lock);
+        if (klm_pcm_free_slot(c) >= 0)
+            for (int i = 0; i < KLM_IN_BUFFERS; i++)
+                if (!c->in[i].in_use) {
+                    c->in[i].in_use = 1;
+                    pthread_mutex_unlock(&c->lock);
+                    return i;
+                }
+        pthread_mutex_unlock(&c->lock);
+        if (timeoutUs == 0 || (timeoutUs > 0 && waited >= timeoutUs))
+            return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
+        usleep(1000);
+    }
+}
+static int klm_pcm_queue_input(klm_codec *c, size_t idx, off_t offset, size_t size,
+                               uint64_t time_us, uint32_t flags) {
+    pthread_mutex_lock(&c->lock);
+    uint8_t *p = c->in[idx].data;
+    int o = klm_pcm_free_slot(c);
+    int result = AMEDIA_OK;
+    if (o < 0) result = AMEDIA_ERROR_INVALID_OPERATION;
+    else if (size && (!p || offset < 0 || size > KLM_IN_CAP || (size_t)offset > KLM_IN_CAP - size))
+        result = AMEDIA_ERROR_INVALID_PARAMETER;
+    else {
+        if (c->pq[o].cap < size) {
+            uint8_t *n = realloc(c->pq[o].buf, size);
+            if (!n) result = AMEDIA_ERROR_UNKNOWN;
+            else { c->pq[o].buf = n; c->pq[o].cap = size; }
+        }
+        if (result == AMEDIA_OK) {
+            if (size) memcpy(c->pq[o].buf, p + offset, size);
+            c->pq[o].len = size;
+            c->pq[o].pts_us = (int64_t)time_us;
+            c->pq[o].flags = flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM;
+            c->pq[o].seq = ++c->pq_seq;
+            c->pq[o].state = 1;
+            c->n_in++;
+        }
+    }
+    c->in[idx].in_use = 0;
+    pthread_mutex_unlock(&c->lock);
+    KLM_FIRST(said_pcm_in, "first sound buffer queued: %zu bytes, pts %llu us\n",
+              size, (unsigned long long)time_us);
+    return result;
+}
+static ssize_t klm_pcm_dequeue_output(klm_codec *c, AMediaCodecBufferInfo *info,
+                                      int64_t timeoutUs) {
+    for (int64_t waited = 0;; waited += 1000) {
+        pthread_mutex_lock(&c->lock);
+        int best = -1;
+        for (int i = 0; i < KLM_OUT_SLOTS; i++)
+            if (c->pq[i].state == 1 && (best < 0 || c->pq[i].seq < c->pq[best].seq)) best = i;
+        // Android's decoder says what it decodes to before the first buffer,
+        // and Unity's AndroidVideoMedia::GetFormatInfo waits for exactly that:
+        // without it the track reads as "format not detected" and the clip
+        // plays without its sound.
+        if (best >= 0 && !c->pcm_fmt_said) {
+            c->pcm_fmt_said = 1;
+            pthread_mutex_unlock(&c->lock);
+            return AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED;
+        }
+        if (best >= 0) {
+            c->pq[best].state = 2;
+            c->n_out++;
+            if (info) {
+                info->offset = 0;
+                info->size = (int32_t)c->pq[best].len;
+                info->presentationTimeUs = c->pq[best].pts_us;
+                info->flags = c->pq[best].flags;
+            }
+            pthread_mutex_unlock(&c->lock);
+            return best;
+        }
+        pthread_mutex_unlock(&c->lock);
+        if (timeoutUs == 0 || (timeoutUs > 0 && waited >= timeoutUs))
+            return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
+        usleep(1000);
+    }
+}
 
 
 static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
@@ -1041,10 +1352,32 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     if (!c) return NULL;
     c->magic = KLM_CODEC_MAGIC;
     const char *target=kl_driver_target_name();
-    c->playback_backpressure=target && !strcmp(target,"x2249318828413747");
+    // LES MILLS BODYCOMBAT's VideoPlayer is the same case: with no backpressure it
+    // queued a whole clip at once (in=472) into a 16-frame decoder ring and got
+    // two frames out — the first stayed on screen (on device, 2026-10-15).
+    c->playback_backpressure=target && (!strcmp(target,"x2249318828413747") ||
+                                        !strcmp(target,"x4015163475201433"));
     snprintf(c->mime, sizeof c->mime, "%s", mime ? mime : "");
     pthread_mutex_init(&c->lock, NULL);
+    if (mime && !strcmp(mime, "audio/raw")) {
+        c->pcm = 1;
+        c->playback_backpressure = 0;
+        fprintf(stderr, "  [media] AMediaCodec_createDecoderByType(\"audio/raw\") — "
+                        "the clip's sound, passed through\n");
+        g_ever_created = 1;
+        return c;
+    }
     c->dec = kl_vtdec_create(mime);
+    // Presentation order out of the decoder (kl_vtdec_want_reorder).
+    // KL_VTDEC_REORDER=0|1; on by default for LES MILLS BODYCOMBAT, whose
+    // workout and tip clips carry B-frames and jumped back every few seconds
+    // in decode order (on device, 2026-10-15).
+    {
+        static int reorder = -1;
+        if (reorder < 0)
+            reorder = kl_env_on("KL_VTDEC_REORDER", target && !strcmp(target, "x4015163475201433"));
+        if (reorder) kl_vtdec_want_reorder(c->dec, 1);
+    }
     if (!c->dec) {
         // Not an abort. "No decoder for this type" is a state MediaCodec has,
         // the guest checks for it, and its own message is better than ours.
@@ -1073,6 +1406,14 @@ static int klm_AMediaCodec_configure(void *codec, const void *format,
         return AMEDIA_ERROR_INVALID_PARAMETER;
     }
     const char *mime = klm_fmt_string((klm_format *)format, "mime");
+    if (c->pcm) {
+        int32_t v;
+        if (klm_AMediaFormat_getInt32((void *)format, g_key_sample_rate, &v)) c->pcm_rate = v;
+        if (klm_AMediaFormat_getInt32((void *)format, g_key_channel_count, &v)) c->pcm_ch = v;
+        fprintf(stderr, "  [media] AMediaCodec_configure: audio/raw %d Hz, %d channel(s)\n",
+                c->pcm_rate, c->pcm_ch);
+        return AMEDIA_OK;
+    }
     // The surface is the AImageReader's window; that is the only kind this
     // guest passes, and the owner pointer the window carries is what connects
     // the two objects back up.
@@ -1118,9 +1459,14 @@ static void klm_codec_drop_outputs(klm_codec *c) {
 static int klm_AMediaCodec_flush(void *codec) {
     klm_codec *c = codec;
     if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
+    if (c->pcm) {
+        pthread_mutex_lock(&c->lock); klm_pcm_reset(c); pthread_mutex_unlock(&c->lock);
+        return AMEDIA_OK;
+    }
     pthread_mutex_lock(&c->lock);
     klm_codec_drop_outputs(c);
     for (int i = 0; i < KLM_IN_BUFFERS; i++) c->in[i].in_use = 0;
+    c->ec_have_slot = 0; c->ec_last_src_pts = 0;
     pthread_mutex_unlock(&c->lock);
     if (c->playback_backpressure) kl_vtdec_flush_playback(c->dec);
     else kl_vtdec_flush(c->dec);
@@ -1134,10 +1480,14 @@ static int klm_AMediaCodec_delete(void *codec) {
     klm_codec_drop_outputs(c);
     for (int i = 0; i < KLM_IN_BUFFERS; i++) free(c->in[i].data);
     for (int i = 0; i < KLM_OUT_SLOTS; i++) free(c->out[i].lin);
+    for (int i = 0; i < KLM_OUT_SLOTS; i++) free(c->pq[i].buf);
+    if (c->pcm)
+        fprintf(stderr, "  [media] sound codec summary: %u buffers in, %u out\n",
+                c->n_in, c->n_out);
     pthread_mutex_unlock(&c->lock);
     if(c->playback_backpressure) {
         unsigned in=0,out=0,dropped=0;kl_vtdec_stats(c->dec,&in,&out,&dropped,NULL,NULL);
-        fprintf(stderr,"  [media] playback codec summary: submitted=%u decoded=%u decoder_dropped=%u dequeued=%u input_backpressure=%u\n",in,out,dropped,c->n_out,c->n_input_waits);
+        fprintf(stderr,"  [media] playback codec summary: submitted=%u decoded=%u decoder_dropped=%u dequeued=%u input_backpressure=%u even_cadence_dropped=%u\n",in,out,dropped,c->n_out,c->n_input_waits,c->ec_dropped);
     }
     kl_vtdec_destroy(c->dec);
     pthread_mutex_destroy(&c->lock);
@@ -1155,6 +1505,7 @@ static int klm_AMediaCodec_delete(void *codec) {
 static ssize_t klm_AMediaCodec_dequeueInputBuffer(void *codec, int64_t timeoutUs) {
     klm_codec *c = codec;
     if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
+    if (c->pcm) return klm_pcm_dequeue_input(c, timeoutUs);
     int64_t waited = 0;
     for (;;) {
         pthread_mutex_lock(&c->lock);
@@ -1206,6 +1557,14 @@ static uint8_t *klm_AMediaCodec_getOutputBuffer(void *codec, size_t idx, size_t 
     klm_codec *c = codec;
     if (out_size) *out_size = 0;
     if (!c || c->magic != KLM_CODEC_MAGIC) return NULL;
+    if (c->pcm) {
+        if (idx >= KLM_OUT_SLOTS) return NULL;
+        pthread_mutex_lock(&c->lock);
+        uint8_t *p = c->pq[idx].state == 2 ? c->pq[idx].buf : NULL;
+        if (out_size && p) *out_size = c->pq[idx].cap;
+        pthread_mutex_unlock(&c->lock);
+        return p;
+    }
     if (!c->surface) {
         // Buffer mode: the frame klm_linearize flattened at dequeue. Valid
         // until the guest releases the slot, as on Android.
@@ -1236,6 +1595,12 @@ static void *klm_AMediaCodec_getOutputFormat(void *codec) {
     klm_format *f = klm_AMediaFormat_new();
     if (!f) return NULL;
     klm_AMediaFormat_setString(f, g_key_mime, c->mime);
+    if (c->pcm) {
+        klm_AMediaFormat_setInt32(f, g_key_sample_rate, c->pcm_rate);
+        klm_AMediaFormat_setInt32(f, g_key_channel_count, c->pcm_ch);
+        klm_AMediaFormat_setInt32(f, "pcm-encoding", 2);
+        return f;
+    }
     pthread_mutex_lock(&c->lock);
     int w = c->out_w, h = c->out_h;
     pthread_mutex_unlock(&c->lock);
@@ -1268,6 +1633,7 @@ static int klm_AMediaCodec_queueInputBuffer(void *codec, size_t idx, off_t offse
                                             uint32_t flags) {
     klm_codec *c=codec;
     if(!c || c->magic!=KLM_CODEC_MAGIC || idx>=KLM_IN_BUFFERS) return AMEDIA_ERROR_INVALID_PARAMETER;
+    if(c->pcm) return klm_pcm_queue_input(c,idx,offset,size,time_us,flags);
     pthread_mutex_lock(&c->lock);
     uint8_t *p=c->in[idx].data;
     c->n_in++;
@@ -1275,7 +1641,8 @@ static int klm_AMediaCodec_queueInputBuffer(void *codec, size_t idx, off_t offse
     int result=AMEDIA_OK;
     if(!p) result=AMEDIA_ERROR_UNKNOWN;
     else if(offset<0 || size>KLM_IN_CAP || (size_t)offset>KLM_IN_CAP-size) result=AMEDIA_ERROR_INVALID_PARAMETER;
-    else if(!(flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM)) {
+    else if(flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) kl_vtdec_finish(c->dec);
+    else {
         if(!size) result=(flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) ? AMEDIA_OK : AMEDIA_ERROR_INVALID_PARAMETER;
         else {
             KLM_FIRST(said_in,"first access unit queued: %zu bytes, pts %llu us, flags 0x%x\n",size,(unsigned long long)time_us,flags);
@@ -1397,11 +1764,59 @@ static size_t klm_linearize(CVPixelBufferRef pb, uint8_t **buf, size_t *cap, int
     return w * h + w * ch;
 }
 
+// A clip whose frame rate lies between half the display's and the display's
+// own — 60 frames a second on a 100 Hz panel — cannot be shown evenly: each
+// frame stands for one refresh or for two, 20-20-10 ms, and a slowly moving
+// figure visibly judders. A Quest switches its panel to the 60 Hz the game asks
+// for (SetSystemDisplayFrequency(60) in the log); visionOS's mixed space has
+// only 100 Hz (or 50). So such a clip is put on a grid of two refreshes: every
+// frame gets the presentation time of its nearest grid slot, and a frame whose
+// slot is already taken is left out — one in six at 60 on 100. Each frame then
+// stands exactly 20 ms, the picture never strays more than half a slot from the
+// sound, and the motion steps once every 0.1 s instead of stuttering.
+// KL_VIDEO_EVEN=0|1; on by default for LES MILLS BODYCOMBAT, whose owner chose
+// this over a 120 Hz default (on device, 2026-10-15). At 120 Hz nothing changes.
+// Returns 1 if the frame is to be dropped; otherwise *pts may be moved.
+static int klm_even_cadence(klm_codec *c, int64_t *pts) {
+    static int on = -1;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_VIDEO_EVEN", t && !strcmp(t, "x4015163475201433"));
+    }
+    if (!on || !c->surface) return 0;
+    int64_t src = *pts, d = src - c->ec_last_src_pts;
+    if (c->ec_last_src_pts && d > 0 && d < 100000)
+        c->ec_period_us = c->ec_period_us ? (c->ec_period_us * 7 + d) / 8 : d;
+    c->ec_last_src_pts = src;
+    float hz = kl_ovrp_display_frequency();
+    if (!c->ec_period_us || !(hz >= 30.0f)) return 0;
+    double tick = 1e6 / hz, fps = 1e6 / (double)c->ec_period_us;
+    // Strictly between half the panel rate and the panel rate, with a margin, so
+    // a 30-frame clip on 60, or 60 on 120, is never touched.
+    if (!(fps > hz * 0.55 && fps < hz * 0.97)) return 0;
+    int64_t grid = (int64_t)(2.0 * tick + 0.5);
+    int64_t slot = (src + grid / 2) / grid;
+    if (c->ec_have_slot && slot <= c->ec_last_slot) {
+        c->ec_dropped++;
+        return 1;
+    }
+    if (!c->ec_have_slot)
+        fprintf(stderr, "  [media] even cadence: a %.1f fps clip on a %.1f Hz display is "
+                        "shown on a %.1f ms grid, one frame per two refreshes "
+                        "(KL_VIDEO_EVEN)\n", fps, (double)hz, grid / 1000.0);
+    c->ec_have_slot = 1;
+    c->ec_last_slot = slot;
+    *pts = slot * grid;
+    return 0;
+}
+
 static ssize_t klm_AMediaCodec_dequeueOutputBuffer(void *codec,
                                                    AMediaCodecBufferInfo *info,
                                                    int64_t timeoutUs) {
     klm_codec *c = codec;
     if (!c || c->magic != KLM_CODEC_MAGIC) return AMEDIA_ERROR_INVALID_PARAMETER;
+    if (c->pcm) return klm_pcm_dequeue_output(c, info, timeoutUs);
+    klm_codec_beat(c, "dequeue");
     int64_t waited = 0;
     for (;;) {
         pthread_mutex_lock(&c->lock);
@@ -1410,6 +1825,10 @@ static ssize_t klm_AMediaCodec_dequeueOutputBuffer(void *codec,
         if (stopped) return AMEDIA_ERROR_INVALID_OPERATION;
         int64_t pts = 0;
         CVPixelBufferRef pb = kl_vtdec_pull(c->dec, &pts);
+        if (pb && klm_even_cadence(c, &pts)) {
+            CVPixelBufferRelease(pb);
+            continue;
+        }
         if (pb) {
             pthread_mutex_lock(&c->lock);
             for (int i = 0; i < KLM_OUT_SLOTS; i++)
@@ -1464,6 +1883,14 @@ static int klm_AMediaCodec_releaseOutputBuffer(void *codec, size_t idx, bool ren
     klm_codec *c = codec;
     if (!c || c->magic != KLM_CODEC_MAGIC || idx >= KLM_OUT_SLOTS)
         return AMEDIA_ERROR_INVALID_PARAMETER;
+    if (c->pcm) {
+        pthread_mutex_lock(&c->lock);
+        // A buffer a flush already took back is released fine on Android too.
+        if (c->pq[idx].state == 2) c->pq[idx].state = 0;
+        pthread_mutex_unlock(&c->lock);
+        return AMEDIA_OK;
+    }
+    klm_codec_beat(c, "release");
     pthread_mutex_lock(&c->lock);
     if (!c->out[idx].in_use) { pthread_mutex_unlock(&c->lock); return AMEDIA_ERROR_INVALID_PARAMETER; }
     CVPixelBufferRef pb = (CVPixelBufferRef)c->out[idx].pb;

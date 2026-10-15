@@ -1654,7 +1654,28 @@ static klj_val klj_Context_getExternalFilesDir(void *env, void *self, const klj_
     // container path): /sdcard maps to files_dir via kl_guest_path, so the two
     // resolve identically, but a guest that appends "/gamedata" then a FORTIFY'd
     // strcat into a 128-byte buffer (vicecity) overflows on the long form.
-    if (type && *type) snprintf(path, sizeof path, "/sdcard/files/%s", type);
+    //
+    // LES MILLS BODYCOMBAT (x4015163475201433) gets Android's own spelling,
+    // /sdcard/Android/data/<package>/files. It finds its Addressables content
+    // by walking up from Application.persistentDataPath — which is this
+    // directory — three levels, then appending obb/<package>
+    // (AddressablesUtils.GetAddressableLoadPath): on a Quest that is
+    // /sdcard/Android/obb/<package>, where the store's asset files are and
+    // where they are staged here. From /sdcard/files the third
+    // GetDirectoryName is null, Path.Combine throws, the catalogue path stays
+    // the literal "{...addressableLoadPath}/..." and every bundle fails to
+    // open. Other games keep the short form, so their saves do not move.
+    static int android_shape = -1;
+    if (android_shape < 0) {
+        const char *t = kl_driver_target_name();
+        android_shape = t && strcmp(t, "x4015163475201433") == 0;
+    }
+    if (android_shape) {
+        if (type && *type) snprintf(path, sizeof path, "/sdcard/Android/data/%s/files/%s", klj_guest_package(), type);
+        else               snprintf(path, sizeof path, "/sdcard/Android/data/%s/files", klj_guest_package());
+        char kp[1024];
+        klj_mkdir_p(kl_guest_path(path, kp, sizeof kp));
+    } else if (type && *type) snprintf(path, sizeof path, "/sdcard/files/%s", type);
     else               snprintf(path, sizeof path, "/sdcard/files");
     KLJ_LOG("getExternalFilesDir(%s) -> %s", type ? type : "null", path);
     return (klj_val){.l = klj_new_file(path)};
@@ -2269,12 +2290,16 @@ static const char *klj_stream_bytes(klj_stream *st) {
 // GLSL compilation failed", and every skinned mesh is never drawn — the whip
 // works but is invisible. disable-gpu-skinning is a stock boot.config
 // parameter (registered beside gfx-enable-gfx-jobs) that selects CPU skinning.
+// LES MILLS BODYCOMBAT (x4015163475201433, Unity 2022.3) is the same case:
+// 24k "Internal-Skinning.compute: Kernel at index (15) is invalid" in one
+// session and no gloves in a level (on device, 2026-10-15).
 // KL_UNITY_BOOT_EXTRA="k=v;k=v" overrides the per-target default; "" for none.
 static const char *klj_boot_config_extra(void) {
     const char *t = kl_driver_target_name();
     const char *dflt = t &&
         (strcmp(t, "x5361030930653377") == 0 ||
-         strcmp(t, "x7532973430077887") == 0)
+         strcmp(t, "x7532973430077887") == 0 ||
+         strcmp(t, "x4015163475201433") == 0)
         ? "disable-gpu-skinning=1" : "";
     return kl_env_str("KL_UNITY_BOOT_EXTRA", dflt);
 }

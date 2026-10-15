@@ -633,6 +633,14 @@ struct BootView: View {
     // KL_START_SETTINGS=1 opens it on the settings page, so a scripted
     // launch can photograph the settings without a hand to tap the button.
     @State private var showSettings = klEnvOn("KL_START_SETTINGS", default: false)
+    /// The window stays open beside the game with the hand-position sliders
+    /// (HandTuneView) instead of going away once the picture is up.
+    @State private var handTune = false
+    /// KL_HAND_TUNE=1. Written for LES MILLS BODYCOMBAT, whose hands sat a
+    /// little above the player's real ones (on device, 2026-10-15): its owner
+    /// moved them live, in the game, and the values are its default now
+    /// (KLSenseTune.targetHand).
+    static let handTuneAfterStart: Bool = klEnvOn("KL_HAND_TUNE", default: false)
     @ObservedObject private var run = KLRun.shared
     /// Whether this build fronts as a game (a picture, its name, Start and
     /// Settings) rather than as the boot report. Asked for by whoever built it
@@ -767,7 +775,9 @@ struct BootView: View {
         Group {
             // In the window rather than over it: a sheet on visionOS is a
             // fixed, narrow card, and the dials in it were unreadably small.
-            if showSettings { settingsPage } else { startFront }
+            if handTune {
+                HandTuneView(onClose: { handTune = false; dismissWindow() })
+            } else if showSettings { settingsPage } else { startFront }
         }
         .task {
             // Scripted launches only — see the comment above.
@@ -1321,7 +1331,8 @@ struct BootView: View {
                                 KLRun.shared.up = true
                                 KLRun.shared.watchKeyboard(openWindow)
                                 showSettings = false
-                                dismissWindow()
+                                if Self.handTuneAfterStart { handTune = true }
+                                else { dismissWindow() }
                             }
                             guard case .error = r, attempt < 3 else { break }
                             try? await Task.sleep(nanoseconds: 2_000_000_000)
