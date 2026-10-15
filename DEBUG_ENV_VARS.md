@@ -3844,3 +3844,11 @@ audio path that has shipped: both are linked in, and
   until chosen, as before. AVP Play sets it from its setting "Experimental:
   switch on the new pose and audio implementations when installing"; the log
   line of such a switch ends in `(on from the installation)`.
+- `KL_METALFX_UPSCALE` in that list — not a Test switch of its own but the
+  start value of *Settings › Rendering › MetalFX upscaling*
+  (`klepton.metalfxUpscale`, `KleptonMetalFX`): on from the first start, off
+  again in the game if chosen there. Unnamed, the switch starts off, as
+  before. AVP Play sets it from its setting "MetalFX: switch on upscaling
+  automatically when installing". The compositor's `[metalfx] on` line then
+  ends in `(on from the installation, KL_METALFX_UPSCALE)`; each place it
+  keeps the linear path is said once as `[metalfx] linear path: <reason>`.

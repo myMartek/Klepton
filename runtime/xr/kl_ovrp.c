@@ -1359,6 +1359,11 @@ void kl_ovrp_set_render_scale_default(float s) {
 // The cap the size below was held to, for klovrp_fill_eye_desc (KL_OVRP_EYE_DESC_CAP).
 static int g_eye_cap;
 
+// What g_eye_w/h were made of: the size after the cap and the render scale
+// applied to it (kl_ovrp_eye_texture_scale). 0 / 1.0 until a frontend sets one.
+static int g_eye_full_w, g_eye_full_h;
+static float g_eye_rs = 1.0f;
+
 // KL_OVRP_EYE_ALIGN=<n> (1 = off): each axis of the eye size is rounded DOWN to a multiple of n, last of all.
 // Unreal quantizes its scene buffers UP to a multiple of 4, and every foveation match in kl_vulkan.c compares
 // extents exactly: Moss drew a 3840x2468 scene for a 3840x2465 eye, and kl_fove left its eye pass unmarked
@@ -1522,6 +1527,11 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
     // halves cleanly.
     float rs = kl_env_float("KL_OVRP_RENDER_SCALE", g_render_scale_default);
     if (!(rs >= 0.2f && rs <= 1.0f)) rs = 1.0f;   // the same floor as the setter's
+    // Kept before the early return below: a call that lands on the same size
+    // still says what that size was made of (kl_ovrp_eye_texture_scale).
+    g_eye_full_w = w;
+    g_eye_full_h = h;
+    g_eye_rs = rs;
     if (rs < 1.0f) {
         w = ((int)((float)w * rs + 0.5f) + 1) & ~1;
         h = ((int)((float)h * rs + 0.5f) + 1) & ~1;
@@ -1544,6 +1554,12 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
 void kl_ovrp_eye_texture_size(int *w, int *h) {
     if (w) *w = g_eye_w;
     if (h) *h = g_eye_h;
+}
+
+void kl_ovrp_eye_texture_scale(float *rs, int *full_w, int *full_h) {
+    if (rs) *rs = g_eye_rs;
+    if (full_w) *full_w = g_eye_full_w;
+    if (full_h) *full_h = g_eye_full_h;
 }
 
 // Packed return: width in the low 32 bits, height in the high (0x9bce58).
