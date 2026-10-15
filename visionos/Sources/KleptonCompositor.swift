@@ -2404,6 +2404,23 @@ final class KleptonCompositor {
     /// A copy nobody asked for in this many frames is dropped (a few seconds):
     /// a swapchain re-created at another size, a toggle that stays off.
     private static let mfxKeepTicks: UInt64 = 600
+    /// KL_METALFX_COLOR=hdr|linear|perceptual: one colour processing mode for
+    /// every format, for A/B tests — unset, RGBA16F is `.hdr`, sRGB `.linear`
+    /// and the rest `.perceptual`. Read once; a copy made before keeps its mode.
+    private static let mfxColorOverride: MTLFXSpatialScalerColorProcessingMode? = {
+        let v = ProcessInfo.processInfo.environment["KL_METALFX_COLOR"]?.lowercased() ?? ""
+        let mode: MTLFXSpatialScalerColorProcessingMode?
+        switch v {
+        case "": return nil
+        case "hdr": mode = .hdr
+        case "linear": mode = .linear
+        case "perceptual": mode = .perceptual
+        default: mode = nil
+        }
+        NSLog(mode != nil ? "[metalfx] colour processing \(v) for every format (KL_METALFX_COLOR)"
+                          : "[metalfx] KL_METALFX_COLOR=\(v) is not hdr, linear or perceptual — ignored")
+        return mode
+    }()
     /// The projection layers' share of output pixels a frame, in full eyes.
     private static let mfxLayerBudget = max(1, min(16, klEnvFloat("KL_METALFX_BUDGET", 4)))
 
@@ -2530,6 +2547,7 @@ final class KleptonCompositor {
         case .rgba8Unorm_srgb, .bgra8Unorm_srgb: d.colorProcessingMode = .linear
         default: d.colorProcessingMode = .perceptual
         }
+        if let forced = Self.mfxColorOverride { d.colorProcessingMode = forced }
         guard let sc = d.makeSpatialScaler(device: device) else {
             mfxSay("no scaler for \(src.width)x\(src.height) -> \(width)x\(height) "
                    + "format \(src.pixelFormat.rawValue)", short: "no scaler")

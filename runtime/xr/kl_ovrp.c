@@ -1361,6 +1361,10 @@ static int g_eye_cap;
 
 // What g_eye_w/h were made of: the size after the cap and the render scale
 // applied to it (kl_ovrp_eye_texture_scale). 0 / 1.0 until a frontend sets one.
+// Written where the display's size is pushed and read by the compositor every
+// frame, on another thread — under their own lock, so a reader gets the three
+// as one answer (a scale with the size it was taken from), never a torn mix.
+static pthread_mutex_t g_eye_scale_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_eye_full_w, g_eye_full_h;
 static float g_eye_rs = 1.0f;
 
@@ -1529,9 +1533,11 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
     if (!(rs >= 0.2f && rs <= 1.0f)) rs = 1.0f;   // the same floor as the setter's
     // Kept before the early return below: a call that lands on the same size
     // still says what that size was made of (kl_ovrp_eye_texture_scale).
+    pthread_mutex_lock(&g_eye_scale_mu);
     g_eye_full_w = w;
     g_eye_full_h = h;
     g_eye_rs = rs;
+    pthread_mutex_unlock(&g_eye_scale_mu);
     if (rs < 1.0f) {
         w = ((int)((float)w * rs + 0.5f) + 1) & ~1;
         h = ((int)((float)h * rs + 0.5f) + 1) & ~1;
@@ -1557,9 +1563,11 @@ void kl_ovrp_eye_texture_size(int *w, int *h) {
 }
 
 void kl_ovrp_eye_texture_scale(float *rs, int *full_w, int *full_h) {
+    pthread_mutex_lock(&g_eye_scale_mu);
     if (rs) *rs = g_eye_rs;
     if (full_w) *full_w = g_eye_full_w;
     if (full_h) *full_h = g_eye_full_h;
+    pthread_mutex_unlock(&g_eye_scale_mu);
 }
 
 // Packed return: width in the low 32 bits, height in the high (0x9bce58).

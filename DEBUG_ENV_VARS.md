@@ -3850,6 +3850,14 @@ audio path that has shipped: both are linked in, and
   until chosen, as before. AVP Play sets it from its setting "Experimental:
   switch on the new pose and audio implementations when installing"; the log
   line of such a switch ends in `(on from the installation)`.
+- `KLEPTON_RENDER_SCALE=<0.5..1.0>` (build/install environment, read by
+  `visionos/gen_xcodeproj.py`) — the render scale the game starts at: it
+  replaces the target's `render_scale` as `KL_RENDER_SCALE_DEFAULT` /
+  `KLRenderScaleDefault`, so *Resolution* in the game starts there and a value
+  chosen in the game still wins. AVP Play sets it with its MetalFX switch
+  (75 % unless chosen otherwise). Unset: the target's default, byte for byte
+  as before; a value outside 0.5..1.0 or not a number is said on stderr and
+  ignored.
 - `KL_METALFX_UPSCALE` in that list — not a Test switch of its own but the
   start value of *Settings › Rendering › MetalFX upscaling*
   (`klepton.metalfxUpscale`, `KleptonMetalFX`): on from the first start, off
@@ -3869,3 +3877,8 @@ audio path that has shipped: both are linked in, and
   output a frame, in full eye pictures (1..16, default 4). A layer whose
   copies would go past it is drawn linear and said once (`budget` on the
   panel); the eye pass has no budget.
+- `KL_METALFX_COLOR=hdr|linear|perceptual` — the scaler's colour processing
+  mode for every eye format, for A/B tests. Unset: RGBA16F `hdr` (the
+  default, kept), sRGB formats `linear`, the rest `perceptual`. Said once as
+  `[metalfx] colour processing …`; any other value is said and ignored. Read
+  once a run, at the first copy.

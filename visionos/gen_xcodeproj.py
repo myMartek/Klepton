@@ -199,6 +199,25 @@ import os as _os
 TEST_ON = ",".join(n for n in re.split(r"[,\s]+", os.environ.get("KLEPTON_TEST_ON", ""))
                    if re.fullmatch(r"KL_[A-Z0-9_]{1,60}", n))
 
+# The render scale an installer wants the game to START at (KLEPTON_RENDER_SCALE,
+# a fraction such as 0.75; AVP Play sets it with its MetalFX switch). It replaces
+# the target's own default (targets.py "render_scale") as KLRenderScaleDefault, so
+# a choice made in the game still wins. Unset: the target's, as before. Anything
+# that is not a number in 0.5..1.0 (the range KleptonTuning's targetRenderScale
+# accepts; outside it the bundle would quietly start at 1.0) is said and ignored.
+RENDER_SCALE = float(KLT["render_scale"])
+_rs_env = os.environ.get("KLEPTON_RENDER_SCALE", "").strip()
+if _rs_env:
+    try:
+        _rs = float(_rs_env)
+    except ValueError:
+        _rs = None
+    if _rs is not None and 0.5 <= _rs <= 1.0:
+        RENDER_SCALE = _rs
+    else:
+        print(f"gen_xcodeproj: KLEPTON_RENDER_SCALE={_rs_env!r} is not a fraction in 0.5..1.0 "
+              f"- the target's {RENDER_SCALE:.2f} stays", file=sys.stderr)
+
 # Compile-time launcher opt-in (also drives LAUNCHER_COND + the display name below).
 _launcher_on = _os.environ.get("KL_CUSTOM_LAUNCHER", "").strip().lower() in ("1", "true", "yes", "on")
 # NB: the bundle id is deliberately NOT switched by the launcher flag. It is a SIGNING
@@ -232,8 +251,9 @@ ASSETCATALOG_SETTING = ((f"\t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = \"{_icon
                         # value carries '=' and ','.
                         + f"\t\t\t\tKL_GAMEPAD_MAP = \"{KLT['gamepad_map']}\";\n"
                         # ...and its render-scale default (targets.py
-                        # "render_scale"), KLRenderScaleDefault in Info.plist.
-                        + f"\t\t\t\tKL_RENDER_SCALE_DEFAULT = {float(KLT['render_scale']):.2f};\n"
+                        # "render_scale", or KLEPTON_RENDER_SCALE above),
+                        # KLRenderScaleDefault in Info.plist.
+                        + f"\t\t\t\tKL_RENDER_SCALE_DEFAULT = {RENDER_SCALE:.2f};\n"
                         # ...and whether in-game video is tried by default
                         # (targets.py "video"), KLVideoDefault in Info.plist.
                         + f"\t\t\t\tKL_VIDEO_DEFAULT = {1 if KLT['video'] else 0};\n"
