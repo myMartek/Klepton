@@ -876,6 +876,16 @@ surreal: build/t_surreal
 pinch: build/t_pinch
 	./build/t_pinch
 
+# The MetalFX switch on the settings page (KleptonMetalFXPreset.swift): turned
+# on at 100 % it sets the resolution to 75 %, nothing else moves it. In `make check`.
+build/t_mfxpreset: tests/t_mfxpreset.swift visionos/Sources/KleptonMetalFXPreset.swift
+	@mkdir -p build
+	swiftc -o $@ visionos/Sources/KleptonMetalFXPreset.swift tests/t_mfxpreset.swift
+
+.PHONY: mfxpreset
+mfxpreset: build/t_mfxpreset
+	./build/t_mfxpreset
+
 # Which builds are test builds (KleptonTestBuild.swift; KLTestBuild, which
 # gen_xcodeproj.py bakes): what only a tester sees must never reach a
 # player's build.
@@ -918,7 +928,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_pinch build/t_arrayviews build/t_surreal build/t_x18pool build/t_ue421
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_x18pool build/t_ue421
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -987,6 +997,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@echo "=== compositor array views ===" && tail -1 build/arrayviews.log
 	@./build/t_ue421 > build/ue421.log 2>&1 || { cat build/ue421.log; exit 1; }
 	@head -1 build/ue421.log && tail -1 build/ue421.log
+	@./build/t_mfxpreset > build/mfxpreset.log 2>&1 || { cat build/mfxpreset.log; exit 1; }
+	@echo "=== MetalFX switch: resolution preset ===" && tail -1 build/mfxpreset.log
 	@$(MAKE) -s ovrpabi
 # The opus roundtrip is the one gate here that RUNS guest code rather than
 # inspecting it, so it is worth keeping wherever it exists — but libunityopus.so

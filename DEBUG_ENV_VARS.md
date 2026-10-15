@@ -3881,7 +3881,8 @@ audio path that has shipped: both are linked in, and
   (`KleptonMetalFX.canUpscale`). The panel then has a second hint line, "Tap
   both: MetalFX on / off", and redraws at once after a tap: *MetalFX*, *Path*
   and *Output* show the new state. It is the same choice as *Settings ›
-  Rendering › MetalFX upscaling* and is stored the same way. Anywhere else the
+  Picture › MetalFX upscaling* (and the one under *Advanced*), stored the same
+  way, and the switch there shows it at once. Anywhere else the
   tap does nothing (`[metalfx] tap of Create + Options: nothing to switch` in
   the log). It replaces the live XR head prediction switch test builds had.
 
@@ -3962,9 +3963,12 @@ audio path that has shipped: both are linked in, and
   as before; a value outside 0.5..1.0 or not a number is said on stderr and
   ignored.
 - `KL_METALFX_UPSCALE` in that list — not a Test switch of its own but the
-  start value of *Settings › Rendering › MetalFX upscaling*
+  start value of *Settings › Picture › MetalFX upscaling*
   (`klepton.metalfxUpscale`, `KleptonMetalFX`): on from the first start, off
-  again in the game if chosen there. Unnamed, the switch starts off, as
+  again in the game if chosen there. The switch sits under *Resolution*
+  wherever the device has Apple's spatial scaler; turned on there at 100 %
+  it sets *Resolution* to 75 % from the next start and says so
+  (`KleptonMetalFXPreset`, `make mfxpreset`). Unnamed, the switch starts off, as
   before. AVP Play sets it from its setting "MetalFX: switch on upscaling
   automatically when installing". The compositor's `[metalfx] on` line then
   ends in `(on from the installation, KL_METALFX_UPSCALE)`; each place it

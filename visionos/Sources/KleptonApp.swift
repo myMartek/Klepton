@@ -524,6 +524,14 @@ struct PlayerSettingsView: View {
                     Text(klT("How finely the game is drawn. Lower it if the picture stutters when you look around.",
                              "Wie fein das Spiel gezeichnet wird. Verringern, wenn das Bild beim Umsehen ruckelt."))
                         .font(.callout).foregroundStyle(.secondary)
+                    // The same switch as under Advanced and as Create + Options
+                    // (KleptonMetalFX), only where the device has the scaler.
+                    if KleptonMetalFX.deviceSupported {
+                        MetalFXSwitch(title: klT("MetalFX upscaling", "MetalFX-Hochskalieren"), hintFont: .callout)
+                        Text(klT("Sharpens the picture when the resolution is below 100%: Apple's scaler enlarges it instead of a plain stretch. Costs some graphics time. Switching takes effect at once, a new resolution with the next start.",
+                                 "Schärft das Bild, wenn die Auflösung unter 100 % liegt: Apples Scaler vergrößert es statt einer einfachen Streckung. Kostet etwas Grafikzeit. Das Umschalten wirkt sofort, eine neue Auflösung beim nächsten Start."))
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
