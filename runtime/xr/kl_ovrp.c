@@ -1504,6 +1504,13 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         // own. At 3072 (the display asked for 4633) its owner called the picture
         // "viel zu niedrig" on device, 2026-10-15.
         if (t && strcmp(t, "x4015163475201433") == 0) cap_dflt = 4000;
+        // Gun Club VR (Unity on GL, fix 44): its owner on the first build that
+        // ran well, toolchain 555, 2026-10-15: could the resolution go higher?
+        // At 3072 (the display asked for about 4633x3717) its eye was 3072x2465,
+        // and the "Resolution" setting only scales down from there, so the cap is
+        // the one lever. 4000 as for the other Unity GL titles above; the setting
+        // (or KL_OVRP_EYE_MAX) takes it back down if a busy scene stutters.
+        if (t && strcmp(t, "x2285803881494677") == 0) cap_dflt = 4000;
         // Batman: Arkham Shadow: 4608, the eye size rebelancap runs it at with
         // foveation "high" (kl_fove) — see the note on its row in
         // visionos/targets.py. Unfoveated he measured 4032 as its rung and 5120

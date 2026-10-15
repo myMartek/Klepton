@@ -1934,7 +1934,8 @@ puts the camera on the ground with its hands underneath it.
   window's "Edge smoothing" setting, which is off unless chosen and is offered
   to a game that was seen multisampling with fewer than four.
 - `KL_OVRP_EYE_MAX=<px>` — cap on the longer axis of that size, default 3072
-  (4000 for `doom3quest`, 3840 for `x5812519008825194`),
+  (4000 for `doom3quest`, 3840 for `x5812519008825194`; other per-title
+  defaults in kl_ovrp.c, e.g. 4000 for `x2285803881494677`, Gun Club VR),
   0 to disable. Vision Pro's logical per-eye resolution is far larger than a
   Quest's, and the guest allocates stages x eyes of RGBA16F at whatever it is
   told, so an uncapped number turns straight into hundreds of MiB and into fill

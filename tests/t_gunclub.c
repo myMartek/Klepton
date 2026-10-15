@@ -11,7 +11,11 @@
 // another title; for Gun Club it prints the TBMPrefs lines (flags, descriptor)
 // and nothing else. In every case the failure's errno is what the caller sees
 // afterwards. Each case is a child of its own, since the switches are read
-// once per process. No game content.
+// once per process.
+//
+// The eye size: for Gun Club the display's request is capped at 4000 on its
+// longer axis instead of the general 3072; any other title keeps 3072, and
+// KL_OVRP_EYE_MAX and the render scale still apply on top. No game content.
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -27,6 +31,7 @@
 #include "klepton.h"
 #include "guest/kl_driver.h"
 #include "diag/kl_mprobe.h"
+#include "xr/kl_ovrp.h"
 
 #define SLOT(n, name) JNI_##name = n,
 enum { KL_JNI_SLOTS(SLOT) };
@@ -177,6 +182,36 @@ static int run(const char *what, int (*fn)(void)) {
     return ok;
 }
 
+// ---- the eye size ----
+// What the guest is told for a 4633x3717 request (the display's own size).
+static void eye_for(const char *target, int *w, int *h) {
+    start(target);
+    kl_ovrp_set_eye_texture_size(4633, 3717);
+    kl_ovrp_eye_texture_size(w, h);
+}
+static int eye_gunclub(void) {
+    int w, h; eye_for(GUNCLUB, &w, &h);
+    if (w != 4000 || h != 3209) { fprintf(stderr, "gunclub eye %dx%d\n", w, h); exit(1); }
+    return 0;
+}
+static int eye_other(void) {
+    int w, h; eye_for(OTHER, &w, &h);
+    if (w != 3072 || h != 2465) { fprintf(stderr, "other eye %dx%d\n", w, h); exit(1); }
+    return 0;
+}
+static int eye_gunclub_env_cap(void) {
+    setenv("KL_OVRP_EYE_MAX", "3072", 1);
+    int w, h; eye_for(GUNCLUB, &w, &h);
+    if (w != 3072 || h != 2465) { fprintf(stderr, "gunclub capped eye %dx%d\n", w, h); exit(1); }
+    return 0;
+}
+static int eye_gunclub_scaled(void) {
+    setenv("KL_OVRP_RENDER_SCALE", "0.8", 1);
+    int w, h; eye_for(GUNCLUB, &w, &h);
+    if (w != 3200 || h != 2568) { fprintf(stderr, "gunclub 80%% eye %dx%d\n", w, h); exit(1); }
+    return 0;
+}
+
 int main(void) {
     printf("=== Gun Club VR: quit teardown, preference-file trace ===\n");
     int ok = 1;
@@ -187,6 +222,10 @@ int main(void) {
     ok &= run("other title, KL_TRACE_FS unset: no trace, errno kept", trace_other_silent);
     ok &= run("Gun Club, KL_TRACE_FS unset: TBMPrefs lines only, errno kept", trace_gunclub_prefs_only);
     ok &= run("KL_TRACE_FS=1: open lines carry flags and fd", trace_on_shows_flags);
+    ok &= run("Gun Club: eye capped at 4000 (4000x3209)", eye_gunclub);
+    ok &= run("other title: eye capped at 3072 (3072x2465)", eye_other);
+    ok &= run("Gun Club, KL_OVRP_EYE_MAX=3072: 3072x2465", eye_gunclub_env_cap);
+    ok &= run("Gun Club at 80 %: 3200x2568", eye_gunclub_scaled);
     puts(ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
