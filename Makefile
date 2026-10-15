@@ -848,6 +848,17 @@ testbuild: build/t_testbuild
 	./build/t_testbuild
 	python3 tests/t_testbuild_gen.py
 
+# The compositor's array-view cache (KleptonArrayViews.swift): 25 per-eye
+# swapchain rebuilds on the Mac's Metal device; the released images must be
+# freed and the device's allocated size stay flat. In `make check`.
+build/t_arrayviews: tests/t_arrayviews.swift visionos/Sources/KleptonArrayViews.swift
+	@mkdir -p build
+	swiftc -o $@ visionos/Sources/KleptonArrayViews.swift tests/t_arrayviews.swift
+
+.PHONY: arrayviews
+arrayviews: build/t_arrayviews
+	./build/t_arrayviews
+
 .PHONY: metrics-preview
 metrics-preview: build/metrics_preview
 	@./build/metrics_preview 60 build/metrics && echo "  build/metrics-panel.png, build/metrics-line.png," \
@@ -867,7 +878,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_pinch
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_pinch build/t_arrayviews
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -927,6 +938,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@echo "=== BattleGroupVR2: Firebase, Vivox, memory ===" && tail -1 build/jni-firebase.log && tail -1 build/jni-vivox.log && tail -1 build/jni-memory.log
 	@./build/t_pinch > build/pinch.log 2>&1 || { cat build/pinch.log; exit 1; }
 	@echo "=== discrete hand pinch ===" && tail -1 build/pinch.log
+	@./build/t_arrayviews > build/arrayviews.log 2>&1 || { cat build/arrayviews.log; exit 1; }
+	@echo "=== compositor array views ===" && tail -1 build/arrayviews.log
 	@$(MAKE) -s ovrpabi
 # The opus roundtrip is the one gate here that RUNS guest code rather than
 # inspecting it, so it is worth keeping wherever it exists — but libunityopus.so

@@ -1678,6 +1678,7 @@ final class KleptonCompositor {
                 continue loop
             default:
                 autoreleasepool { presented += renderFrame() }
+                arrayViews.frameDone()
             }
             iterations += 1
             if Date() >= nextReport {
@@ -1786,31 +1787,49 @@ final class KleptonCompositor {
     ///
     /// A view rather than a second pipeline: only the type is wrong, and one
     /// shader shared by both compositors is worth more than two that can drift.
-    /// Cached, because a view per frame is an allocation per frame. If the view
-    /// cannot be made it says so once and returns the original — which
-    /// composites exactly as badly as before, but names the reason rather than
-    /// leaving a flat colour to be read as a guest that drew nothing.
-    private var arrayViews: [ObjectIdentifier: MTLTexture] = [:]
+    /// Cached, because a view per frame is an allocation per frame — and
+    /// pruned against the eye table, because a view keeps its parent alive and
+    /// the parents are the guest's swapchain images (see KleptonArrayViews).
+    /// If the view cannot be made it says so once and returns the original —
+    /// which composites exactly as badly as before, but names the reason rather
+    /// than leaving a flat colour to be read as a guest that drew nothing.
+    private lazy var arrayViews: KleptonArrayViews = {
+        let c = KleptonArrayViews(live: Self.eyeTableTextures)
+        c.onDrop = { dropped, kept in
+            NSLog("[cp] dropped \(dropped) array view(s) of eye textures the guest "
+                  + "has released (swapchain rebuilt), \(kept) kept")
+        }
+        return c
+    }()
     private var saidNoArrayView = false
 
     private func arrayView(_ tex: MTLTexture) -> MTLTexture {
         if tex.textureType == .type2DArray { return tex }
-        let key = ObjectIdentifier(tex)
-        if let v = arrayViews[key] { return v }
-        guard let v = tex.makeTextureView(pixelFormat: tex.pixelFormat,
-                                          textureType: .type2DArray,
-                                          levels: 0..<tex.mipmapLevelCount,
-                                          slices: 0..<1) else {
-            if !saidNoArrayView {
-                saidNoArrayView = true
-                NSLog("[cp] the eye texture is textureType \(tex.textureType.rawValue) "
-                      + "and an array VIEW of it could not be made — the shaders "
-                      + "sample texture2d_array, so this composites as a flat colour")
-            }
-            return tex
+        if let v = arrayViews.view(of: tex, make: {
+            $0.makeTextureView(pixelFormat: $0.pixelFormat, textureType: .type2DArray,
+                               levels: 0..<$0.mipmapLevelCount, slices: 0..<1)
+        }) { return v }
+        if !saidNoArrayView {
+            saidNoArrayView = true
+            NSLog("[cp] the eye texture is textureType \(tex.textureType.rawValue) "
+                  + "and an array VIEW of it could not be made — the shaders "
+                  + "sample texture2d_array, so this composites as a flat colour")
         }
-        arrayViews[key] = v
-        return v
+        return tex
+    }
+
+    /// Every texture the eye table names, for any eye and stage: the only
+    /// source of what `arrayView` is handed, on both the eye and the layer path.
+    private static func eyeTableTextures() -> Set<UnsafeRawPointer> {
+        var named = Set<UnsafeRawPointer>()
+        for eye in 0..<2 {
+            for s in 0..<Int(KL_MTL_MAX_STAGES) {
+                if let t = kl_glfb_eye_mtl_texture(Int32(eye), Int32(s), nil) {
+                    named.insert(UnsafeRawPointer(t))
+                }
+            }
+        }
+        return named
     }
 
     private func stageSummary() -> String {
