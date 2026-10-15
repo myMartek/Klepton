@@ -939,6 +939,10 @@ struct BootView: View {
                     DisclosureGroup(klT("Advanced", "Erweitert")) {
                         VStack(alignment: .leading, spacing: 14) {
                             GroupBox(klT("Picture, in detail", "Bild, im Einzelnen")) { RenderingView() }
+                            // Not for Alyx: its own KL_OVRP_EYE_MAX (klAlyxApply) would win over it.
+                            if !klIsAlyx() {
+                                GroupBox(klT("Max resolution per eye", "Maximale Auflösung je Auge")) { EyeMaxView() }
+                            }
                             DisclosureGroup(klT("Passthrough and chroma key", "Durchsicht und Chroma-Key")) { ChromaView() }
                             DisclosureGroup(klT("Controller alignment", "Ausrichtung der Controller")) { TuningView() }
                             if showMic {

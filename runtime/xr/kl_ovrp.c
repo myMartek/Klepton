@@ -1387,7 +1387,8 @@ void kl_ovrp_set_render_scale_default(float s) {
 }
 
 // The cap the size below was held to, for klovrp_fill_eye_desc (KL_OVRP_EYE_DESC_CAP).
-static int g_eye_cap;
+// -1 until a size is pushed: 0 is an answer (no cap: Native, or KL_OVRP_EYE_MAX=0).
+static int g_eye_cap = -1;
 
 // What g_eye_w/h were made of: the size after the cap and the render scale
 // applied to it (kl_ovrp_eye_texture_scale). 0 / 1.0 until a frontend sets one.
@@ -1420,23 +1421,11 @@ static void klovrp_eye_align(int *w, int *h) {
     if (*w >= n) *w -= *w % n;
     if (*h >= n) *h -= *h % n;
 }
-void kl_ovrp_set_eye_texture_size(int w, int h) {
-    // A degenerate size is a measurement that went wrong, and it would reach
-    // Unity as a swapchain allocation. Keep the Quest default instead: the
-    // wrong resolution renders, a zero one does not.
-    if (w <= 0 || h <= 0) return;
-    const int req_w = w, req_h = h;
-
-    // Unity applies its own resolution scale on top of whatever we say
-    // (measured 1.2x), and allocates stages x eyes of RGBA16F at the result. A
-    // display with a much larger logical resolution than a Quest therefore
-    // turns straight into hundreds of MiB and into fill cost, so what the
-    // display asks for is scaled and capped rather than taken on trust.
-    float scale = kl_env_float("KL_OVRP_EYE_SCALE", 1.0f);
-    if (scale > 0.05f && scale <= 4.0f) {
-        w = (int)((float)w * scale + 0.5f);
-        h = (int)((float)h * scale + 0.5f);
-    }
+// The eye cap a title is tuned for, without the player's choice or the launch line:
+// what the start window shows as "Default (…)" (kl_ovrp_title_eye_cap). By name, since
+// the window asks before the guest is loaded; the rows that look at the guest itself
+// (Beat Saber from 1.45 on) only answer once it is.
+static int klovrp_title_cap(const char *t) {
     // Per-target default. Doom3Quest lights in passes — every light re-shades
     // the pixels it touches — and squares and supersamples whatever it is told
     // (3072x2464 became 3379x3379 per eye, 22.8 MP a frame, against ~5 MP on the
@@ -1452,7 +1441,6 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
     // (see kl_glfb_set_eye_rate_map).
     int cap_dflt = 3072;
     {
-        const char *t = kl_driver_target_name();
         if (t && strcmp(t, "doom3quest") == 0) cap_dflt = 4000;
         // AC Nexus: a quarter more, paid for by rendering 2x multisampled
         // instead of 4x (KL_VK_MAX_SAMPLES in kl_vulkan.c, which is where the
@@ -1550,6 +1538,41 @@ void kl_ovrp_set_eye_texture_size(int w, int h) {
         // scales it down.
         if (t && strcmp(t, "doom3quest") == 0 && kl_glfb_mirror_foveation_wanted()) cap_dflt = 5200;
     }
+    return cap_dflt;
+}
+int kl_ovrp_title_eye_cap(const char *target) {
+    return klovrp_title_cap(target ? target : kl_driver_target_name());
+}
+
+// "Max resolution per eye" in the start window (KleptonEyeMax.swift): 0 is the title's
+// own cap, KL_OVRP_EYE_NATIVE none at all (the display's whole request), anything else
+// that many pixels on the longer axis. Under KL_OVRP_EYE_MAX, so a launch line still wins.
+static int g_eye_max_choice;
+void kl_ovrp_set_eye_max_choice(int px) {
+    g_eye_max_choice = px > 0 || px == KL_OVRP_EYE_NATIVE ? px : 0;
+}
+
+void kl_ovrp_set_eye_texture_size(int w, int h) {
+    // A degenerate size is a measurement that went wrong, and it would reach
+    // Unity as a swapchain allocation. Keep the Quest default instead: the
+    // wrong resolution renders, a zero one does not.
+    if (w <= 0 || h <= 0) return;
+    const int req_w = w, req_h = h;
+
+    // Unity applies its own resolution scale on top of whatever we say
+    // (measured 1.2x), and allocates stages x eyes of RGBA16F at the result. A
+    // display with a much larger logical resolution than a Quest therefore
+    // turns straight into hundreds of MiB and into fill cost, so what the
+    // display asks for is scaled and capped rather than taken on trust.
+    float scale = kl_env_float("KL_OVRP_EYE_SCALE", 1.0f);
+    if (scale > 0.05f && scale <= 4.0f) {
+        w = (int)((float)w * scale + 0.5f);
+        h = (int)((float)h * scale + 0.5f);
+    }
+    // Launch line > the player's choice > the title's cap (3072 unless its row above
+    // says otherwise). Native is cap 0, which the clamp below leaves alone.
+    int cap_dflt = g_eye_max_choice == KL_OVRP_EYE_NATIVE ? 0
+                 : g_eye_max_choice > 0 ? g_eye_max_choice : klovrp_title_cap(kl_driver_target_name());
     int cap = kl_env_int("KL_OVRP_EYE_MAX", cap_dflt);
     g_eye_cap = cap;
     if (cap > 0 && (w > cap || h > cap)) {
@@ -8129,7 +8152,7 @@ static void klovrp_fill_eye_desc(ovrp_layer_desc_eyefov *d, int layout,
             on = kl_env_on("KL_OVRP_EYE_DESC_CAP", t && strcmp(t, "moss") == 0);
         }
         // No display has pushed a size in a host run, so no cap was worked out: the plain default there.
-        int cap = g_eye_cap ? g_eye_cap : kl_env_int("KL_OVRP_EYE_MAX", 3072);
+        int cap = g_eye_cap >= 0 ? g_eye_cap : kl_env_int("KL_OVRP_EYE_MAX", 3072);
         if (on && cap > 0 && (w > cap || h > cap)) {
             float k = (float)cap / (float)(w > h ? w : h);
             int cw = ((int)((float)w * k + 0.5f) + 1) & ~1, ch = ((int)((float)h * k + 0.5f) + 1) & ~1;

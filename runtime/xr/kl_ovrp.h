@@ -738,6 +738,14 @@ float kl_ovrp_display_frequency(void);
 // it is one fewer rebuild, and each one used to leak a whole generation
 //.
 void kl_ovrp_set_eye_texture_size(int w, int h);
+// The cap on the longer axis a title is tuned for: 3072, or its own row in
+// kl_ovrp.c (4000 for Gun Club VR, ...). NULL asks for the running target.
+int kl_ovrp_title_eye_cap(const char *target);
+// "Max resolution per eye" from the start window: 0 is the title's cap, a
+// number of pixels replaces it, KL_OVRP_EYE_NATIVE takes the display's whole
+// request. Call before kl_ovrp_set_eye_texture_size; KL_OVRP_EYE_MAX wins.
+#define KL_OVRP_EYE_NATIVE (-1)
+void kl_ovrp_set_eye_max_choice(int px);
 // The fraction of that size the guest is actually told, 0.4..1.0, applied after
 // the cap. Call before kl_ovrp_set_eye_texture_size; KL_OVRP_RENDER_SCALE
 // overrides it.

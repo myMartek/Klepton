@@ -490,6 +490,11 @@ final class KleptonRendering: ObservableObject {
         // and never set has to mean the target's default, not the minimum.
         let stored = UserDefaults.standard.object(forKey: Self.scaleKey) as? Double
         renderScale = stored.map { min(max($0, Self.minRenderScale), 1.0) } ?? Self.targetRenderScale
+        // The Test switch "the limit is 4608 pixels an eye" is a choice of
+        // "Max resolution per eye" now: a game that had it on keeps 4608.
+        if KleptonEyeMax().migrateTestSwitch(onFromInstall: KleptonTestSwitches.onFromInstall) {
+            NSLog("[cp] max resolution per eye: 4608, taken over once from the Test switch KL_OVRP_EYE_MAX=4608")
+        }
     }
 
     /// Hand the stored choice to the runtime. Before kl_app_boot, so every
@@ -512,6 +517,13 @@ final class KleptonRendering: ObservableObject {
               + (Self.vkGuestSamples > 0 ? "; the game was last seen with \(Self.vkGuestSamples)x)" : ")")
               + (envVk.map { " — overridden by KL_VK_FORCE_SAMPLES=\($0)" } ?? ""))
         kl_ovrp_set_render_scale_default(Float(renderScale))
+        let eyeMax = KleptonEyeMax().choice
+        kl_ovrp_set_eye_max_choice(Int32(eyeMax))
+        let envEyeMax = ProcessInfo.processInfo.environment["KL_OVRP_EYE_MAX"]
+        NSLog("[cp] max resolution per eye: "
+              + (eyeMax == KleptonEyeMax.byTitle ? "the game's own" : eyeMax == KleptonEyeMax.native ? "native" : "\(eyeMax)")
+              + " (the game's own \(kl_ovrp_title_eye_cap(klTargetName())))"
+              + (envEyeMax.map { " — overridden by KL_OVRP_EYE_MAX=\($0)" } ?? ""))
         kl_mediandk_set_video_default(video ? 1 : -1)
         NSLog("[cp] in-game video: \(video ? "on" : "runtime default") (target default \(Self.targetVideo ? "on" : "off"))")
         let envScale = ProcessInfo.processInfo.environment["KL_OVRP_RENDER_SCALE"]
@@ -732,11 +744,6 @@ enum KleptonTestSwitches {
                   note: klT("Vulkan games with foveated rendering at Strong. Strong has a smaller sharp middle (18% of the picture's height) and a finer edge now; this brings back the larger middle (30%) with the coarser edge. Turn it on if a game looked better before.",
                             "Vulkan-Spiele mit Foveated Rendering auf „Stark“. „Stark“ hat jetzt eine kleinere scharfe Mitte (18 % der Bildhöhe) und einen feineren Rand; das hier bringt die größere Mitte (30 %) mit dem gröberen Rand zurück. Einschalten, wenn ein Spiel vorher besser aussah."),
                   also: [("KL_FOVE_FLOOR", "0.08")]),
-            Entry(env: "KL_OVRP_EYE_MAX", value: "4608",
-                  title: klT("Resolution: the limit is 4608 pixels an eye (3072 for most games)",
-                             "Auflösung: die Obergrenze liegt bei 4608 Bildpunkten je Auge (sonst meist 3072)"),
-                  note: klT("Unity and Unreal games. Draws about twice as many pixels; meant to be used with foveated rendering (start window) at Medium or Strong. Watch the frame rate.",
-                            "Unity- und Unreal-Spiele. Zeichnet etwa doppelt so viele Bildpunkte; gedacht zusammen mit Foveated Rendering (Startfenster) auf Mittel oder Stark. Auf die Bildrate achten.")),
             Entry(env: "KL_OVRP_EYE_ALIGN", value: "4",
                   title: klT("Resolution: the eye size is a multiple of 4",
                              "Auflösung: die Augengröße ist ein Vielfaches von 4"),
@@ -816,6 +823,50 @@ struct TestSwitchesView: View {
                 .font(.caption).foregroundStyle(.secondary)
             ForEach(KleptonTestSwitches.entries) { e in
                 TestSwitchRow(entry: e)
+            }
+        }
+    }
+}
+
+/// "Max resolution per eye" (KleptonEyeMax): the cap the game's eye picture is
+/// held to, for this game. Resolution and MetalFX scale down from it.
+struct EyeMaxView: View {
+    @State private var choice: Int
+    /// By name: the window asks before the game is loaded.
+    private let titleCap = Int(kl_ovrp_title_eye_cap(klTargetName()))
+    private let envCap = ProcessInfo.processInfo.environment["KL_OVRP_EYE_MAX"]
+
+    init() {
+        _ = KleptonRendering.shared   // which takes the old Test switch over first
+        _choice = State(initialValue: KleptonEyeMax().choice)
+    }
+
+    private func label(_ v: Int) -> String {
+        switch v {
+        case KleptonEyeMax.byTitle: return klT("Default (\(titleCap))", "Standard (\(titleCap))")
+        case KleptonEyeMax.native: return klT("Native (no limit)", "Nativ (keine Grenze)")
+        default: return "\(v)"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(klT("Max resolution per eye", "Maximale Auflösung je Auge"), selection: $choice) {
+                ForEach(KleptonEyeMax.options, id: \.self) { Text(label($0)).tag($0) }
+            }
+            .onChange(of: choice) { _, v in KleptonEyeMax().choice = v }
+            Text(klT("The longer side of the picture for each eye, in pixels. Native is the full size the headset asks for. Resolution and MetalFX scale down from this. Applies from the next start of the game.",
+                     "Die längere Seite des Bildes je Auge, in Bildpunkten. Nativ ist die volle Größe, die das Headset verlangt. Auflösung und MetalFX verkleinern von hier aus. Gilt ab dem nächsten Start des Spiels."))
+                .font(.caption).foregroundStyle(.secondary)
+            if KleptonEyeMax.aboveTitle(choice, titleCap: titleCap) {
+                Text(klT("Above this game's tested limit: may stutter or fail to start.",
+                         "Über der getesteten Grenze dieses Spiels: kann ruckeln oder nicht starten."))
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            if let envCap {
+                Text(klT("KL_OVRP_EYE_MAX=\(envCap) on the launch line wins over this.",
+                         "KL_OVRP_EYE_MAX=\(envCap) in der Startzeile hat Vorrang."))
+                    .font(.caption).foregroundStyle(.orange)
             }
         }
     }

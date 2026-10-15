@@ -1943,6 +1943,17 @@ puts the camera on the ground with its hands underneath it.
   tangents pushed alongside would otherwise disagree with the picture's shape.
   Every change logs the requested size, the applied size and the resulting
   swapchain MiB.
+  Below it, per game: *Settings › Advanced › Max resolution per eye* in the
+  start window (`klepton.eyeMax`, `KleptonEyeMax`, handed over with
+  `kl_ovrp_set_eye_max_choice` before the game starts): Default (the title's
+  cap, `kl_ovrp_title_eye_cap`), 2048 to 5120, or Native (no cap: the whole
+  size the display asks for, about 4633x3717). The order is this variable,
+  then that choice, then the title's cap, then 3072; *Resolution* and MetalFX
+  scale down from whichever wins. Above the title's cap the window warns that
+  the game may stutter or not start. It replaces the Test switch
+  `KL_OVRP_EYE_MAX=4608`: a game that had that switch on (chosen, or named in
+  `KLTestOn`) is set to 4608 once and the switch's state is dropped
+  (`klepton.eyeMax.migrated`). Tests: `make maxeye`, `make maxeyeswift`.
 - `KL_OVRP_VIEWPORT_SCALE=<x>` — force the **render viewport** to that fraction
   of the eye texture, default 1.0, accepted in 0..1 and multiplied by whatever
   the guest itself asked for. This is not a resolution knob, it is the **A/B for
@@ -4035,6 +4046,8 @@ audio path that has shipped: both are linked in, and
   a game's own option *XR prediction* (`KL_XR_PREDICT`); the log line of such a
   switch ends in `(on from the installation)`. `KL_OVRP_ONE_POSE` in the list
   is no longer a switch of its own (it is on by default) and does nothing.
+  `KL_OVRP_EYE_MAX` in the list is no longer a switch either: it sets *Max
+  resolution per eye* to 4608 at the first start, once (see `KL_OVRP_EYE_MAX`).
 - `KLEPTON_TEST_ON_EXTRA=<name>[,<name>…]` — more names for the same list,
   for a tester's own install. AVP Play sets `KLEPTON_TEST_ON` itself (and
   drops a value from the shell), so a test copy that needs one more switch
