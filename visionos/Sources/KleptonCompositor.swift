@@ -2415,6 +2415,7 @@ final class KleptonCompositor {
     private var mfxTick: UInt64 = 0
     private var mfxLastShape = ""
     private var mfxLastOn = false
+    private var mfxPause = KleptonMetalFXPause()
     private var mfxSaid = Set<String>()
     private var mfxStats = MfxStats()
     private lazy var mfxSupported = MTLFXSpatialScalerDescriptor.supportsDevice(device)
@@ -2642,8 +2643,20 @@ final class KleptonCompositor {
                 mfxLastShape = ""
             }
         }
+        // Held off while the guest shows the room (KleptonMetalFXPause): the
+        // scaler's output is opaque everywhere and would black it out. The
+        // stored switch stays as it is; upscaling resumes when passthrough ends.
+        let pause = mfxPause.frame(chosen: on, mixedReality: kl_ovrp_passthrough_live() != 0)
+        if let change = pause.change {
+            NSLog(change == .paused
+                  ? "[metalfx] paused while the game shows the room (passthrough): "
+                    + "the scaler writes alpha 1, which would cover the room — linear path"
+                  : "[metalfx] passthrough ended — upscaling again")
+            if change == .paused { mfxCache = nil }
+        }
         mfxStats = MfxStats(state: on ? 1 : 0)
         guard on else { return }
+        guard pause.upscale else { mfxStats.note = "paused: MR"; return }
         guard mfxSupported else {
             mfxSay("MetalFX spatial scaling is not supported on this device", short: "unsupported")
             return

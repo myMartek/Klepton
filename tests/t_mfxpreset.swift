@@ -117,6 +117,45 @@ struct MetalFXPresetCheck {
             if !ok { failed += 1 }
         }
 
+        // (h) Mixed reality pauses MetalFX and its end resumes it
+        // (KleptonMetalFXPause), frame by frame, without touching what is
+        // stored: the switch lowered the resolution before the pause, and the
+        // store is the same after pause and resume, so off still gives 100 % back.
+        do {
+            let (store, _) = freshStore()
+            let p = KleptonMetalFXPreset(defaults: store)
+            let scale = p.switched(on: true, from: 1.0)!
+            store.set(true, forKey: "klepton.metalfxUpscale")
+            let before = NSDictionary(dictionary: store.dictionaryRepresentation().filter { $0.key.hasPrefix("klepton.") })
+            var pause = KleptonMetalFXPause()
+            typealias Step = (what: String, chosen: Bool, mr: Bool, upscale: Bool, change: KleptonMetalFXPause.Change?)
+            let steps: [Step] = [
+                ("on, no MR", true, false, true, nil),
+                ("MR starts", true, true, false, .paused),
+                ("MR goes on", true, true, false, nil),
+                ("MR ends", true, false, true, .resumed),
+                ("MR again", true, true, false, .paused),
+                ("switched off during MR", false, true, false, nil),
+                ("off, MR ends", false, false, false, nil),
+                ("off, MR starts", false, true, false, nil),
+                ("switched on during MR", true, true, false, .paused),
+                ("MR ends", true, false, true, .resumed),
+            ]
+            for s in steps {
+                let r = pause.frame(chosen: s.chosen, mixedReality: s.mr)
+                let ok = r.upscale == s.upscale && r.change == s.change
+                print("  \(ok ? "ok  " : "FAIL") (h) \(s.what): \(r.upscale ? "upscales" : "linear")"
+                      + (r.change.map { ", \($0)" } ?? ""))
+                if !ok { failed += 1 }
+            }
+            let after = NSDictionary(dictionary: store.dictionaryRepresentation().filter { $0.key.hasPrefix("klepton.") })
+            let same = before.isEqual(after) && before.count == 2  // the switch and the mark
+            print("  \(same ? "ok  " : "FAIL") (h) pause and resume leave the stored switch, resolution and mark alone")
+            if !same { failed += 1 }
+            expectMark("(h) after pause and resume", p, true)
+            expect("(h) lowered, paused, resumed, then off", p.switched(on: false, from: scale), 1.0)
+        }
+
         for name in suites { UserDefaults.standard.removePersistentDomain(forName: name) }
         if failed > 0 { print("mfxpreset: FAIL (\(failed))"); exit(1) }
         print("mfxpreset: PASS")

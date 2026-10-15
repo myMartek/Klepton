@@ -1008,6 +1008,18 @@ struct MetalFXSwitch: View {
                     .font(hintFont).foregroundStyle(.orange)
                     .transition(.opacity)
             }
+            // The compositor's pause (KleptonMetalFXPause): said while the game
+            // shows the room, and always in a game made for it, so the switch
+            // standing on is not read as upscaling. Looked at once a second.
+            if metalfx.enabled {
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    if KleptonRendering.targetIsMixedReality || kl_ovrp_passthrough_live() != 0 {
+                        Text(klT("MetalFX is paused while mixed reality is on and resumes by itself after it.",
+                                 "MetalFX pausiert, solange Mixed Reality an ist, und läuft danach von selbst weiter."))
+                            .font(hintFont).foregroundStyle(.orange)
+                    }
+                }
+            }
         }
     }
 }

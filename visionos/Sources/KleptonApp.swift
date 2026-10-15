@@ -1031,7 +1031,7 @@ struct BootView: View {
 
             // Resolution and MetalFX in view, as on a player's settings page:
             // the two dials of the picture's size, not folded away in Rendering.
-            GroupBox("Picture") { PicturePrimary(hintFont: .caption) }
+            GroupBox(klT("Picture", "Bild")) { PicturePrimary(hintFont: .caption) }
                 .font(.callout)
 
             // The controller-alignment sliders, in THIS window because it stays

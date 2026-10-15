@@ -4038,7 +4038,14 @@ audio path that has shipped: both are linked in, and
   that it did (`klepton.metalfxLoweredResolution`, kept across starts). Turned
   off (there or with Create + Options) it sets 100 % back only while that mark
   stands; any move of the slider clears it, and a resolution the player chose
-  is never changed (`KleptonMetalFXPreset`, `make mfxpreset`). Unnamed, the switch starts off, as
+  is never changed (`KleptonMetalFXPreset`, `make mfxpreset`). While the game
+  shows the room (a passthrough layer, `kl_ovrp_passthrough_live`) the
+  compositor keeps the linear path and says `[metalfx] paused while the game
+  shows the room`; the panel's MetalFX note reads `paused: MR` and the
+  settings say so under the switch. Apple's scaler writes alpha 1 everywhere,
+  which would cover the room with black. The stored switch, the resolution
+  and the mark stay as they are; upscaling resumes when passthrough ends
+  (`KleptonMetalFXPause`). Unnamed, the switch starts off, as
   before. AVP Play sets it from its setting "MetalFX: switch on upscaling
   automatically when installing". The compositor's `[metalfx] on` line then
   ends in `(on from the installation, KL_METALFX_UPSCALE)`; each place it
