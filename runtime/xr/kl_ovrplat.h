@@ -56,4 +56,12 @@ void *kl_ovrplat_sym(const char *name);
 // for — the last of those is worth seeing even when nothing aborted.
 void kl_ovrplat_report(FILE *f);
 
+// The completion queue and the call-surface table, exercised in-process: more
+// requests outstanding than a pool block holds, popped handles held across new
+// requests, ovr_FreeMessage misuse, details riding in the message, and both
+// structures under concurrent threads. Returns 1 when everything held. Leaves
+// the queue empty, but its requests and names stay counted — call it in a
+// process of its own (tests/t_ovrplat.c), never in a guest run.
+int kl_ovrplat_queue_selftest(FILE *f);
+
 #endif

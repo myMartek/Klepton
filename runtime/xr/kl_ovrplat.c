@@ -3166,6 +3166,170 @@ void *kl_ovrplat_sym(const char *name) {
     return kl_named_stub(name, (void *)klplat_called);
 }
 
+// ---- self-test (tests/t_ovrplat.c) ------------------------------------------
+#define KLPLAT_ST_TYPE      0x7E570000u      // the self-test's own message types
+#define KLPLAT_ST_PRODUCERS 4
+#define KLPLAT_ST_PER       250
+#define KLPLAT_ST_HITTERS   8
+#define KLPLAT_ST_NAMES     64
+#define KLPLAT_ST_ROUNDS    50
+
+static void *klplat_st_produce(void *arg) {
+    int who = (int)(intptr_t)arg;
+    for (int i = 0; i < KLPLAT_ST_PER; i++)
+        if (!klplat_request_kind("selftest", KLPLAT_ST_TYPE | (uint32_t)who, i, KLPLAT_KIND_NONE))
+            return (void *)1;
+    return NULL;
+}
+
+static void *klplat_st_hit(void *arg) {
+    int who = (int)(intptr_t)arg;
+    char name[48];
+    for (int r = 0; r < KLPLAT_ST_ROUNDS; r++)
+        for (int i = 0; i < KLPLAT_ST_NAMES; i++) {
+            // Each thread walks the names from a different start, so first
+            // inserts of one name race between threads.
+            snprintf(name, sizeof name, "kl_selftest_%d", (i + who * 7) % KLPLAT_ST_NAMES);
+            plat_hit(name);
+        }
+    return NULL;
+}
+
+int kl_ovrplat_queue_selftest(FILE *f) {
+    int ok = 1;
+#define KLPLAT_ST_CHECK(c, ...) do { if (!(c)) { ok = 0; fprintf(f, "  FAIL: " __VA_ARGS__); \
+                                                 fprintf(f, "\n"); } } while (0)
+    // 1. Three blocks' worth outstanding at once: every request gets a real id,
+    //    and every one arrives, in order, with its own payload.
+    enum { N = 3 * KLPLAT_MSGQ };
+    uint64_t ids[N];
+    klplat_msg *held[N];
+    for (int i = 0; i < N; i++) {
+        ids[i] = klplat_request_kind("selftest", KLPLAT_ST_TYPE, i, KLPLAT_KIND_NONE);
+        KLPLAT_ST_CHECK(ids[i] != 0 && (i == 0 || ids[i] > ids[i - 1]),
+                        "request %d got id %llu", i, (unsigned long long)ids[i]);
+    }
+    for (int i = 0; i < N; i++) {
+        held[i] = klplat_PopMessage();
+        KLPLAT_ST_CHECK(held[i] && held[i]->request == ids[i] && held[i]->payload == i,
+                        "completion %d missing or out of order", i);
+        if (!held[i]) return 0;
+    }
+    KLPLAT_ST_CHECK(klplat_PopMessage() == NULL, "the queue holds more than was asked for");
+    fprintf(f, "  %d requests outstanding: %d completions, in order\n", N, N);
+
+    // 2. Handles the guest holds are not rewritten by requests queued after them.
+    uint64_t more[N];
+    for (int i = 0; i < N; i++)
+        more[i] = klplat_request_str("selftest", KLPLAT_ST_TYPE + 1, -i, "x");
+    for (int i = 0; i < N; i++)
+        KLPLAT_ST_CHECK(held[i]->request == ids[i] && held[i]->payload == i &&
+                        held[i]->type == KLPLAT_ST_TYPE && held[i]->str == NULL &&
+                        held[i]->state == KLPLAT_SLOT_POPPED,
+                        "held handle %d was rewritten", i);
+    for (int i = 0; i < N; i++) {
+        klplat_msg *m = klplat_PopMessage();
+        KLPLAT_ST_CHECK(m && m->request == more[i] && m->payload == -i,
+                        "second batch completion %d missing or out of order", i);
+        if (m) klplat_FreeMessage(m);
+    }
+    fprintf(f, "  %d held handles intact across %d further requests\n", N, N);
+
+    // 3. FreeMessage misuse: a double free, a foreign pointer and a message
+    //    still queued are all ignored, so no slot is ever handed out twice.
+    klplat_FreeMessage(held[0]);
+    klplat_FreeMessage(held[0]);
+    int foreign = 0;
+    klplat_FreeMessage((klplat_msg *)&foreign);
+    klplat_FreeMessage((klplat_msg *)((char *)held[1] + 1));
+    uint64_t a = klplat_request("selftest", KLPLAT_ST_TYPE + 2, 1);
+    pthread_mutex_lock(&g_msg_mu);
+    klplat_msg *queued = g_msg_head;
+    pthread_mutex_unlock(&g_msg_mu);
+    klplat_FreeMessage(queued);
+    uint64_t b = klplat_request("selftest", KLPLAT_ST_TYPE + 2, 2);
+    klplat_msg *ma = klplat_PopMessage(), *mb = klplat_PopMessage();
+    KLPLAT_ST_CHECK(ma && mb && ma != mb && ma->request == a && mb->request == b &&
+                    ma->payload == 1 && mb->payload == 2,
+                    "a misused FreeMessage put a slot into circulation twice");
+    KLPLAT_ST_CHECK(held[1]->request == ids[1], "a misaligned free touched a held handle");
+    if (ma) klplat_FreeMessage(ma);
+    if (mb) klplat_FreeMessage(mb);
+    for (int i = 1; i < N; i++) klplat_FreeMessage(held[i]);
+    fprintf(f, "  double free, foreign and queued frees ignored\n");
+
+    // 4. Language-pack details are the message's own copy.
+    klplat_asset src;
+    memset(&src, 0, sizeof src);
+    src.id = 42;
+    snprintf(src.path, sizeof src.path, "/selftest/fr.lang");
+    snprintf(src.tag, sizeof src.tag, "fr");
+    src.status = "installed";
+    uint64_t c = klplat_request_asset("selftest", KLPLAT_ST_TYPE + 3, KLPLAT_KIND_LANGPACK_SET, &src);
+    snprintf(src.tag, sizeof src.tag, "de");
+    klplat_msg *mc = klplat_PopMessage();
+    const klplat_asset *det = mc ? (const klplat_asset *)(uintptr_t)
+                                   klplat_Message_GetAssetFileDownloadResult(mc) : NULL;
+    KLPLAT_ST_CHECK(mc && mc->request == c && det == &mc->asset && det->id == 42 &&
+                    strcmp(det->tag, "fr") == 0 && strcmp(det->path, "/selftest/fr.lang") == 0,
+                    "language-pack details did not ride in the message");
+    if (mc) klplat_FreeMessage(mc);
+    fprintf(f, "  language-pack details copied into their message\n");
+
+    // 5. Producers on four threads, the pump on this one: every id arrives once.
+    enum { T = KLPLAT_ST_PRODUCERS * KLPLAT_ST_PER };
+    pthread_mutex_lock(&g_msg_mu);
+    uint64_t first = g_next_request;
+    pthread_mutex_unlock(&g_msg_mu);
+    unsigned char *seen = calloc(T, 1);
+    if (!seen) return 0;
+    pthread_t th[KLPLAT_ST_HITTERS];
+    for (int i = 0; i < KLPLAT_ST_PRODUCERS; i++)
+        pthread_create(&th[i], NULL, klplat_st_produce, (void *)(intptr_t)i);
+    int got = 0, dup = 0, stray = 0, spins = 0;
+    while (got < T && spins < 50000000) {
+        klplat_msg *m = klplat_PopMessage();
+        if (!m) { spins++; continue; }
+        uint64_t k = m->request - first;
+        if ((m->type & 0xFFFF0000u) != KLPLAT_ST_TYPE || k >= T) stray++;
+        else if (seen[k]++) dup++;
+        else got++;
+        klplat_FreeMessage(m);
+    }
+    int failed = 0;
+    for (int i = 0; i < KLPLAT_ST_PRODUCERS; i++) {
+        void *r = NULL;
+        pthread_join(th[i], &r);
+        failed += r != NULL;
+    }
+    free(seen);
+    KLPLAT_ST_CHECK(got == T && !dup && !stray && !failed,
+                    "threaded: %d of %d completions, %d duplicate, %d stray, %d producer(s) refused",
+                    got, T, dup, stray, failed);
+    KLPLAT_ST_CHECK(klplat_PopMessage() == NULL, "threaded: completions left over");
+    fprintf(f, "  %d threads x %d requests: %d completions, each once\n",
+            KLPLAT_ST_PRODUCERS, KLPLAT_ST_PER, got);
+
+    // 6. The call-surface table under eight threads racing on first inserts.
+    for (int i = 0; i < KLPLAT_ST_HITTERS; i++)
+        pthread_create(&th[i], NULL, klplat_st_hit, (void *)(intptr_t)i);
+    for (int i = 0; i < KLPLAT_ST_HITTERS; i++) pthread_join(th[i], NULL);
+    unsigned n = __atomic_load_n(&g_nplat, __ATOMIC_ACQUIRE), names = 0, nulls = 0, wrong = 0;
+    for (unsigned i = 0; i < n; i++) {
+        if (!g_plat[i].name) { nulls++; continue; }
+        if (strncmp(g_plat[i].name, "kl_selftest_", 12) != 0) continue;
+        names++;
+        if (g_plat[i].calls != KLPLAT_ST_HITTERS * KLPLAT_ST_ROUNDS) wrong++;
+    }
+    KLPLAT_ST_CHECK(!nulls && names == KLPLAT_ST_NAMES && !wrong,
+                    "surface table: %u names (want %d), %u NULL, %u miscounted",
+                    names, KLPLAT_ST_NAMES, nulls, wrong);
+    fprintf(f, "  %d threads x %d names: %u slots, none NULL, counts exact\n",
+            KLPLAT_ST_HITTERS, KLPLAT_ST_NAMES, names);
+#undef KLPLAT_ST_CHECK
+    return ok;
+}
+
 void kl_ovrplat_report(FILE *f) {
     // No lock (see g_plat_mu): this runs on the way to abort(). The count is
     // acquired once, so every slot below it is complete.
