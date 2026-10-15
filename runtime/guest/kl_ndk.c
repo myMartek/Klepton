@@ -841,6 +841,44 @@ static void kl_AConfiguration_getCountry(void *c, char *out) {
     out[1] = country[0] && country[1] ? country[1] : 0;
 }
 
+// ...and the REST of the getters: every field native_app_glue's
+// print_cur_config() reads. Robo Recall: Unplugged (x1906871599408213,
+// UE 4.21.2) ships a glue whose LOGV is live ("V/threaded_app: Creating:" is in
+// its log), and android_app_entry prints the whole configuration right after
+// AConfiguration_fromAssetManager — mcc, mnc, orientation, touch, density,
+// keyboard, navigation, keysHidden, navHidden, sdk, screen size, screen long,
+// UI mode type and night. Fourteen imports, and the first one reached
+// (AConfiguration_getMcc) stopped the run by name in ANativeActivity_onCreate
+// before the game's first frame (2026-10-14). Until then only the two above had
+// ever been asked for.
+//
+// The answers are the ones the zeroed block already holds: every
+// ACONFIGURATION_*_ANY is 0 and means "not specified", which is the truth —
+// there is no Android resource configuration here, and that is what a device
+// whose config was never filled reports too. The one exception is the SDK
+// version, a fact this runtime does state: it is Build.VERSION.SDK_INT
+// (kl_jni.c), read through the same accessor so the two doors cannot disagree.
+#define KL_ACONFIG_ANY(field) \
+    static int32_t kl_AConfiguration_get##field(void *c) { (void)c; return 0; }
+KL_ACONFIG_ANY(Mcc)
+KL_ACONFIG_ANY(Mnc)
+KL_ACONFIG_ANY(Orientation)
+KL_ACONFIG_ANY(Touchscreen)
+KL_ACONFIG_ANY(Density)
+KL_ACONFIG_ANY(Keyboard)
+KL_ACONFIG_ANY(Navigation)
+KL_ACONFIG_ANY(KeysHidden)
+KL_ACONFIG_ANY(NavHidden)
+KL_ACONFIG_ANY(ScreenSize)
+KL_ACONFIG_ANY(ScreenLong)
+KL_ACONFIG_ANY(UiModeType)
+KL_ACONFIG_ANY(UiModeNight)
+#undef KL_ACONFIG_ANY
+static int32_t kl_AConfiguration_getSdkVersion(void *c) {
+    (void)c;
+    return kl_jni_build_int("SDK_INT", 29);
+}
+
 // ========================================================== ANativeActivity
 // The two calls the guest makes back INTO the activity. Both are requests to
 // the framework, not queries, so there is nothing to answer — but neither is a
@@ -977,6 +1015,20 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
     N("AConfiguration_fromAssetManager", kl_AConfiguration_fromAssetManager),
     N("AConfiguration_getLanguage",      kl_AConfiguration_getLanguage),
     N("AConfiguration_getCountry",       kl_AConfiguration_getCountry),
+    N("AConfiguration_getMcc",           kl_AConfiguration_getMcc),
+    N("AConfiguration_getMnc",           kl_AConfiguration_getMnc),
+    N("AConfiguration_getOrientation",   kl_AConfiguration_getOrientation),
+    N("AConfiguration_getTouchscreen",   kl_AConfiguration_getTouchscreen),
+    N("AConfiguration_getDensity",       kl_AConfiguration_getDensity),
+    N("AConfiguration_getKeyboard",      kl_AConfiguration_getKeyboard),
+    N("AConfiguration_getNavigation",    kl_AConfiguration_getNavigation),
+    N("AConfiguration_getKeysHidden",    kl_AConfiguration_getKeysHidden),
+    N("AConfiguration_getNavHidden",     kl_AConfiguration_getNavHidden),
+    N("AConfiguration_getSdkVersion",    kl_AConfiguration_getSdkVersion),
+    N("AConfiguration_getScreenSize",    kl_AConfiguration_getScreenSize),
+    N("AConfiguration_getScreenLong",    kl_AConfiguration_getScreenLong),
+    N("AConfiguration_getUiModeType",    kl_AConfiguration_getUiModeType),
+    N("AConfiguration_getUiModeNight",   kl_AConfiguration_getUiModeNight),
 
     N("ANativeActivity_finish",        kl_ANativeActivity_finish),
     N("ANativeActivity_setWindowFormat", kl_ANativeActivity_setWindowFormat),

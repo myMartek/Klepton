@@ -529,6 +529,16 @@ build/t_jni_vivox: tests/t_jni_vivox.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_jni_vivox.c $(RUNTIME) $(LDLIBS)
 
+# A UE 4.21 guest's boot surface (Robo Recall: Unplugged): the AConfiguration
+# getters native_app_glue prints, zlib's compress(), MediaPlayer14(ZZ)V.
+build/t_ue421: tests/t_ue421.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_ue421.c $(RUNTIME) $(LDLIBS)
+
+.PHONY: ue421
+ue421: build/t_ue421
+	./build/t_ue421
+
 build/t_jni_memory: tests/t_jni_memory.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_jni_memory.c $(RUNTIME) $(LDLIBS)
@@ -644,6 +654,16 @@ build/t_lx: tests/t_lx.c runtime/kl_x18.c runtime/kl_x18.h runtime/kl_env.c
 .PHONY: lx
 lx: build/t_lx
 	./build/t_lx
+
+# The data window's two-entry literal-pool rule and its scope (one target),
+# on real PhysX and BoringSSL words. Decoder only, like t_x18. In `make check`.
+build/t_x18pool: tests/t_x18pool.c runtime/kl_x18.c runtime/kl_x18.h runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_x18pool.c runtime/kl_x18.c runtime/kl_env.c
+
+.PHONY: x18pool
+x18pool: build/t_x18pool
+	./build/t_x18pool
 
 # CASP with x18:x19 as one of its register pairs, EXECUTED (KLX_HZ_PAIR).
 build/t_casp: tests/t_casp.c runtime/kl_x18.c runtime/kl_x18.h runtime/kl_env.c
@@ -889,7 +909,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_pinch build/t_arrayviews build/t_surreal
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_pinch build/t_arrayviews build/t_surreal build/t_x18pool build/t_ue421
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -900,6 +920,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@echo "=== variadic ABI ===" && ./build/t_variadic
 	@./build/t_x18race > build/x18race.log 2>&1 || { cat build/x18race.log; exit 1; }
 	@head -1 build/x18race.log && tail -1 build/x18race.log
+	@./build/t_x18pool > build/x18pool.log 2>&1 || { cat build/x18pool.log; exit 1; }
+	@head -1 build/x18pool.log && tail -1 build/x18pool.log
 	@./build/t_tgkill > build/tgkill.log 2>&1 || { cat build/tgkill.log; exit 1; }
 	@grep -E '=== tgkill' build/tgkill.log && tail -1 build/tgkill.log
 	@python3 tests/t_ld_split.py build/klepton-ld build/ldsplit > build/ldsplit.log 2>&1 || { cat build/ldsplit.log; exit 1; }
@@ -952,6 +974,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@echo "=== discrete hand pinch ===" && tail -1 build/pinch.log
 	@./build/t_arrayviews > build/arrayviews.log 2>&1 || { cat build/arrayviews.log; exit 1; }
 	@echo "=== compositor array views ===" && tail -1 build/arrayviews.log
+	@./build/t_ue421 > build/ue421.log 2>&1 || { cat build/ue421.log; exit 1; }
+	@head -1 build/ue421.log && tail -1 build/ue421.log
 	@$(MAKE) -s ovrpabi
 # The opus roundtrip is the one gate here that RUNS guest code rather than
 # inspecting it, so it is worth keeping wherever it exists — but libunityopus.so

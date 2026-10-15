@@ -8448,10 +8448,16 @@ static int klfb_cimg_on(void) {
              // what is in view more mips, the copy of the resident ones failed —
              // and green and textured again when it left the view and the
              // texture shrank back (owner, headset, 2026-10-13).
+             // Robo Recall: Unplugged (x1906871599408213, UE 4.21) is the
+             // fifth: once it booted, its street, cars, trees and robots were
+             // flat magenta with the lighting still on them while the sidewalk,
+             // pillars and billboards drew textured — the streamed textures
+             // empty, the unstreamed ones fine (owner, headset, 2026-10-14).
              kl_env_on("KL_GLFB_COPYIMAGE_EMU", t && (strcmp(t, "x2897337400373711") == 0 ||
                                                       strcmp(t, "x3484270071659289") == 0 ||
                                                       strcmp(t, "x6963344583787383") == 0 ||
-                                                      strcmp(t, "x3386618894743567") == 0));
+                                                      strcmp(t, "x3386618894743567") == 0 ||
+                                                      strcmp(t, "x1906871599408213") == 0));
         if (on) fprintf(stderr, "  [glfb] glCopyImageSubData emulated (compressed "
                                 "uploads shadowed on the CPU)\n");
     }

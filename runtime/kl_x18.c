@@ -594,13 +594,58 @@ static int klx_unallocated(uint32_t w) {
 // `i` is a word index into `w`; the window is clamped to the chunk, which is a
 // whole executable section minus its known data ranges, so clamping only ever
 // bites at a section edge.
+//
+// ...and, for ONE target, one adjacent pair is not a table either. Robo
+// Recall: Unplugged (x1906871599408213, UE 4.21) keeps two-entry literal pools
+// in .text right after a function's last branch — GCC, the NDK that built its
+// PhysX — and two floats or two words of a byte table there read as two
+// "unallocated" words to this test: 0x42c80000 0x42c80000 (100.0f twice),
+// 0x05040706 0x01000302, 0x40ea0ea1 0x447fe000, all measured in its libUE4.so.
+// Six real x18 sites sat within 16 words of such a pair and were left raw:
+// `ldr x18, [x0]` at the top of Gu::SweepGeomGeom<CapsuleV, CapsuleV> wrote the
+// REAL x18 while the two reads after it, outside the window, read the shadow
+// slot — a stale value, a fault at 0x10 in a capsule sweep a minute into play
+// (community fix 40, 2026-10-14; the owner confirmed the fix on a headset).
+//
+// It is NOT safe as a general rule, which is why it is scoped. Measured over
+// the 557 distinct guest libraries on this machine, a lone adjacent pair flips
+// 18 refused words to "code": 15 are real sites of the same pool shape (Tales
+// from the Galaxy's Edge's PhysX, Tetris Effect, Wwise, Resonance Audio), but
+// three are one word of BoringSSL's P-256 table — Beat Saber 1.40's
+// libcrypto.so+0x17e800, libEOSSDK.so+0x12c3800, libUnreal.so+0x88c2800 — whose
+// ±16-word window holds exactly one adjacent pair. Patching that word is the
+// `bad_record_mac` failure this test exists to prevent. So the pair rule is on
+// only where it was verified: when KLEPTON_TARGET names that target — AVP Play
+// and visionos/run.sh export it to the build, so klepton-ld's translation sees
+// it; build_run_host.sh does not, so a host run says KL_X18_PAIR_POOL=1 — or
+// when KL_X18_PAIR_POOL=1 says so; KL_X18_PAIR_POOL=0 turns it off there too.
+// Every other target keeps the window test exactly as it was.
+static int klx_pair_pool_on(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *t = kl_env_str("KLEPTON_TARGET", NULL);
+        cached = kl_env_on("KL_X18_PAIR_POOL", t && strcmp(t, "x1906871599408213") == 0);
+    }
+    return cached;
+}
+
 static int klx_looks_like_data(const uint32_t *w, size_t n, size_t i) {
     size_t lo = i > KLX_WIN_HALF ? i - KLX_WIN_HALF : 0;
     size_t hi = i + KLX_WIN_HALF + 1 < n ? i + KLX_WIN_HALF + 1 : n;
     unsigned bad = 0;
+    if (!klx_pair_pool_on()) {
+        for (size_t k = lo; k < hi; k++)
+            if (klx_unallocated(w[k]) && ++bad >= KLX_WIN_LIMIT) return 1;
+        return 0;
+    }
+    // Counted over the whole window rather than stopping at the limit, so the
+    // pair can be told apart.
+    size_t first = 0, last = 0;
     for (size_t k = lo; k < hi; k++)
-        if (klx_unallocated(w[k]) && ++bad >= KLX_WIN_LIMIT) return 1;
-    return 0;
+        if (klx_unallocated(w[k])) { if (!bad) first = k; last = k; bad++; }
+    if (bad < KLX_WIN_LIMIT) return 0;
+    if (bad == 2 && last == first + 1) return 0;   // a two-entry literal pool
+    return 1;
 }
 
 // Exposed so the offline tool reports the same verdict the loader acts on —

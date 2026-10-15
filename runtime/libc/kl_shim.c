@@ -2636,6 +2636,11 @@ static const kl_entry g_shim[] = {
     E("wcscasecmp", wcscasecmp), E("wctomb", wctomb),
     E("sched_getparam", klb_sched_getparam), E("sched_getcpu", klb_sched_getcpu),
     E("putenv", klb_putenv),
+    // zlib's one-shot compress(): Robo Recall: Unplugged (x1906871599408213,
+    // UE 4.21) imports it beside compress2 and compressBound, which the
+    // generated table already forwards — it was in no tree that table was
+    // generated from. Same zlib on both sides, so a plain forward (2026-10-14).
+    E("compress", compress),
     E("quick_exit", klb__exit),
 
     // Steam Link (SDL3) additions — plain forwards plus the small wrappers above

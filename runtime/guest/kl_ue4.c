@@ -658,6 +658,9 @@ typedef void (*ue4_fn_ZI)(void *, void *, ue4_jboolean, int);
 typedef void (*ue4_fn_Z)(void *, void *, ue4_jboolean);
 typedef void (*ue4_fn_ZZssZsZ)(void *, void *, ue4_jboolean, ue4_jboolean,
                                void *, void *, ue4_jboolean, void *, ue4_jboolean);
+// UE 4.21 and older: nativeSetGlobalActivity without bPublicLogFiles —
+// (bUseExternalFilesDir, internalFilePath, externalFilePath, bOBBinAPK, APKFilename).
+typedef void (*ue4_fn_ZssZs)(void *, void *, ue4_jboolean, void *, void *, ue4_jboolean, void *);
 typedef void (*ue4_fn_sssss)(void *, void *, void *, void *, void *, void *, void *);
 typedef void (*ue4_fn_ssIIs)(void *, void *, void *, void *, int, int, void *);
 // UE 4.26+ grew a TargetSDKVersion int as the 2nd arg of
@@ -751,16 +754,48 @@ static void kl_ue4_java_create(FILE *out) {
     void *jinternal = kl_jni_new_string(files);
     void *jexternal = kl_jni_new_string(files);
     void *japk      = kl_jni_new_string(kl_jni_apk_path());
-    UE4_CALL(out, "nativeSetGlobalActivity", ue4_fn_ZZssZsZ,
-             ue4_meta_bool("com.epicgames.ue4.GameActivity.bUseExternalFilesDir"),
-             ue4_meta_bool("com.epicgames.ue4.GameActivity.bPublicLogFiles"),
-             jinternal, jexternal,
-             ue4_meta_bool("com.epicgames.ue4.GameActivity.bPackageDataInsideApk"),
-             japk,
-             // The Java's last argument is `(ApplicationInfo.flags &
-             // FLAG_DEBUGGABLE) == 0`. A release APK unpacked from a device is
-             // not debuggable.
-             (ue4_jboolean)1);
+    // The shape of this native is the engine's, like nativeSetAndroidVersion-
+    // Information's below, and the manifest's EngineVersion says which. UE 4.21
+    // declares it WITHOUT bPublicLogFiles: (bUseExternalFilesDir, internalFilePath,
+    // externalFilePath, bOBBinAPK, APKFilename) — read off the dex of Robo
+    // Recall: Unplugged (x1906871599408213, 4.21.2, 2026-10-14). Called in the
+    // later shape, that engine reads bPublicLogFiles' register as its internal
+    // files path — a null jstring, an empty string — and in a Shipping build
+    // with bUseExternalFilesDir that empty string becomes GFilePathBase: the
+    // game then probes "/UE4Game/RoboRecall/..." at the root of the filesystem
+    // (KL_TRACE_FS), finds neither its paks nor a descriptor, and stops at
+    // "Failed to open descriptor file ../../../RoboRecall/RoboRecall.uproject"
+    // with a black screen. The extra arguments shift bOBBinAPK and APKFilename
+    // the same way. 4.22 and later carry the flag: every UE title in this tree
+    // whose manifest names its engine is 4.24 or newer (4.24.3, 4.25.3, 4.26.2,
+    // 4.27.x, 5.2.0), so none of them takes the old form, and a manifest that
+    // names no engine keeps the call it always had.
+    int global_major = 0, global_minor = 0;
+    {
+        const char *ev = ue4_meta_str("com.epicgames.ue4.GameActivity.EngineVersion");
+        if (sscanf(ev, "%d.%d", &global_major, &global_minor) != 2)
+            global_major = global_minor = 0;
+    }
+    if (global_major == 4 && global_minor <= 21) {
+        if (out) fprintf(out, "  engine %d.%d per the manifest: nativeSetGlobalActivity in the five-argument (4.21) form\n",
+                         global_major, global_minor);
+        UE4_CALL(out, "nativeSetGlobalActivity", ue4_fn_ZssZs,
+                 ue4_meta_bool("com.epicgames.ue4.GameActivity.bUseExternalFilesDir"),
+                 jinternal, jexternal,
+                 ue4_meta_bool("com.epicgames.ue4.GameActivity.bPackageDataInsideApk"),
+                 japk);
+    } else {
+        UE4_CALL(out, "nativeSetGlobalActivity", ue4_fn_ZZssZsZ,
+                 ue4_meta_bool("com.epicgames.ue4.GameActivity.bUseExternalFilesDir"),
+                 ue4_meta_bool("com.epicgames.ue4.GameActivity.bPublicLogFiles"),
+                 jinternal, jexternal,
+                 ue4_meta_bool("com.epicgames.ue4.GameActivity.bPackageDataInsideApk"),
+                 japk,
+                 // The Java's last argument is `(ApplicationInfo.flags &
+                 // FLAG_DEBUGGABLE) == 0`. A release APK unpacked from a device is
+                 // not debuggable.
+                 (ue4_jboolean)1);
+    }
 
     // nativeSetWindowInfo(bIsPortrait, DepthBufferPreference)
     UE4_CALL(out, "nativeSetWindowInfo", ue4_fn_ZI,

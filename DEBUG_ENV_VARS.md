@@ -2469,6 +2469,14 @@ reads no knobs).
   with like. Default on. This is the A/B that identified the veneer pass as
   the cause of Steam Link's failing TLS handshake: with it off the handshake
   completed, with it on the guest answered `bad_record_mac`.
+- `KL_X18_PAIR_POOL=0/1` — treat a lone adjacent pair of "unallocated" words
+  in an x18 site's ±16-word window as a two-entry literal pool (patch the site)
+  rather than as data (refuse it). Read by klepton-ld at translation time as
+  well as by the loader. Default on only when `KLEPTON_TARGET` is
+  `x1906871599408213` (Robo Recall: Unplugged, whose PhysX faulted on six
+  sites the window had refused); off everywhere else, because the same rule
+  also unrefuses one word of BoringSSL's P-256 table in Beat Saber 1.40's
+  `libcrypto.so`, `libEOSSDK.so` and UE5's `libUnreal.so`.
 - `KL_CTR=0` — disable trap 26's `mrs Xt, CTR_EL0` veneer. Deliberately its own
   knob rather than part of `KL_X18`: the two rewrites fix different registers,
   and an A/B on one must not silently move the other. Default on. **The control

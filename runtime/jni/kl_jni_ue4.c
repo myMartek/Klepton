@@ -2062,6 +2062,13 @@ const klj_binding klj_bind_ue4[] = {
     // signatures are FJavaAndroidMediaPlayer's own GetClassMethod calls, in the
     // order that constructor resolves them.
     {"com/epicgames/ue4/MediaPlayer14", "<init>", "(ZZZ)V", klj_MP14_ctor},
+    // UE 4.21's player takes two: (swizzlePixels, vulkanRenderer) — needTrackInfo
+    // came later. Robo Recall: Unplugged (x1906871599408213) builds one for its
+    // intro movie as the first thing after its GL contexts, and with no row for
+    // this shape the run stopped there (2026-10-14). Same handler: it reads the
+    // third flag only when it is passed. The methods that engine resolves next
+    // are the ones below.
+    {"com/epicgames/ue4/MediaPlayer14", "<init>", "(ZZ)V", klj_MP14_ctor},
     {"com/epicgames/ue4/MediaPlayer14", "getDuration", "()I", klj_MP14_getDuration},
     {"com/epicgames/ue4/MediaPlayer14", "reset", "()V", klj_MP14_reset},
     {"com/epicgames/ue4/MediaPlayer14", "stop", "()V", klj_MP14_stop},
