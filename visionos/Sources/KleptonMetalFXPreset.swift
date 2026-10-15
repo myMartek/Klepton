@@ -48,3 +48,19 @@ struct KleptonMetalFXPreset {
         { value in store(value); self.movedByHand() }
     }
 }
+
+// What the Picture box of a settings page shows of the two (PicturePrimary): in
+// every game, Alyx included, Resolution always and the MetalFX switch wherever
+// the device has the scaler, both adjustable. Nothing else is asked: not the
+// game, not Alyx's Graphics preset (AlyxPanel, a box of its own), so no preset
+// hides or locks them. Alyx's page had both only under Advanced before.
+// t_mfxpreset (g).
+struct KleptonPictureControls: Equatable {
+    var resolution: Bool
+    var metalFX: Bool
+    var adjustable: Bool
+
+    static func primary(deviceHasScaler: Bool) -> Self {
+        Self(resolution: true, metalFX: deviceHasScaler, adjustable: true)
+    }
+}

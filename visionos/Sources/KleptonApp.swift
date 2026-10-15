@@ -453,23 +453,13 @@ struct PlayerSettingsView: View {
             // Alyx has its own page for the picture (AlyxPanel), with one choice
             // where this has two dials; both at once were two places to set the
             // same thing. These two stay reachable under Advanced. Its Picture
-            // box holds only MetalFX, with Resolution beside it while it is on:
-            // the size MetalFX enlarges, which was only under Advanced there.
-            if klIsAlyx(), KleptonMetalFX.deviceSupported {
+            // box holds Resolution and MetalFX, the same as every other game's
+            // (they were only under Advanced there), outside the Graphics
+            // presets, which neither hide nor lock them.
+            if klIsAlyx() {
                 GroupBox(klT("Picture", "Bild")) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        MetalFXSwitch(title: klT("MetalFX upscaling", "MetalFX-Hochskalieren"), hintFont: .callout,
-                                      resolutionSlider: true)
-                        Text(klT("Sharpens the picture when the resolution is below 100%: Apple's scaler enlarges it instead of a plain stretch. Costs some graphics time. Switching takes effect at once, a new resolution with the next start.",
-                                 "Schärft das Bild, wenn die Auflösung unter 100 % liegt: Apples Scaler vergrößert es statt einer einfachen Streckung. Kostet etwas Grafikzeit. Das Umschalten wirkt sofort, eine neue Auflösung beim nächsten Start."))
-                            .font(.callout).foregroundStyle(.secondary)
-                        if KleptonMetalFX.onFromInstall {
-                            Text(klT("On from the start in this installation: AVP Play's MetalFX setting asked for it.",
-                                     "In dieser Installation von Anfang an eingeschaltet: Die MetalFX-Einstellung von AVP Play hat es so verlangt."))
-                                .font(.callout).foregroundStyle(.orange)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    PicturePrimary(hintFont: .callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             if !klIsAlyx() {
@@ -534,29 +524,7 @@ struct PlayerSettingsView: View {
                                  "Glättet gezackte Kanten stärker, als das Spiel es von sich aus tut (MSAA). Kostet etwas Grafikzeit und Speicher, und beim ersten Start nach einer Änderung werden die Shader des Spiels neu übersetzt, was eine Weile ruckelt. Zeigt das Bild Fehler, wieder zurückstellen."))
                             .font(.callout).foregroundStyle(.secondary)
                     }
-                    HStack {
-                        Text(klT("Resolution", "Auflösung"))
-                        Slider(value: rendering.renderScaleByHand, in: KleptonRendering.minRenderScale...1.0, step: 0.05)
-                        Text(String(format: "%.0f%%", rendering.renderScale * 100))
-                            .monospacedDigit().frame(width: 60, alignment: .trailing)
-                    }
-                    Text(klT("How finely the game is drawn. Lower it if the picture stutters when you look around.",
-                             "Wie fein das Spiel gezeichnet wird. Verringern, wenn das Bild beim Umsehen ruckelt."))
-                        .font(.callout).foregroundStyle(.secondary)
-                    // The one MetalFX switch of this page (Advanced only points
-                    // here) and the same choice as Create + Options
-                    // (KleptonMetalFX), only where the device has the scaler.
-                    if KleptonMetalFX.deviceSupported {
-                        MetalFXSwitch(title: klT("MetalFX upscaling", "MetalFX-Hochskalieren"), hintFont: .callout)
-                        Text(klT("Sharpens the picture when the resolution is below 100%: Apple's scaler enlarges it instead of a plain stretch. Costs some graphics time. Switching takes effect at once, a new resolution with the next start.",
-                                 "Schärft das Bild, wenn die Auflösung unter 100 % liegt: Apples Scaler vergrößert es statt einer einfachen Streckung. Kostet etwas Grafikzeit. Das Umschalten wirkt sofort, eine neue Auflösung beim nächsten Start."))
-                            .font(.callout).foregroundStyle(.secondary)
-                        if KleptonMetalFX.onFromInstall {
-                            Text(klT("On from the start in this installation: AVP Play's MetalFX setting asked for it.",
-                                     "In dieser Installation von Anfang an eingeschaltet: Die MetalFX-Einstellung von AVP Play hat es so verlangt."))
-                                .font(.callout).foregroundStyle(.orange)
-                        }
-                    }
+                    PicturePrimary(hintFont: .callout)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -970,7 +938,7 @@ struct BootView: View {
                     // dials of the port itself, and the report of this run.
                     DisclosureGroup(klT("Advanced", "Erweitert")) {
                         VStack(alignment: .leading, spacing: 14) {
-                            GroupBox(klT("Picture, in detail", "Bild, im Einzelnen")) { RenderingView(metalFXSwitch: false) }
+                            GroupBox(klT("Picture, in detail", "Bild, im Einzelnen")) { RenderingView() }
                             DisclosureGroup(klT("Passthrough and chroma key", "Durchsicht und Chroma-Key")) { ChromaView() }
                             DisclosureGroup(klT("Controller alignment", "Ausrichtung der Controller")) { TuningView() }
                             if showMic {
@@ -1060,6 +1028,11 @@ struct BootView: View {
             // Half-Life: Alyx's picture-against-smoothness choice, above the Start
             // button because it is read once, when the run starts.
             if klIsAlyx() { AlyxPanel(started: running || finished) }
+
+            // Resolution and MetalFX in view, as on a player's settings page:
+            // the two dials of the picture's size, not folded away in Rendering.
+            GroupBox("Picture") { PicturePrimary(hintFont: .caption) }
+                .font(.callout)
 
             // The controller-alignment sliders, in THIS window because it stays
             // open beside the immersive space — so the guest keeps rendering
