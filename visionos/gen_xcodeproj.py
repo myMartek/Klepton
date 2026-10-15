@@ -44,7 +44,7 @@ BUNDLE_ID = os.environ.get("KLEPTON_BUNDLE_ID", KLT["bundle"])
 
 # Whether this is a TEST build — a copy beside the real game, for trying
 # something on the headset — and not what a player has (KL_TEST_BUILD below,
-# KLTestBuild in Info.plist, KleptonTestBuild in KleptonTuning.swift). Only
+# KLTestBuild in Info.plist, KleptonTestBuild in KleptonTestBuild.swift). Only
 # what a tester's command line sets counts: a name of its own
 # (KLEPTON_DISPLAY_SUFFIX / _OVERRIDE — `avpplay install --display-suffix`), a
 # bundle id ending in "-test" or ".test" in any case (regex [-.]test$; testing.md's
