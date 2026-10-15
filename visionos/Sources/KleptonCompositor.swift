@@ -2405,8 +2405,10 @@ final class KleptonCompositor {
     /// a swapchain re-created at another size, a toggle that stays off.
     private static let mfxKeepTicks: UInt64 = 600
     /// KL_METALFX_COLOR=hdr|linear|perceptual: one colour processing mode for
-    /// every format, for A/B tests — unset, RGBA16F is `.hdr`, sRGB `.linear`
-    /// and the rest `.perceptual`. Read once; a copy made before keeps its mode.
+    /// every format MetalFX allows it for, for A/B tests — unset, RGBA16F is
+    /// `.hdr` and the rest `.perceptual`. An sRGB format is always
+    /// `.perceptual` (see mfxMakeTarget). Read once; a copy made before keeps
+    /// its mode.
     private static let mfxColorOverride: MTLFXSpatialScalerColorProcessingMode? = {
         let v = ProcessInfo.processInfo.environment["KL_METALFX_COLOR"]?.lowercased() ?? ""
         let mode: MTLFXSpatialScalerColorProcessingMode?
@@ -2541,13 +2543,27 @@ final class KleptonCompositor {
         // The whole texture: the part read is the encode's input content.
         d.inputWidth = src.width; d.inputHeight = src.height
         d.outputWidth = width; d.outputHeight = height
+        // An sRGB texture takes `.perceptual` and nothing else: MetalFX makes
+        // no scaler for an sRGB format with `.linear` or `.hdr` — nil, and an
+        // assertion under the API validation ("sRGB inputs or outputs not
+        // supported with non-perceptual color processing"). That was every
+        // GL guest with an sRGB eye (GL_SRGB8_ALPHA8, format 71): Beat Saber
+        // 1.45 on the headset, 2026-10-15, "no scaler for 4306x3454 ->
+        // 2386x2302 format 71" and the panel saying linear. Measured on a Mac
+        // (M4): 71 and 81 give a scaler only with `.perceptual`; 70 and 115
+        // with all three.
+        let srgb = src.pixelFormat == .rgba8Unorm_srgb || src.pixelFormat == .bgra8Unorm_srgb
         switch src.pixelFormat {
         case .rgba16Float: d.colorProcessingMode = .hdr
-        // An sRGB texture is read as linear values.
-        case .rgba8Unorm_srgb, .bgra8Unorm_srgb: d.colorProcessingMode = .linear
         default: d.colorProcessingMode = .perceptual
         }
-        if let forced = Self.mfxColorOverride { d.colorProcessingMode = forced }
+        if let forced = Self.mfxColorOverride {
+            if !srgb || forced == .perceptual { d.colorProcessingMode = forced }
+            else if mfxSaid.insert("color-srgb").inserted {
+                NSLog("[metalfx] KL_METALFX_COLOR does not apply to the sRGB format "
+                      + "\(src.pixelFormat.rawValue) — MetalFX takes only perceptual there")
+            }
+        }
         guard let sc = d.makeSpatialScaler(device: device) else {
             mfxSay("no scaler for \(src.width)x\(src.height) -> \(width)x\(height) "
                    + "format \(src.pixelFormat.rawValue)", short: "no scaler")

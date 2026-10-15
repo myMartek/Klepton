@@ -3878,7 +3878,9 @@ audio path that has shipped: both are linked in, and
   copies would go past it is drawn linear and said once (`budget` on the
   panel); the eye pass has no budget.
 - `KL_METALFX_COLOR=hdr|linear|perceptual` — the scaler's colour processing
-  mode for every eye format, for A/B tests. Unset: RGBA16F `hdr` (the
-  default, kept), sRGB formats `linear`, the rest `perceptual`. Said once as
+  mode, for A/B tests. Unset: RGBA16F `hdr` (the default, kept), the rest
+  `perceptual`. An sRGB eye (`rgba8Unorm_srgb`, `bgra8Unorm_srgb`) is always
+  `perceptual`, whatever this says: MetalFX makes no scaler for sRGB with
+  `linear` or `hdr` (said once). Said once as
   `[metalfx] colour processing …`; any other value is said and ignored. Read
   once a run, at the first copy.
