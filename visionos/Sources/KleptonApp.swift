@@ -517,7 +517,7 @@ struct PlayerSettingsView: View {
                     }
                     HStack {
                         Text(klT("Resolution", "Auflösung"))
-                        Slider(value: $rendering.renderScale, in: KleptonRendering.minRenderScale...1.0, step: 0.05)
+                        Slider(value: rendering.renderScaleByHand, in: KleptonRendering.minRenderScale...1.0, step: 0.05)
                         Text(String(format: "%.0f%%", rendering.renderScale * 100))
                             .monospacedDigit().frame(width: 60, alignment: .trailing)
                     }

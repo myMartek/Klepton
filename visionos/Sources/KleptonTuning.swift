@@ -334,6 +334,14 @@ final class KleptonRendering: ObservableObject {
     /// and with edge smoothing a coarser one is worth trying.
     static var minRenderScale: Double { targetIsBeatSaber ? 0.25 : 0.5 }
 
+    /// "Resolution" as the slider moves it: a value the player chose, so
+    /// whatever the MetalFX switch lowered is theirs from now on
+    /// (KleptonMetalFXPreset.movedByHand).
+    var renderScaleByHand: Binding<Double> {
+        Binding(get: { self.renderScale },
+                set: { self.renderScale = $0; KleptonMetalFXPreset().movedByHand() })
+    }
+
     /// The target's own default (targets.py "render_scale", baked into
     /// Info.plist as KLRenderScaleDefault). 1.0 for a bundle without the key.
     static let targetRenderScale: Double = {
@@ -447,8 +455,8 @@ final class KleptonRendering: ObservableObject {
 // Read live in the compositor, so the switch applies to the next frame.
 // "Never chosen" means what the installation started with: off, unless the
 // installer named KL_METALFX_UPSCALE among the switches it wants on
-// (KLEPTON_TEST_ON, KLTestOn in Info.plist — AVP Play's experimental setting
-// "MetalFX"). A choice made here then stays, the way a Test switch's does.
+// (KLEPTON_TEST_ON, KLTestOn in Info.plist — AVP Play's MetalFX setting).
+// A choice made here then stays, the way a Test switch's does.
 final class KleptonMetalFX: ObservableObject {
     static let shared = KleptonMetalFX()
 
@@ -495,21 +503,24 @@ final class KleptonMetalFX: ObservableObject {
         return rs < 0.999 && w > 0 && h > 0
     }
 
-    /// The switch as a settings page turns it (Picture; Picture in detail under
-    /// Advanced for Alyx and the developer window). Turned on at 100 % it also
-    /// sets the resolution to 75 % (KleptonMetalFXPreset), from the next start
-    /// like any change of it; true when it did, so the page can say so.
+    /// Turn the switch, from a settings page or Create + Options, with what it
+    /// does to the resolution (KleptonMetalFXPreset): on at 100 % sets 75 %;
+    /// off gives 100 % back only if the switch lowered it and the slider has
+    /// not been moved since. Like any change of the resolution, from the next
+    /// start. Returns the resolution it set, nil when it left it alone.
     @discardableResult
-    func setFromSettings(_ on: Bool) -> Bool {
+    func switchTo(_ on: Bool) -> Double? {
         let rendering = KleptonRendering.shared
-        let preset = KleptonMetalFXPreset.renderScale(switchedOn: on, from: rendering.renderScale)
-        if let preset {
-            rendering.renderScale = max(preset, KleptonRendering.minRenderScale)
-            NSLog("[metalfx] switched on at 100 %% resolution: resolution set to %.0f %% from the next start",
-                  rendering.renderScale * 100)
+        let set = KleptonMetalFXPreset().switched(on: on, from: rendering.renderScale)
+            .map { max($0, KleptonRendering.minRenderScale) }
+        if let set {
+            rendering.renderScale = set
+            NSLog("[metalfx] switched %@: resolution set to %.0f %% from the next start (%@)",
+                  on ? "on" : "off", set * 100,
+                  on ? "nothing to upscale at 100 %" : "the switch had lowered it")
         }
         enabled = on
-        return preset != nil
+        return set
     }
 
     /// A tap of Create and Options together while the metrics panel is shown
@@ -525,7 +536,7 @@ final class KleptonMetalFX: ObservableObject {
             return
         }
         DispatchQueue.main.async {
-            shared.enabled.toggle()
+            shared.switchTo(!shared.enabled)
             NSLog("[metalfx] switched %@ with Create + Options", shared.enabled ? "on" : "off")
         }
     }
@@ -834,7 +845,7 @@ struct RenderingView: View {
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Text("Render resolution")
-                Slider(value: $rendering.renderScale, in: KleptonRendering.minRenderScale...1.0, step: 0.05)
+                Slider(value: rendering.renderScaleByHand, in: KleptonRendering.minRenderScale...1.0, step: 0.05)
                 Text(String(format: "%.0f%%", rendering.renderScale * 100))
                     .monospacedDigit().frame(width: 52, alignment: .trailing)
             }
@@ -855,8 +866,8 @@ struct RenderingView: View {
                          "Schärft das Bild, wenn die Auflösung, mit der das Spiel gestartet wurde, unter 100 % liegt: Das Spiel zeichnet klein, und Apples Scaler streckt es auf Augengröße statt einer einfachen linearen Streckung. Kostet etwas Grafikzeit. Das Umschalten wirkt ab dem nächsten Bild, eine neue Auflösung erst beim nächsten Start. Wirkt in jedem Spiel: Vulkan und GL, über Metas Schnittstelle oder OpenXR, auch mit Foveated Rendering. Ob hochskaliert wird, zeigt das Leistungs-Panel."))
                     .font(.caption).foregroundStyle(.secondary)
                 if KleptonMetalFX.onFromInstall {
-                    Text(klT("On from the start in this installation: AVP Play's experimental setting asked for it.",
-                             "In dieser Installation von Anfang an eingeschaltet: Die experimentelle Einstellung von AVP Play hat es so verlangt."))
+                    Text(klT("On from the start in this installation: AVP Play's MetalFX setting asked for it.",
+                             "In dieser Installation von Anfang an eingeschaltet: Die MetalFX-Einstellung von AVP Play hat es so verlangt."))
                         .font(.caption).foregroundStyle(.orange)
                 }
             }
@@ -866,30 +877,35 @@ struct RenderingView: View {
 
 /// The MetalFX switch wherever a page shows it: the stored choice
 /// (KleptonMetalFX.shared), so a tap of Create and Options shows here at once.
-/// Turned on at 100 % it sets the resolution to 75 % (setFromSettings) and says
-/// so for a few seconds under the switch.
+/// When turning it changes the resolution (switchTo: 75 % on at 100 %, 100 %
+/// back when the switch had lowered it) it says so for a few seconds under it.
 struct MetalFXSwitch: View {
     let title: String
     let hintFont: Font
     @ObservedObject private var metalfx = KleptonMetalFX.shared
-    @State private var presetShown = false
+    /// The resolution the switch just set, shown for a few seconds.
+    @State private var presetShown: Double?
     @State private var presetHide: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Toggle(title, isOn: Binding(get: { metalfx.enabled }, set: { on in
-                let preset = metalfx.setFromSettings(on)
+                let set = metalfx.switchTo(on)
                 presetHide?.cancel()
-                withAnimation { presetShown = preset }
-                guard preset else { return }
+                withAnimation { presetShown = set }
+                guard set != nil else { return }
                 presetHide = Task { @MainActor in
                     try? await Task.sleep(for: .seconds(4))
                     guard !Task.isCancelled else { return }
-                    withAnimation { presetShown = false }
+                    withAnimation { presetShown = nil }
                 }
             }))
-            if presetShown {
-                Text(klT("Resolution set to 75% for MetalFX", "Auflösung für MetalFX auf 75 % gesetzt"))
+            if let shown = presetShown {
+                Text(shown < 0.999
+                     ? klT("Resolution set to 75% for MetalFX, from the next start",
+                           "Auflösung für MetalFX auf 75 % gesetzt, ab dem nächsten Start")
+                     : klT("Resolution back to 100%, from the next start",
+                           "Auflösung wieder auf 100 %, ab dem nächsten Start"))
                     .font(hintFont).foregroundStyle(.orange)
                     .transition(.opacity)
             }

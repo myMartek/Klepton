@@ -3969,8 +3969,11 @@ audio path that has shipped: both are linked in, and
   (`klepton.metalfxUpscale`, `KleptonMetalFX`): on from the first start, off
   again in the game if chosen there. The switch sits under *Resolution*
   wherever the device has Apple's spatial scaler; turned on there at 100 %
-  it sets *Resolution* to 75 % from the next start and says so
-  (`KleptonMetalFXPreset`, `make mfxpreset`). Unnamed, the switch starts off, as
+  it sets *Resolution* to 75 % from the next start and says so, and marks
+  that it did (`klepton.metalfxLoweredResolution`, kept across starts). Turned
+  off (there or with Create + Options) it sets 100 % back only while that mark
+  stands; any move of the slider clears it, and a resolution the player chose
+  is never changed (`KleptonMetalFXPreset`, `make mfxpreset`). Unnamed, the switch starts off, as
   before. AVP Play sets it from its setting "MetalFX: switch on upscaling
   automatically when installing". The compositor's `[metalfx] on` line then
   ends in `(on from the installation, KL_METALFX_UPSCALE)`; each place it

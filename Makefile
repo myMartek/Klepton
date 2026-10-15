@@ -876,8 +876,9 @@ surreal: build/t_surreal
 pinch: build/t_pinch
 	./build/t_pinch
 
-# The MetalFX switch on the settings page (KleptonMetalFXPreset.swift): turned
-# on at 100 % it sets the resolution to 75 %, nothing else moves it. In `make check`.
+# The MetalFX switch and the resolution (KleptonMetalFXPreset.swift): on at
+# 100 % sets 75 %, off gives 100 % back only if the switch lowered it and the
+# slider was not moved since; the mark survives a new start. In `make check`.
 build/t_mfxpreset: tests/t_mfxpreset.swift visionos/Sources/KleptonMetalFXPreset.swift
 	@mkdir -p build
 	swiftc -o $@ visionos/Sources/KleptonMetalFXPreset.swift tests/t_mfxpreset.swift
