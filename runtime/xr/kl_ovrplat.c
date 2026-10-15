@@ -433,12 +433,25 @@ static uint64_t klplat_called(const char *name) {
 #define KLPLAT_INIT_SUCCESS        0            // PlatformInitializeResult.Success
 #define KLPLAT_AGE_ADULT           3            // AccountAgeCategory.Ad
 
-// A ring, because the guest holds a message only until it has read it and calls
-// ovr_FreeMessage; three per run is the whole traffic, so 16 slots cannot wrap
-// under a live message. The mutex is not defensive — the requests are issued
-// from managed code on the main thread and the pump runs there too, but nothing
-// in the API promises that.
-#define KLPLAT_MSGQ 16
+// A pool of message slots and a FIFO of the queued ones. A slot is the guest's
+// from ovr_PopMessage until its ovr_FreeMessage and is reused only after that,
+// so a handle the guest holds is never rewritten under it. The pool grows by a
+// block when every slot is queued or held — the fixed 16-slot ring it replaces
+// dropped the completion of a 17th outstanding request while still handing out
+// its id, which is the "poll forever" the queue exists to prevent, and it
+// rewrote popped handles on wrap. A request id is issued only together with its
+// slot; with no memory for one the request fails (id 0) instead. Blocks are
+// never freed, so even a handle used after its FreeMessage reads a slot, not
+// freed memory. The mutex is not defensive — the requests are issued from
+// managed code on the main thread and the pump runs there too, but nothing in
+// the API promises that.
+#define KLPLAT_MSGQ 16                 // slots per pool block
+// A language pack's details (see plat_is_langpack_status), here because a
+// message carries a copy of them.
+typedef struct {
+    uint64_t id; char path[1024]; char tag[32];
+    const char *status;          // "installed" or "available"
+} klplat_asset;
 // `str` is the STRING payload, for the messages whose managed wrapper is a
 // `Message<string>` — it is read through ovr_Message_GetString rather than
 // through the int payload above, and a message carries one or the other.
@@ -456,30 +469,94 @@ enum {
     KLPLAT_KIND_PRODUCTS,
     KLPLAT_KIND_LANGPACK_SET,   // obj is the pack ovr_LanguagePack_SetCurrent chose
 };
-typedef struct {
+// `asset` is the storage `obj` points at when a message carries language-pack
+// details: a copy taken when the message is queued, so the handle lives exactly
+// as long as the message and a rescan of the packs cannot change it under the
+// guest.
+enum { KLPLAT_SLOT_FREE = 0, KLPLAT_SLOT_QUEUED, KLPLAT_SLOT_POPPED };
+typedef struct klplat_msg {
     uint32_t type; uint64_t request; int32_t payload; const char *str; int err;
     int kind;
     const void *obj;   // an AssetDetails, for the one message that has one
+    klplat_asset asset;
+    int state;                    // KLPLAT_SLOT_*, under g_msg_mu
+    struct klplat_msg *next;      // the FIFO while queued, the free list while free
 } klplat_msg;
-static klplat_msg      g_msgq[KLPLAT_MSGQ];
-static unsigned        g_msg_head, g_msg_tail;
+typedef struct klplat_msg_block {
+    struct klplat_msg_block *next;
+    klplat_msg m[KLPLAT_MSGQ];
+} klplat_msg_block;
+static klplat_msg_block *g_msg_blocks;          // every block, never freed
+static klplat_msg      *g_msg_free;             // slots no one holds
+static klplat_msg      *g_msg_head, *g_msg_tail; // queued, oldest first
 static uint64_t        g_next_request = 1;
 static int             g_platform_up;
 static pthread_mutex_t g_msg_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// A free slot, growing the pool by a block when there is none. Under g_msg_mu.
+static klplat_msg *klplat_msg_alloc_locked(void) {
+    if (!g_msg_free) {
+        klplat_msg_block *b = calloc(1, sizeof *b);
+        if (!b) return NULL;
+        b->next = g_msg_blocks;
+        g_msg_blocks = b;
+        for (int i = KLPLAT_MSGQ - 1; i >= 0; i--) {
+            b->m[i].next = g_msg_free;
+            g_msg_free = &b->m[i];
+        }
+    }
+    klplat_msg *m = g_msg_free;
+    g_msg_free = m->next;
+    return m;
+}
+
+// Whether `p` is a slot of the pool, checked by address before anything is
+// read through it. Under g_msg_mu.
+static klplat_msg *klplat_msg_slot_locked(const void *p) {
+    for (klplat_msg_block *b = g_msg_blocks; b; b = b->next) {
+        const char *lo = (const char *)b->m, *hi = (const char *)(b->m + KLPLAT_MSGQ);
+        const char *c = p;
+        if (c >= lo && c < hi && (size_t)(c - lo) % sizeof b->m[0] == 0)
+            return (klplat_msg *)p;
+    }
+    return NULL;
+}
+
+// Issue a request and queue its completion, as one step: the id comes from the
+// same critical section that takes the slot, so no id is ever handed out
+// without a completion to match it. Returns 0 — a failed request, which the SDK
+// reports rather than awaits — only when no slot can be had at all.
+static uint64_t klplat_enqueue(uint32_t type, int32_t payload, const char *str,
+                               int err, int kind, const klplat_asset *asset) {
+    pthread_mutex_lock(&g_msg_mu);
+    klplat_msg *m = klplat_msg_alloc_locked();
+    uint64_t id = 0;
+    if (m) {
+        id = g_next_request++;
+        m->type = type; m->request = id; m->payload = payload; m->str = str;
+        m->err = err; m->kind = kind; m->obj = NULL;
+        if (asset) { m->asset = *asset; m->obj = &m->asset; }
+        m->state = KLPLAT_SLOT_QUEUED;
+        m->next = NULL;
+        if (g_msg_tail) g_msg_tail->next = m; else g_msg_head = m;
+        g_msg_tail = m;
+    }
+    pthread_mutex_unlock(&g_msg_mu);
+    return id;
+}
+
+static uint64_t klplat_request_failed(const char *what) {
+    fprintf(stderr, "  [plat] %s -> no memory for its completion, request refused (0)\n", what);
+    return 0;
+}
 
 // Issue a request and queue its completion. Returns the ovrRequest the guest
 // will wait on — non-zero, and matched by the message, which together are the
 // whole point.
 static uint64_t klplat_request_str(const char *what, uint32_t type,
                                    int32_t payload, const char *str) {
-    pthread_mutex_lock(&g_msg_mu);
-    uint64_t id = g_next_request++;
-    if (g_msg_tail - g_msg_head < KLPLAT_MSGQ) {
-        klplat_msg *m = &g_msgq[g_msg_tail++ % KLPLAT_MSGQ];
-        m->type = type; m->request = id; m->payload = payload; m->str = str;
-        m->err = 0; m->kind = KLPLAT_KIND_NONE; m->obj = NULL;
-    }
-    pthread_mutex_unlock(&g_msg_mu);
+    uint64_t id = klplat_enqueue(type, payload, str, 0, KLPLAT_KIND_NONE, NULL);
+    if (!id) return klplat_request_failed(what);
     fprintf(stderr, "  [plat] %s -> request %llu, completion queued "
                     "(type 0x%08x, payload %d%s%s)\n",
             what, (unsigned long long)id, type, payload,
@@ -490,14 +567,8 @@ static uint64_t klplat_request_str(const char *what, uint32_t type,
 // ...and the failing spelling: the same request/completion pair, with the
 // completion an error.
 static uint64_t klplat_request_err(const char *what, uint32_t type) {
-    pthread_mutex_lock(&g_msg_mu);
-    uint64_t id = g_next_request++;
-    if (g_msg_tail - g_msg_head < KLPLAT_MSGQ) {
-        klplat_msg *m = &g_msgq[g_msg_tail++ % KLPLAT_MSGQ];
-        m->type = type; m->request = id; m->payload = 0; m->str = NULL;
-        m->err = 1; m->kind = KLPLAT_KIND_NONE; m->obj = NULL;
-    }
-    pthread_mutex_unlock(&g_msg_mu);
+    uint64_t id = klplat_enqueue(type, 0, NULL, 1, KLPLAT_KIND_NONE, NULL);
+    if (!id) return klplat_request_failed(what);
     fprintf(stderr, "  [plat] %s -> request %llu, ERROR completion queued "
                     "(type 0x%08x)\n", what, (unsigned long long)id, type);
     return id;
@@ -508,18 +579,25 @@ static uint64_t klplat_request(const char *what, uint32_t type, int32_t payload)
     return klplat_request_str(what, type, payload, NULL);
 }
 
+// ...with the language-pack details riding on the message (copied into it; NULL
+// for none). The details are attached in the same step that queues the message,
+// so a pump on another thread cannot pop it without them.
+static uint64_t klplat_request_asset(const char *what, uint32_t type, int kind,
+                                     const klplat_asset *asset) {
+    uint64_t id = klplat_enqueue(type, 0, NULL, 0, kind, asset);
+    if (!id) return klplat_request_failed(what);
+    fprintf(stderr, "  [plat] %s -> request %llu, completion queued "
+                    "(type 0x%08x, %s)\n", what, (unsigned long long)id, type,
+            kind == KLPLAT_KIND_NONE ? "payload 0" : "0 items");
+    return id;
+}
+
 // Same queue, with the array kind the course getters switch on. `payload` is
 // the element count captured at request time.
 static uint64_t klplat_request_kind(const char *what, uint32_t type,
                                     int32_t payload, int kind) {
-    pthread_mutex_lock(&g_msg_mu);
-    uint64_t id = g_next_request++;
-    if (g_msg_tail - g_msg_head < KLPLAT_MSGQ) {
-        klplat_msg *m = &g_msgq[g_msg_tail++ % KLPLAT_MSGQ];
-        m->type = type; m->request = id; m->payload = payload; m->str = NULL;
-        m->err = 0; m->kind = kind; m->obj = NULL;
-    }
-    pthread_mutex_unlock(&g_msg_mu);
+    uint64_t id = klplat_enqueue(type, payload, NULL, 0, kind, NULL);
+    if (!id) return klplat_request_failed(what);
     fprintf(stderr, "  [plat] %s -> request %llu, completion queued "
                     "(type 0x%08x, %d item%s)\n",
             what, (unsigned long long)id, type, payload, payload == 1 ? "" : "s");
@@ -531,9 +609,15 @@ static uint64_t klplat_request_kind(const char *what, uint32_t type,
 // run — what changed is that it is no longer the ONLY thing this can say.
 static void *klplat_PopMessage(void) {
     plat_hit("ovr_PopMessage");
-    void *out = NULL;
+    klplat_msg *out = NULL;
     pthread_mutex_lock(&g_msg_mu);
-    if (g_msg_head != g_msg_tail) out = &g_msgq[g_msg_head++ % KLPLAT_MSGQ];
+    if (g_msg_head) {
+        out = g_msg_head;
+        g_msg_head = out->next;
+        if (!g_msg_head) g_msg_tail = NULL;
+        out->next = NULL;
+        out->state = KLPLAT_SLOT_POPPED;
+    }
     pthread_mutex_unlock(&g_msg_mu);
     return out;
 }
@@ -590,16 +674,11 @@ static uint64_t klplat_IAP_LaunchCheckoutFlow(const char *sku) {
     return klplat_request_err("ovr_IAP_LaunchCheckoutFlow", KLPLAT_MSG_IAP_CHECKOUT);
 }
 
-// ---- language-pack status (see plat_is_langpack_status) ---------------------
-typedef struct {
-    uint64_t id; char path[1024]; char tag[32];
-    const char *status;          // "installed" or "available"
-} klplat_asset;
-// A handful per run (the game asks for the current language, perhaps a
-// fallback), handed out round-robin: a details handle is read once, right after
-// its message, and the guest never keeps it.
-static klplat_asset g_assets[8];
-static unsigned     g_asset_next;
+// ---- language-pack status, continued ---------------------------------------
+// A status answer's details ride IN its message (klplat_msg.asset): they live
+// until the guest frees that message, and no later request can overwrite them.
+// The eight-entry round-robin they replace (g_assets) was shared between
+// threads with no lock and wrapped under any handle still held.
 
 // The game's own manifest, in the OBB directory it reads its packs from.
 // Returns 1 and fills size/tag if `name` is one of its lines.
@@ -631,22 +710,26 @@ static const char *klplat_obb_lang_pkg(void) {
     const char *t = kl_driver_target_name();
     return t && strcmp(t, "wrath2") == 0 ? "com.Sanzaru.Wrath2" : "com.Ubisoft.ACNexusVR";
 }
+// g_lang and g_nlang are written and read under g_msg_mu. The scan reads the
+// disk into a private list first and commits only the entries that changed, so
+// an element handle the guest holds (ovr_AssetDetailsArray_GetElement) keeps
+// reading the same bytes for as long as the disk does not change.
 static klplat_asset g_lang[8];
 static int          g_nlang;
 static int klplat_scan_obb_langpacks(void) {
-    g_nlang = 0;
+    klplat_asset found[sizeof g_lang / sizeof g_lang[0]];
+    int n = 0;
     const char *root = kl_jni_files_dir();
     char dir[PATH_MAX];
-    if (!root || !root[0] ||
-        snprintf(dir, sizeof dir, "%s/Android/obb/%s", root, klplat_obb_lang_pkg()) >= (int)sizeof dir)
-        return 0;
-    DIR *d = opendir(dir);
-    if (!d) return 0;
+    DIR *d = NULL;
+    if (root && root[0] &&
+        snprintf(dir, sizeof dir, "%s/Android/obb/%s", root, klplat_obb_lang_pkg()) < (int)sizeof dir)
+        d = opendir(dir);
     struct dirent *de;
-    while ((de = readdir(d)) != NULL && g_nlang < (int)(sizeof g_lang / sizeof g_lang[0])) {
+    while (d && (de = readdir(d)) != NULL && n < (int)(sizeof found / sizeof found[0])) {
         size_t nl = strlen(de->d_name);
         if (nl <= 5 || strcmp(de->d_name + nl - 5, ".lang") != 0) continue;
-        klplat_asset *a = &g_lang[g_nlang];
+        klplat_asset *a = &found[n];
         memset(a, 0, sizeof *a);
         if (nl - 5 >= sizeof a->tag ||
             snprintf(a->path, sizeof a->path, "%s/%s", dir, de->d_name) >= (int)sizeof a->path)
@@ -657,18 +740,24 @@ static int klplat_scan_obb_langpacks(void) {
         for (const char *p = de->d_name; *p; p++) a->id = a->id * 131 + (unsigned char)*p;
         if (!a->id) a->id = 1;
         a->status = "installed";
-        g_nlang++;
+        n++;
     }
-    closedir(d);
+    if (d) closedir(d);
     static int said = -1;
-    if (said != g_nlang) {
-        said = g_nlang;
+    int say = 0;
+    pthread_mutex_lock(&g_msg_mu);
+    for (int i = 0; i < n; i++)
+        if (memcmp(&g_lang[i], &found[i], sizeof found[i]) != 0) g_lang[i] = found[i];
+    g_nlang = n;
+    if (said != n) { said = n; say = 1; }
+    pthread_mutex_unlock(&g_msg_mu);
+    if (say) {
         char tags[160] = ""; size_t o = 0;
-        for (int i = 0; i < g_nlang && o + 34 < sizeof tags; i++)
-            o += (size_t)snprintf(tags + o, sizeof tags - o, "%s%s", i ? " " : "", g_lang[i].tag);
-        fprintf(stderr, "  [plat] language packs on disk: %d (%s)\n", g_nlang, tags);
+        for (int i = 0; i < n && o + 34 < sizeof tags; i++)
+            o += (size_t)snprintf(tags + o, sizeof tags - o, "%s%s", i ? " " : "", found[i].tag);
+        fprintf(stderr, "  [plat] language packs on disk: %d (%s)\n", n, tags);
     }
-    return g_nlang;
+    return n;
 }
 // A status request about one of them: the details ride on the message, as for
 // batman. A name or id that is not one of these files is not a language pack,
@@ -676,18 +765,19 @@ static int klplat_scan_obb_langpacks(void) {
 static uint64_t klplat_obb_langpack_status(const char *what, uint32_t type,
                                            const char *name, uint64_t id) {
     klplat_scan_obb_langpacks();
-    klplat_asset *a = NULL;
-    for (int i = 0; i < g_nlang && !a; i++) {
-        const char *base = strrchr(g_lang[i].path, '/');
-        if (name ? (base && strcmp(base + 1, name) == 0) : g_lang[i].id == id) a = &g_lang[i];
-    }
-    if (!a) return klplat_drm(what);
-    uint64_t req = klplat_request(what, type, 0);
+    klplat_asset a;
+    int have = 0;
     pthread_mutex_lock(&g_msg_mu);
-    for (unsigned i = g_msg_head; i != g_msg_tail; i++)
-        if (g_msgq[i % KLPLAT_MSGQ].request == req) g_msgq[i % KLPLAT_MSGQ].obj = a;
+    for (int i = 0; i < g_nlang && !have; i++) {
+        const char *base = strrchr(g_lang[i].path, '/');
+        if (name ? (base && strcmp(base + 1, name) == 0) : g_lang[i].id == id) {
+            a = g_lang[i];
+            have = 1;
+        }
+    }
     pthread_mutex_unlock(&g_msg_mu);
-    return req;
+    if (!have) return klplat_drm(what);
+    return klplat_request_asset(what, type, KLPLAT_KIND_NONE, &a);
 }
 
 // ---- the CURRENT language pack (Asgard's Wrath 2; plat_is_obb_langpack_target) ----
@@ -704,8 +794,9 @@ static int klplat_langpack_choice_path(char *out, size_t cap) {
 // (a tag in klepton-language-pack.txt, written by SetCurrent below — and a
 // chosen tag with no pack, "en", means none); with nothing chosen yet, the
 // pack of the language the game is told the device speaks, when it is there.
-static klplat_asset *klplat_langpack_current(void) {
-    if (klplat_scan_obb_langpacks() == 0) return NULL;
+// Copied into `out` under the lock; returns whether there is one.
+static int klplat_langpack_current(klplat_asset *out) {
+    if (klplat_scan_obb_langpacks() == 0) return 0;
     char tag[32] = "", path[PATH_MAX];
     int chosen = 0;
     if (klplat_langpack_choice_path(path, sizeof path)) {
@@ -716,32 +807,35 @@ static klplat_asset *klplat_langpack_current(void) {
         char country[16];
         kl_jni_locale_parts(tag, sizeof tag, country, sizeof country);
     }
-    for (int i = 0; i < g_nlang; i++)
-        if (strcasecmp(g_lang[i].tag, tag) == 0) return &g_lang[i];
-    return NULL;
+    int have = 0;
+    pthread_mutex_lock(&g_msg_mu);
+    for (int i = 0; i < g_nlang && !have; i++)
+        if (strcasecmp(g_lang[i].tag, tag) == 0) { *out = g_lang[i]; have = 1; }
+    pthread_mutex_unlock(&g_msg_mu);
+    return have;
 }
 static uint64_t klplat_LanguagePack_GetCurrent(void) {
     plat_hit("ovr_LanguagePack_GetCurrent");
     if (!plat_is_obb_langpack_target())
         return klplat_request_err("ovr_LanguagePack_GetCurrent", KLPLAT_MSG_LANGPACK_GET_CURRENT);
-    klplat_asset *a = klplat_langpack_current();
-    fprintf(stderr, "  [plat] current language pack: %s\n", a ? a->tag : "none");
+    klplat_asset a;
+    int have = klplat_langpack_current(&a);
+    fprintf(stderr, "  [plat] current language pack: %s\n", have ? a.tag : "none");
     // With none, the completion still succeeds and its language tag reads "".
-    uint64_t req = klplat_request("ovr_LanguagePack_GetCurrent", KLPLAT_MSG_LANGPACK_GET_CURRENT, 0);
-    pthread_mutex_lock(&g_msg_mu);
-    for (unsigned i = g_msg_head; i != g_msg_tail; i++)
-        if (g_msgq[i % KLPLAT_MSGQ].request == req) g_msgq[i % KLPLAT_MSGQ].obj = a;
-    pthread_mutex_unlock(&g_msg_mu);
-    return req;
+    return klplat_request_asset("ovr_LanguagePack_GetCurrent", KLPLAT_MSG_LANGPACK_GET_CURRENT,
+                                KLPLAT_KIND_NONE, have ? &a : NULL);
 }
 static uint64_t klplat_LanguagePack_SetCurrent(const char *tag) {
     plat_hit("ovr_LanguagePack_SetCurrent");
     if (!plat_is_obb_langpack_target() || !tag || !tag[0] || strlen(tag) > 31 || strpbrk(tag, "/ \t\r\n"))
         return klplat_request_err("ovr_LanguagePack_SetCurrent", KLPLAT_MSG_LANGPACK_SET_CURRENT);
     klplat_scan_obb_langpacks();
-    klplat_asset *a = NULL;
-    for (int i = 0; i < g_nlang && !a; i++)
-        if (strcasecmp(g_lang[i].tag, tag) == 0) a = &g_lang[i];
+    klplat_asset a;
+    int have = 0;
+    pthread_mutex_lock(&g_msg_mu);
+    for (int i = 0; i < g_nlang && !have; i++)
+        if (strcasecmp(g_lang[i].tag, tag) == 0) { a = g_lang[i]; have = 1; }
+    pthread_mutex_unlock(&g_msg_mu);
     // Remembered either way: a language with no pack ("en") is how a player
     // goes back to the voices the game ships with.
     char path[PATH_MAX];
@@ -750,15 +844,10 @@ static uint64_t klplat_LanguagePack_SetCurrent(const char *tag) {
         if (f) { fprintf(f, "%s\n", tag); fclose(f); }
     }
     fprintf(stderr, "  [plat] language pack '%s' chosen: %s\n", tag,
-            a ? "on the device -> current" : "not on the device (it cannot be fetched from here) -> no pack is current");
-    if (!a) return klplat_request_err("ovr_LanguagePack_SetCurrent", KLPLAT_MSG_LANGPACK_SET_CURRENT);
-    uint64_t req = klplat_request_kind("ovr_LanguagePack_SetCurrent", KLPLAT_MSG_LANGPACK_SET_CURRENT,
-                                       0, KLPLAT_KIND_LANGPACK_SET);
-    pthread_mutex_lock(&g_msg_mu);
-    for (unsigned i = g_msg_head; i != g_msg_tail; i++)
-        if (g_msgq[i % KLPLAT_MSGQ].request == req) g_msgq[i % KLPLAT_MSGQ].obj = a;
-    pthread_mutex_unlock(&g_msg_mu);
-    return req;
+            have ? "on the device -> current" : "not on the device (it cannot be fetched from here) -> no pack is current");
+    if (!have) return klplat_request_err("ovr_LanguagePack_SetCurrent", KLPLAT_MSG_LANGPACK_SET_CURRENT);
+    return klplat_request_asset("ovr_LanguagePack_SetCurrent", KLPLAT_MSG_LANGPACK_SET_CURRENT,
+                                KLPLAT_KIND_LANGPACK_SET, &a);
 }
 static uint64_t klplat_Message_GetAssetFileDownloadResult(const klplat_msg *m) {
     plat_hit("ovr_Message_GetAssetFileDownloadResult");
@@ -788,26 +877,21 @@ static uint64_t klplat_langpack_StatusByName(const char *name) {
     if (!name || strchr(name, '/') || !langpack_in_manifest(dir, name, &want, tag, sizeof tag))
         return klplat_drm("ovr_AssetFile_StatusByName");
 
-    klplat_asset *a = &g_assets[g_asset_next++ % (sizeof g_assets / sizeof g_assets[0])];
-    memset(a, 0, sizeof *a);
-    snprintf(a->path, sizeof a->path, "%s/%s", dir, name);
-    snprintf(a->tag, sizeof a->tag, "%s", tag);
-    for (const char *p = name; *p; p++) a->id = a->id * 131 + (unsigned char)*p;
-    if (!a->id) a->id = 1;
+    klplat_asset a;
+    memset(&a, 0, sizeof a);
+    snprintf(a.path, sizeof a.path, "%s/%s", dir, name);
+    snprintf(a.tag, sizeof a.tag, "%s", tag);
+    for (const char *p = name; *p; p++) a.id = a.id * 131 + (unsigned char)*p;
+    if (!a.id) a.id = 1;
     struct stat st;
-    int there = stat(a->path, &st) == 0 && (unsigned long long)st.st_size == want;
-    a->status = there ? "installed" : "available";
+    int there = stat(a.path, &st) == 0 && (unsigned long long)st.st_size == want;
+    a.status = there ? "installed" : "available";
     fprintf(stderr, "  [plat] language pack '%s' (%s): %s\n", name, tag,
             there ? "on disk at the manifest's size -> installed"
                   : "not on disk -> available (it cannot be fetched from here)");
 
-    uint64_t id = klplat_request("ovr_AssetFile_StatusByName", KLPLAT_MSG_ASSET_STATUS_NAME, 0);
-    // Attach the details to the message just queued — the newest one in the ring.
-    pthread_mutex_lock(&g_msg_mu);
-    for (unsigned i = g_msg_head; i != g_msg_tail; i++)
-        if (g_msgq[i % KLPLAT_MSGQ].request == id) g_msgq[i % KLPLAT_MSGQ].obj = a;
-    pthread_mutex_unlock(&g_msg_mu);
-    return id;
+    return klplat_request_asset("ovr_AssetFile_StatusByName", KLPLAT_MSG_ASSET_STATUS_NAME,
+                                KLPLAT_KIND_NONE, &a);
 }
 static uint64_t klplat_langpack_Message_GetAssetDetails(const klplat_msg *m) {
     plat_hit("ovr_Message_GetAssetDetails");
@@ -872,9 +956,19 @@ static const char *klplat_Message_GetString(const klplat_msg *m) {
     plat_hit("ovr_Message_GetString");
     return m ? m->str : NULL;
 }
+// The slot goes back to the pool — only a popped one, and only once: a second
+// free, a queued message or a pointer that is not a slot is ignored, so a guest
+// mistake cannot put a slot on the free list twice.
 static uint64_t klplat_FreeMessage(klplat_msg *m) {
     plat_hit("ovr_FreeMessage");
-    (void)m;                      // the ring owns it; see the KLPLAT_MSGQ note
+    pthread_mutex_lock(&g_msg_mu);
+    klplat_msg *s = m ? klplat_msg_slot_locked(m) : NULL;
+    if (s && s->state == KLPLAT_SLOT_POPPED) {
+        s->state = KLPLAT_SLOT_FREE;
+        s->next = g_msg_free;
+        g_msg_free = s;
+    }
+    pthread_mutex_unlock(&g_msg_mu);
     return 0;
 }
 
@@ -1623,8 +1717,12 @@ static uint64_t klplat_AssetDetailsArray_GetSize(const klplat_msg *m) {
 static void *klplat_AssetDetailsArray_GetElement(const klplat_msg *m, int index) {
     plat_hit("ovr_AssetDetailsArray_GetElement");
     if (!m || m->kind != KLPLAT_KIND_ASSETS) return NULL;
-    if (plat_is_obb_langpack_target())
-        return index >= 0 && index < m->payload && index < g_nlang ? &g_lang[index] : NULL;
+    if (plat_is_obb_langpack_target()) {
+        pthread_mutex_lock(&g_msg_mu);
+        void *e = index >= 0 && index < m->payload && index < g_nlang ? &g_lang[index] : NULL;
+        pthread_mutex_unlock(&g_msg_mu);
+        return e;
+    }
     if (index < 0 || index >= m->payload || index >= g_ncourses) return NULL;
     return &g_courses[index];
 }
