@@ -1000,12 +1000,12 @@ the run as an unimplemented JNI call.
   window (the app's navigation delegate calls the same function): https only
   (an `http://` address is upgraded); the host must be spotify.com,
   youtube.com, youtu.be, meta.com, oculus.com or a subdomain of one, or
-  exactly facebook.com; it must be a plain DNS name (no user part, no IPv4 or
-  IPv6 literal, no raw IDN, labels of 1-63 letters, digits and inner dashes,
-  253 characters in all). Anything else is refused and logged with the
-  reason. Google is not on the list, so a YouTube sign-in that goes to
-  accounts.google.com is refused, and the Meta browser's own button (which
-  had no web page but Google's) opens nothing. `make check` runs
+  exactly facebook.com or accounts.google.com; it must be a plain DNS name
+  (no user part, no IPv4 or IPv6 literal, no raw IDN, labels of 1-63
+  letters, digits and inner dashes, 253 characters in all). Anything else is refused and logged with the
+  reason. accounts.google.com is allowed (exactly) so a YouTube sign-in can
+  finish; the rest of Google is not, so the Meta browser's own button (which
+  had no web page but www.google.com) opens nothing. `make check` runs
   `tests/t_jni_url.c`.
 - `KL_UE_KEYBOARD_TEXT=<s>` — the default auto-close commits `<s>` instead of
   the seed (initials on a score screen). Never applied to a password field.

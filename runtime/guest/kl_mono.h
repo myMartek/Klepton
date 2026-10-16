@@ -113,7 +113,8 @@ int  kl_mono_take_open_url(char *out, int cap);
 // asks for (kl_jni_android's startActivity) and for every navigation inside the
 // window afterwards, redirects included (the app's navigation delegate). https
 // only (http is upgraded); the host must be spotify.com, youtube.com, youtu.be,
-// meta.com, oculus.com or under one of them, or exactly facebook.com; it must
+// meta.com, oculus.com or under one of them, or exactly facebook.com or
+// accounts.google.com (where a YouTube sign-in goes); it must
 // be a plain DNS name (labels of letters, digits and inner dashes, 1-63
 // characters, 253 in all), no user part, no address literal. `navigation`
 // also lets about:blank and about:srcdoc through (frames a page makes for

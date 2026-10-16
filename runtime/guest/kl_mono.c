@@ -64,11 +64,13 @@ void kl_mono_request_open_url(const char *url) {
     pthread_mutex_unlock(&g_open_url_mu);
 }
 // kl_mono_web_url's list. A host under one of the first (or equal to it) is
-// allowed; facebook.com only as itself. The services DreamSpace's buttons lead
-// to (Spotify, YouTube) and Meta's own sites.
+// allowed; facebook.com and accounts.google.com only as themselves. The services
+// DreamSpace's buttons lead to (Spotify, YouTube), Meta's own sites, and Google's
+// sign-in page, which a YouTube sign-in redirects to.
 static const struct { const char *domain; int subdomains; } g_web_hosts[] = {
     { "spotify.com", 1 }, { "youtube.com", 1 }, { "youtu.be", 1 },
     { "meta.com", 1 },    { "oculus.com", 1 },  { "facebook.com", 0 },
+    { "accounts.google.com", 0 },
 };
 int kl_mono_web_url(const char *in, char *out, unsigned long cap, int navigation,
                     const char **why) {

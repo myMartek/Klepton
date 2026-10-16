@@ -58,7 +58,10 @@ int main(void) {
     expect("data:text/html,hi",                    NULL);
     expect("https://example.com/",                 NULL);
     expect("https://www.google.com/",              NULL);   // removed from the list
-    expect("https://accounts.google.com/",         NULL);
+    expect("https://accounts.google.com/",         "https://accounts.google.com/");   // exact host only
+    expect("https://google.com/",                  NULL);
+    expect("https://x.accounts.google.com/",       NULL);
+    expect("https://accounts.google.com.evil.com/", NULL);
     expect("https://www.facebook.com/",            NULL);   // facebook.com: exact only
     expect("https://m.facebook.com/",              NULL);
     expect("https://notyoutube.com/",              NULL);
@@ -135,7 +138,10 @@ int main(void) {
     check(1, "blob:https://www.youtube.com/1234",  NULL);
     check(1, "http://www.youtube.com/redirected",  "https://www.youtube.com/redirected");   // a redirect, upgraded
     check(1, "https://consent.youtube.com/m?x=1",  "https://consent.youtube.com/m?x=1");
-    check(1, "https://accounts.google.com/ServiceLogin", NULL);   // a redirect off the list
+    check(1, "https://accounts.google.com/ServiceLogin", "https://accounts.google.com/ServiceLogin");   // YouTube sign-in redirect
+    check(1, "https://www.google.com/",            NULL);
+    check(1, "https://x.accounts.google.com/",     NULL);
+    check(1, "https://accounts.google.com.evil.com/", NULL);
 
     printf("=== intents (kl_jni_intent_web, then the rule) ===\n");
     const char *V = "android.intent.action.VIEW";
