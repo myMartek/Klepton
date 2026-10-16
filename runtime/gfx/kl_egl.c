@@ -397,11 +397,17 @@ extern const char *kl_driver_target_name(void);
 //     ours: single-sample (klgl_FramebufferTextureMultisampleMultiviewOVR here,
 //     klfb_FramebufferTexture2DMultisampleEXT in kl_glfb).
 // KL_GL_MSRTT overrides in either direction.
+// DreamSpace (x9449316705178989) is the same case on Unity 6 + OpenXR with Meta's
+// XR SDK: told none of the three names, every frame logged "GL_INVALID_FRAMEBUFFER_
+// OPERATION: Framebuffer is not complete" and nothing reached its array swapchain —
+// a black eye picture, or only the room behind its passthrough (2026-10-16).
 static int klgl_want_msrtt(void) {
     static int v = -1;
     if (v < 0) {
         extern int kl_guest_beatsaber_openxr(void);
-        v = kl_env_on("KL_GL_MSRTT", kl_guest_beatsaber_openxr());
+        const char *t = kl_driver_target_name();
+        v = kl_env_on("KL_GL_MSRTT", kl_guest_beatsaber_openxr() ||
+                                     (t && strcmp(t, "x9449316705178989") == 0));
     }
     return v;
 }

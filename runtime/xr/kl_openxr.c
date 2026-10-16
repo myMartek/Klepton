@@ -603,6 +603,13 @@ enum { KLXR_VIEW_CONFIG_PRIMARY_STEREO = 2 };
     X(xrCreatePassthroughLayerFB) X(xrDestroyPassthroughLayerFB)               \
     X(xrPassthroughLayerPauseFB) X(xrPassthroughLayerResumeFB)                 \
     X(xrPassthroughLayerSetStyleFB)                                          \
+    /* the room (served only with KL_OVRP_SCENE_ROOM) */                       \
+    X(xrDiscoverSpacesMETA) X(xrRetrieveSpaceDiscoveryResultsMETA)             \
+    X(xrGetSpaceUuidFB) X(xrEnumerateSpaceSupportedComponentsFB)               \
+    X(xrGetSpaceComponentStatusFB) X(xrSetSpaceComponentStatusFB)              \
+    X(xrGetSpaceContainerFB) X(xrGetSpaceRoomLayoutFB)                         \
+    X(xrGetSpaceBoundingBox2DFB) X(xrGetSpaceBoundingBox3DFB)                  \
+    X(xrGetSpaceBoundary2DFB) X(xrGetSpaceSemanticLabelsFB)                    \
     X(xrCreateSwapchainAndroidSurfaceKHR)
 
 // ------------------------------------------------------------------ bookkeeping
@@ -721,6 +728,8 @@ KL_XR_ENTRY_POINTS(X)
 // the guest is entitled to ask about an extension entry point it will then not
 // use. The assertion is still the call, and the stub it gets back is what
 // makes that assertion by name.
+static int klxr_is_scene_entry(const char *name);   // the room, defined with the spaces
+static int klxr_scene_on(void);
 static int klxr_GetInstanceProcAddr(void *instance, const char *name, void **function) {
     (void)instance;
     if (!function) KLXR_RET(KLXR_ERROR_FUNCTION_UNSUPPORTED);
@@ -728,6 +737,7 @@ static int klxr_GetInstanceProcAddr(void *instance, const char *name, void **fun
     if (!name) KLXR_RET(KLXR_ERROR_FUNCTION_UNSUPPORTED);
 
     klxr_row *row = klxr_row_for(name);
+    if (row && klxr_is_scene_entry(name) && !klxr_scene_on()) row = NULL;
     if (!row) {
         // Printed once per distinct name and not counted, because it is neither
         // a resolution nor a call. This is the line that will name any
@@ -1891,7 +1901,8 @@ typedef struct {
 } klxr_session;
 
 enum { KLXR_EV_SESSION_STATE = 0, KLXR_EV_INTERACTION_PROFILE = 1,
-       KLXR_EV_USER_PRESENCE = 2 };
+       KLXR_EV_USER_PRESENCE = 2,
+       KLXR_EV_SCENE = 3 };   // state = a slot in g_scene_ev (the room, below)
 
 // XR_EXT_user_presence (advertised only to missioniss, see KLXR_GATE_USER_PRESENCE).
 #define KLXR_TYPE_EVENT_DATA_USER_PRESENCE_CHANGED_EXT 1000470000
@@ -2278,6 +2289,35 @@ static void klxr_post_state(klxr_session *s, int state) {
     klxr_post_event(s, KLXR_EV_SESSION_STATE, state);
 }
 
+// ---- scene events (XR_META_spatial_entity_discovery, XR_FB_spatial_entity) ----
+// Structures as in openxr.h 1.1.60; the compiler lays them out exactly as the
+// header does (natural alignment, 64-bit pointers and handles).
+typedef struct { uint8_t data[16]; } klxr_uuid;
+#define KLXR_TYPE_EVENT_DATA_SPACE_SET_STATUS_COMPLETE_FB            1000113006
+#define KLXR_TYPE_EVENT_DATA_SPACE_DISCOVERY_RESULTS_AVAILABLE_META  1000247007
+#define KLXR_TYPE_EVENT_DATA_SPACE_DISCOVERY_COMPLETE_META           1000247008
+typedef struct { int32_t type; const void *next; uint64_t requestId; } klxr_ev_discovery_available;
+typedef struct { int32_t type; const void *next; uint64_t requestId; int32_t result; } klxr_ev_discovery_complete;
+typedef struct { int32_t type; const void *next; uint64_t requestId; int32_t result;
+                 void *space; klxr_uuid uuid; int32_t componentType; uint32_t enabled; } klxr_ev_set_status_complete;
+_Static_assert(sizeof(klxr_ev_set_status_complete) == 64, "XrEventDataSpaceSetStatusCompleteFB");
+enum { KLXR_SCENE_EV_AVAILABLE, KLXR_SCENE_EV_COMPLETE, KLXR_SCENE_EV_SET_STATUS };
+#define KLXR_SCENE_EV_MAX 64
+static struct { int what; uint64_t request; void *space; klxr_uuid uuid; int32_t comp; uint32_t enabled; }
+    g_scene_ev[KLXR_SCENE_EV_MAX];
+static unsigned g_scene_ev_next;
+static void klxr_post_scene(klxr_session *s, int what, uint64_t request, void *space,
+                            const klxr_uuid *uuid, int32_t comp, uint32_t enabled) {
+    unsigned slot = g_scene_ev_next++ % KLXR_SCENE_EV_MAX;
+    g_scene_ev[slot].what = what;
+    g_scene_ev[slot].request = request;
+    g_scene_ev[slot].space = space;
+    if (uuid) g_scene_ev[slot].uuid = *uuid; else memset(&g_scene_ev[slot].uuid, 0, sizeof g_scene_ev[slot].uuid);
+    g_scene_ev[slot].comp = comp;
+    g_scene_ev[slot].enabled = enabled;
+    klxr_post_event(s, KLXR_EV_SCENE, (int)slot);
+}
+
 static XrResult klxr_CreateSession(void *instance, const XrSessionCreateInfo *info,
                                    void **session) {
     fprintf(stderr, "  [xr] >> %s\n", "xrCreateSession");
@@ -2476,6 +2516,32 @@ static XrResult klxr_PollEvent_inner(void *instance, XrEventDataBuffer *data) {
         return KLXR_SUCCESS;
     }
 
+    if (kind == KLXR_EV_SCENE) {
+        const typeof(g_scene_ev[0]) *e = &g_scene_ev[state % KLXR_SCENE_EV_MAX];
+        if (e->what == KLXR_SCENE_EV_AVAILABLE) {
+            klxr_ev_discovery_available *ev = (klxr_ev_discovery_available *)data;
+            ev->type = KLXR_TYPE_EVENT_DATA_SPACE_DISCOVERY_RESULTS_AVAILABLE_META;
+            ev->next = NULL; ev->requestId = e->request;
+        } else if (e->what == KLXR_SCENE_EV_COMPLETE) {
+            klxr_ev_discovery_complete *ev = (klxr_ev_discovery_complete *)data;
+            ev->type = KLXR_TYPE_EVENT_DATA_SPACE_DISCOVERY_COMPLETE_META;
+            ev->next = NULL; ev->requestId = e->request; ev->result = KLXR_SUCCESS;
+        } else {
+            klxr_ev_set_status_complete *ev = (klxr_ev_set_status_complete *)data;
+            ev->type = KLXR_TYPE_EVENT_DATA_SPACE_SET_STATUS_COMPLETE_FB;
+            ev->next = NULL; ev->requestId = e->request; ev->result = KLXR_SUCCESS;
+            ev->space = e->space; ev->uuid = e->uuid;
+            ev->componentType = e->comp; ev->enabled = e->enabled;
+        }
+        static unsigned said;
+        if (said++ < 40)
+            fprintf(stderr, "  [xr] scene event: %s (request %#llx)\n",
+                    e->what == KLXR_SCENE_EV_AVAILABLE ? "discovery results available"
+                    : e->what == KLXR_SCENE_EV_COMPLETE ? "discovery complete"
+                    : "component status set", (unsigned long long)e->request);
+        return KLXR_SUCCESS;
+    }
+
     if (kind == KLXR_EV_USER_PRESENCE) {
         XrEventDataUserPresenceChangedEXT *ev = (XrEventDataUserPresenceChangedEXT *)data;
         ev->type = KLXR_TYPE_EVENT_DATA_USER_PRESENCE_CHANGED_EXT;
@@ -2516,7 +2582,36 @@ static XrResult klxr_PollEvent_inner(void *instance, XrEventDataBuffer *data) {
 // that latches.
 enum { KLXR_MAGIC_SPACE = 0x584b4c50 /* 'XKLP' */, KLXR_SPACE_MAX = 32 };
 
-enum { KLXR_REF_SPACE_VIEW = 1, KLXR_REF_SPACE_LOCAL = 2, KLXR_REF_SPACE_STAGE = 3 };
+enum { KLXR_REF_SPACE_VIEW = 1, KLXR_REF_SPACE_LOCAL = 2, KLXR_REF_SPACE_STAGE = 3,
+       KLXR_REF_SPACE_LOCAL_FLOOR = 1000426000 };
+// A room anchor handed out by xrDiscoverSpacesMETA: reference_type is this base
+// plus the anchor's index in kl_ovrp's emulated room (0 room, 1 floor, ...).
+// Nonzero, so nothing mistakes it for an action space; far from every real
+// XrReferenceSpaceType.
+enum { KLXR_REF_SPACE_ANCHOR = 0x6b6c5000, KLXR_ANCHOR_MAX = 64 };
+#define KLXR_IS_ANCHOR(t) ((t) >= KLXR_REF_SPACE_ANCHOR && (t) < KLXR_REF_SPACE_ANCHOR + KLXR_ANCHOR_MAX)
+
+// LOCAL_FLOOR: XR_EXT_local_floor, promoted to core in OpenXR 1.1, and asked
+// for by an instance created with apiVersion >= 1.1 (Unity's OpenXR plugin
+// 1.1.53). Defined as LOCAL's x, z and yaw with y on the floor. Here LOCAL is
+// the tracking origin raised to the eye height, and the origin is on the floor,
+// so LOCAL_FLOOR is the origin itself — the pose STAGE already has. Refused,
+// DreamSpace asked for it ~4000 times a run and never reached xrBeginSession: a
+// black picture with its music playing (2026-10-16).
+//   KL_XR_LOCAL_FLOOR=0|1 — default 1 for DreamSpace (x9449316705178989), else
+//       0: a guest that runs today keeps the reference spaces it was given.
+static int klxr_local_floor_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_XR_LOCAL_FLOOR", t && !strcmp(t, "x9449316705178989"));
+    }
+    // Core from 1.1 on; before that it is an extension we do not advertise.
+    uint64_t v = (uint64_t)g_instance.api_version;
+    return on && (((v >> 48) & 0xffff) > 1 ||
+                  (((v >> 48) & 0xffff) == 1 && ((v >> 32) & 0xffff) >= 1));
+}
 
 typedef struct {
     uint32_t magic;
@@ -2549,7 +2644,11 @@ static const char *klxr_ref_space_name(int t) {
         case KLXR_REF_SPACE_VIEW:  return "VIEW";
         case KLXR_REF_SPACE_LOCAL: return "LOCAL";
         case KLXR_REF_SPACE_STAGE: return "STAGE";
-        default:                   return "?";
+        case KLXR_REF_SPACE_LOCAL_FLOOR: return "LOCAL_FLOOR";
+        case KLXR_REF_SPACE_ANCHOR + 0:  return "room anchor";
+        case KLXR_REF_SPACE_ANCHOR + 1:  return "floor anchor";
+        case KLXR_REF_SPACE_ANCHOR + 2:  return "ceiling anchor";
+        default:                   return KLXR_IS_ANCHOR(t) ? "wall anchor" : "?";
     }
 }
 
@@ -2828,6 +2927,18 @@ static XrVector3f klxr_grip_pos(int hand) {
         for (int h = 0; h < 2; h++)
             off[h] = klxr_grip_vec(h, "KL_XR_GRIP_POS", "KL_XR_GRIP_POS_L",
                                    "KL_XR_GRIP_POS_R");
+        // DreamSpace draws Quest controllers on the grip pose, and on PSVR2
+        // Sense controllers they hovered above the real ones: 5 cm down was
+        // half of it, and they also wanted 2 cm further from the hand along
+        // the pointing direction (-Z) — both read off the headset, 2026-10-16.
+        // Overridden by the knobs above.
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (t && !strcmp(t, "x9449316705178989") && !kl_env_str("KL_XR_GRIP_POS", NULL) &&
+            !kl_env_str("KL_XR_GRIP_POS_L", NULL) && !kl_env_str("KL_XR_GRIP_POS_R", NULL)) {
+            off[0] = off[1] = (XrVector3f){ 0.0f, -0.10f, -0.02f };
+            fprintf(stderr, "  [xr] KL_XR_GRIP_POS: DreamSpace default 0 -0.10 -0.02 m in the grip's own frame\n");
+        }
     }
     return off[(unsigned)hand > 1 ? 0 : hand];
 }
@@ -3290,6 +3401,13 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         if (motion_known) *motion_known = kl_ovrp_head_motion(lin, ang);
     } else if (sp->reference_type == KLXR_REF_SPACE_LOCAL) {
         base.position.y = klxr_local_height();
+    } else if (KLXR_IS_ANCHOR(sp->reference_type)) {
+        // A room anchor: where kl_ovrp's emulated room puts it, in the tracking
+        // space STAGE is. Static, so no motion to report.
+        float q[4], pp[3];
+        kl_ovrp_room_pose(sp->reference_type - KLXR_REF_SPACE_ANCHOR, q, pp);
+        base.orientation = (XrQuaternionf){ q[0], q[1], q[2], q[3] };
+        base.position    = (XrVector3f){ pp[0], pp[1], pp[2] };
     } else if (sp->reference_type == 0) {
         // An ACTION space — anchored to whatever its pose action is following,
         // which here is one of the two hands. The pose and its motion come out
@@ -3340,12 +3458,12 @@ static XrResult klxr_EnumerateReferenceSpaces(void *session, uint32_t capacity,
                                               uint32_t *count_out, int32_t *spaces) {
     if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     static const int32_t have[] = { KLXR_REF_SPACE_VIEW, KLXR_REF_SPACE_LOCAL,
-                                    KLXR_REF_SPACE_STAGE };
-    const uint32_t n = sizeof have / sizeof have[0];
+                                    KLXR_REF_SPACE_STAGE, KLXR_REF_SPACE_LOCAL_FLOOR };
+    const uint32_t n = sizeof have / sizeof have[0] - (klxr_local_floor_on() ? 0 : 1);
     XrResult r = klxr_two_call(capacity, count_out, n);
     if (r != KLXR_SUCCESS || capacity == 0) return r;
     if (!spaces) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
-    memcpy(spaces, have, sizeof have);
+    memcpy(spaces, have, n * sizeof have[0]);
     return KLXR_SUCCESS;
 }
 
@@ -3365,7 +3483,8 @@ static XrResult klxr_CreateReferenceSpace(void *session,
     // refusing by name here is what makes a guest that wanted one say so.
     if (info->referenceSpaceType != KLXR_REF_SPACE_VIEW &&
         info->referenceSpaceType != KLXR_REF_SPACE_LOCAL &&
-        info->referenceSpaceType != KLXR_REF_SPACE_STAGE) {
+        info->referenceSpaceType != KLXR_REF_SPACE_STAGE &&
+        !(info->referenceSpaceType == KLXR_REF_SPACE_LOCAL_FLOOR && klxr_local_floor_on())) {
         fprintf(stderr, "  [xr] xrCreateReferenceSpace: type %d unsupported\n",
                 info->referenceSpaceType);
         KLXR_RET(KLXR_ERROR_REFERENCE_SPACE_UNSUPPORTED);
@@ -3389,6 +3508,315 @@ static XrResult klxr_DestroySpace(void *space) {
     if (!sp) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     memset(sp, 0, sizeof *sp);
     return KLXR_SUCCESS;
+}
+
+// ------------------------------------------------------------------ the room
+//
+// Meta's scene API over OpenXR — XR_META_spatial_entity_discovery to find the
+// anchors, XR_FB_spatial_entity for their uuids and components, XR_FB_scene
+// and XR_FB_spatial_entity_container for what each one is — answered from the
+// room kl_ovrp already emulates for the ovrp_* scene calls (KL_OVRP_SCENE_ROOM:
+// a box around the head, or visionOS's planes). Meta's MR Utility Kit loads its
+// room only this way; with these refused ("not served") it waits for a room
+// that never comes ("[MRUK] Extended wait timed out — genuinely wedged") and a
+// mixed-reality title shows nothing but the room's passthrough (DreamSpace,
+// 2026-10-16). Served only where that room is offered; everywhere else the
+// names stay "not served", as before.
+//
+// Each anchor is one space in the pool for as long as the guest keeps it, so a
+// rediscovery hands back the same handle instead of draining the pool.
+#define KLXR_SPACE_COMPONENT_NOT_SUPPORTED_FB (-1000113000)
+#define KLXR_TYPE_SPACE_FILTER_UUID_META       1000247003
+#define KLXR_TYPE_SPACE_FILTER_COMPONENT_META  1000247004
+typedef struct { int32_t type; const void *next; } klxr_filter_base;
+typedef struct { int32_t type; const void *next; uint32_t uuidCount; const klxr_uuid *uuids; } klxr_filter_uuid;
+typedef struct { int32_t type; const void *next; int32_t componentType; } klxr_filter_component;
+typedef struct { int32_t type; const void *next; uint32_t filterCount;
+                 const klxr_filter_base *const *filters; } klxr_discovery_info;
+typedef struct { void *space; klxr_uuid uuid; } klxr_discovery_result;
+typedef struct { int32_t type; void *next; uint32_t resultCapacityInput, resultCountOutput;
+                 klxr_discovery_result *results; } klxr_discovery_results;
+typedef struct { int32_t type; void *next; uint32_t enabled, changePending; } klxr_component_status;
+typedef struct { int32_t type; const void *next; int32_t componentType; uint32_t enabled;
+                 int64_t timeout; } klxr_component_status_set_info;
+typedef struct { int32_t type; const void *next; klxr_uuid floorUuid, ceilingUuid;
+                 uint32_t wallUuidCapacityInput, wallUuidCountOutput; klxr_uuid *wallUuids; } klxr_room_layout;
+typedef struct { int32_t type; const void *next; uint32_t uuidCapacityInput, uuidCountOutput;
+                 klxr_uuid *uuids; } klxr_space_container;
+typedef struct { int32_t type; const void *next; uint32_t vertexCapacityInput, vertexCountOutput;
+                 XrVector2f *vertices; } klxr_boundary2d;
+typedef struct { int32_t type; const void *next; uint32_t bufferCapacityInput, bufferCountOutput;
+                 char *buffer; } klxr_semantic_labels;
+typedef struct { XrVector2f offset; XrVector2f extent; } klxr_rect2d;   // XrRect2Df
+// Sizes as openxr.h lays them out (LP64), so a slip in a hand-written field shows here.
+_Static_assert(sizeof(klxr_discovery_result) == 24, "XrSpaceDiscoveryResultMETA");
+_Static_assert(sizeof(klxr_discovery_results) == 32, "XrSpaceDiscoveryResultsMETA");
+_Static_assert(sizeof(klxr_discovery_info) == 32, "XrSpaceDiscoveryInfoMETA");
+_Static_assert(sizeof(klxr_component_status_set_info) == 32, "XrSpaceComponentStatusSetInfoFB");
+_Static_assert(sizeof(klxr_room_layout) == 64, "XrRoomLayoutFB");
+_Static_assert(sizeof(klxr_space_container) == 32, "XrSpaceContainerFB");
+
+static klxr_space *g_anchor_space[KLXR_ANCHOR_MAX];
+
+static int klxr_scene_on(void) { return kl_ovrp_room_on(); }
+
+static klxr_space *klxr_anchor_space(klxr_session *s, int i) {
+    klxr_space *sp = g_anchor_space[i];
+    if (sp && sp->magic == KLXR_MAGIC_SPACE && sp->reference_type == KLXR_REF_SPACE_ANCHOR + i)
+        return sp;
+    sp = klxr_space_alloc();
+    if (!sp) return NULL;
+    memset(sp, 0, sizeof *sp);
+    sp->magic = KLXR_MAGIC_SPACE;
+    sp->session = s;
+    sp->reference_type = KLXR_REF_SPACE_ANCHOR + i;
+    sp->offset = (XrPosef){ {0, 0, 0, 1}, {0, 0, 0} };
+    g_anchor_space[i] = sp;
+    return sp;
+}
+// The anchor a space handle names, or -1.
+static int klxr_anchor_of(void *space) {
+    klxr_space *sp = klxr_space_of(space);
+    if (!sp || !KLXR_IS_ANCHOR(sp->reference_type)) return -1;
+    int i = sp->reference_type - KLXR_REF_SPACE_ANCHOR;
+    return i < kl_ovrp_room_count() ? i : -1;
+}
+
+// Discovery requests: which anchors each found, handed out once by
+// xrRetrieveSpaceDiscoveryResultsMETA.
+#define KLXR_DISC_REQS 16
+static struct { uint64_t id; int n; int idx[KLXR_ANCHOR_MAX]; } g_disc[KLXR_DISC_REQS];
+static uint64_t g_scene_next_req = 0x6b6c7800;
+
+static XrResult klxr_DiscoverSpacesMETA(void *session, const klxr_discovery_info *info,
+                                        uint64_t *requestId) {
+    fprintf(stderr, "  [xr] >> %s\n", "xrDiscoverSpacesMETA");
+    klxr_session *s = klxr_sess(session);
+    if (!s) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!info || !requestId) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    // Asking for rooms is where a load starts: the room is taken anew then (as
+    // ovrp_DiscoverSpaces does), and kept for the anchor queries that follow.
+    int asks_rooms = 0;
+    for (uint32_t f = 0; f < info->filterCount && info->filters; f++) {
+        const klxr_filter_base *h = info->filters[f];
+        if (h && h->type == KLXR_TYPE_SPACE_FILTER_COMPONENT_META &&
+            ((const klxr_filter_component *)h)->componentType == 6 /* ROOM_LAYOUT */)
+            asks_rooms = 1;
+    }
+    int n = kl_ovrp_room_prepare(asks_rooms);
+    if (n > KLXR_ANCHOR_MAX) n = KLXR_ANCHOR_MAX;
+    int pick[KLXR_ANCHOR_MAX];
+    for (int i = 0; i < n; i++) pick[i] = 1;
+    // Filters narrow, each one AND the next (as the ovrp form is answered).
+    for (uint32_t f = 0; f < info->filterCount && info->filters; f++) {
+        const klxr_filter_base *h = info->filters[f];
+        if (!h) continue;
+        if (h->type == KLXR_TYPE_SPACE_FILTER_COMPONENT_META) {
+            int c = ((const klxr_filter_component *)h)->componentType;
+            for (int i = 0; i < n; i++) if (!kl_ovrp_room_has(i, c)) pick[i] = 0;
+        } else if (h->type == KLXR_TYPE_SPACE_FILTER_UUID_META) {
+            const klxr_filter_uuid *fu = (const klxr_filter_uuid *)h;
+            int want[KLXR_ANCHOR_MAX] = {0};
+            for (uint32_t k = 0; k < fu->uuidCount && fu->uuids; k++) {
+                int i = kl_ovrp_room_index_of_uuid(fu->uuids[k].data);
+                if (i >= 0 && i < n) want[i] = 1;
+            }
+            for (int i = 0; i < n; i++) if (!want[i]) pick[i] = 0;
+        }
+    }
+    uint64_t id = ++g_scene_next_req;
+    int slot = (int)(id % KLXR_DISC_REQS), found = 0;
+    g_disc[slot].id = id;
+    for (int i = 0; i < n; i++) if (pick[i]) g_disc[slot].idx[found++] = i;
+    g_disc[slot].n = found;
+    *requestId = id;
+    fprintf(stderr, "  [xr] xrDiscoverSpacesMETA: %u filter(s) -> %d of %d room anchor(s) "
+                    "(request %#llx)\n", info->filterCount, found, n, (unsigned long long)id);
+    klxr_post_scene(s, KLXR_SCENE_EV_AVAILABLE, id, NULL, NULL, 0, 0);
+    klxr_post_scene(s, KLXR_SCENE_EV_COMPLETE, id, NULL, NULL, 0, 0);
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_RetrieveSpaceDiscoveryResultsMETA(void *session, uint64_t requestId,
+                                                       klxr_discovery_results *out) {
+    klxr_session *s = klxr_sess(session);
+    if (!s) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    int slot = (int)(requestId % KLXR_DISC_REQS);
+    if (g_disc[slot].id != requestId) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    uint32_t n = (uint32_t)g_disc[slot].n;
+    out->resultCountOutput = n;
+    if (out->resultCapacityInput == 0) return KLXR_SUCCESS;
+    if (out->resultCapacityInput < n) KLXR_RET(KLXR_ERROR_SIZE_INSUFFICIENT);
+    if (!out->results) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    for (uint32_t k = 0; k < n; k++) {
+        int i = g_disc[slot].idx[k];
+        out->results[k].space = klxr_anchor_space(s, i);
+        kl_ovrp_room_uuid(i, out->results[k].uuid.data);
+    }
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_GetSpaceUuidFB(void *space, klxr_uuid *uuid) {
+    int i = klxr_anchor_of(space);
+    if (i < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!uuid) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    kl_ovrp_room_uuid(i, uuid->data);
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_EnumerateSpaceSupportedComponentsFB(void *space, uint32_t cap,
+                                                         uint32_t *count, int32_t *types) {
+    int i = klxr_anchor_of(space);
+    if (i < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!count) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    static const int32_t all[] = { 0, 3, 5, 6, 7 };   // locatable, 2D, labels, layout, container
+    uint32_t n = 0;
+    for (size_t k = 0; k < sizeof all / sizeof all[0]; k++) if (kl_ovrp_room_has(i, all[k])) n++;
+    *count = n;
+    if (cap == 0) return KLXR_SUCCESS;
+    if (cap < n) KLXR_RET(KLXR_ERROR_SIZE_INSUFFICIENT);
+    if (!types) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    n = 0;
+    for (size_t k = 0; k < sizeof all / sizeof all[0]; k++)
+        if (kl_ovrp_room_has(i, all[k])) types[n++] = all[k];
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_GetSpaceComponentStatusFB(void *space, int32_t comp,
+                                               klxr_component_status *st) {
+    int i = klxr_anchor_of(space);
+    if (i < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!st) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (!kl_ovrp_room_has(i, comp)) return KLXR_SPACE_COMPONENT_NOT_SUPPORTED_FB;
+    st->enabled = comp == 0 ? (uint32_t)kl_ovrp_room_locatable(i) : 1;
+    st->changePending = 0;
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_SetSpaceComponentStatusFB(void *space, const klxr_component_status_set_info *info,
+                                               uint64_t *requestId) {
+    klxr_space *sp = klxr_space_of(space);
+    int i = klxr_anchor_of(space);
+    if (i < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!info || !requestId) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (!kl_ovrp_room_has(i, info->componentType)) return KLXR_SPACE_COMPONENT_NOT_SUPPORTED_FB;
+    if (info->componentType == 0) kl_ovrp_room_set_locatable(i, info->enabled != 0);
+    uint64_t id = ++g_scene_next_req;
+    *requestId = id;
+    klxr_uuid u; kl_ovrp_room_uuid(i, u.data);
+    klxr_post_scene(sp->session, KLXR_SCENE_EV_SET_STATUS, id, space, &u,
+                    info->componentType, info->enabled != 0);
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_GetSpaceContainerFB(void *session, void *space, klxr_space_container *out) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    int i = klxr_anchor_of(space);
+    if (i < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (!kl_ovrp_room_has(i, 7)) return KLXR_SPACE_COMPONENT_NOT_SUPPORTED_FB;
+    uint32_t n = (uint32_t)kl_ovrp_room_count() - 1;          // everything but the room
+    out->uuidCountOutput = n;
+    if (out->uuidCapacityInput == 0) return KLXR_SUCCESS;
+    if (out->uuidCapacityInput < n) KLXR_RET(KLXR_ERROR_SIZE_INSUFFICIENT);
+    if (!out->uuids) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    for (uint32_t k = 0; k < n; k++) kl_ovrp_room_uuid((int)k + 1, out->uuids[k].data);
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_GetSpaceRoomLayoutFB(void *session, void *space, klxr_room_layout *out) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    int i = klxr_anchor_of(space);
+    if (i < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (!kl_ovrp_room_has(i, 6)) return KLXR_SPACE_COMPONENT_NOT_SUPPORTED_FB;
+    kl_ovrp_room_uuid(1, out->floorUuid.data);
+    kl_ovrp_room_uuid(2, out->ceilingUuid.data);
+    uint32_t n = (uint32_t)kl_ovrp_room_count() - 3;
+    out->wallUuidCountOutput = n;
+    if (out->wallUuidCapacityInput == 0) return KLXR_SUCCESS;
+    if (out->wallUuidCapacityInput < n) KLXR_RET(KLXR_ERROR_SIZE_INSUFFICIENT);
+    if (!out->wallUuids) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    for (uint32_t k = 0; k < n; k++) kl_ovrp_room_uuid((int)k + 3, out->wallUuids[k].data);
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_GetSpaceBoundingBox2DFB(void *session, void *space, klxr_rect2d *out) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    int i = klxr_anchor_of(space);
+    if (i < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (!kl_ovrp_room_has(i, 3)) return KLXR_SPACE_COMPONENT_NOT_SUPPORTED_FB;
+    float w, h; kl_ovrp_room_extent(i, &w, &h);
+    out->offset = (XrVector2f){ -w / 2, -h / 2 };            // centred on the anchor
+    out->extent = (XrVector2f){ w, h };
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_GetSpaceBoundingBox3DFB(void *session, void *space, void *out) {
+    (void)out;
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (klxr_anchor_of(space) < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    return KLXR_SPACE_COMPONENT_NOT_SUPPORTED_FB;               // planes only, no volumes
+}
+
+static XrResult klxr_GetSpaceBoundary2DFB(void *session, void *space, klxr_boundary2d *out) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    int i = klxr_anchor_of(space);
+    if (i < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (!kl_ovrp_room_has(i, 3)) return KLXR_SPACE_COMPONENT_NOT_SUPPORTED_FB;
+    out->vertexCountOutput = 4;
+    if (out->vertexCapacityInput == 0) return KLXR_SUCCESS;
+    if (out->vertexCapacityInput < 4) KLXR_RET(KLXR_ERROR_SIZE_INSUFFICIENT);
+    if (!out->vertices) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    // The rectangle, counter-clockwise seen along the plane's normal (+Z).
+    float w, h; kl_ovrp_room_extent(i, &w, &h);
+    float x = w / 2, y = h / 2;
+    out->vertices[0] = (XrVector2f){ -x, -y };
+    out->vertices[1] = (XrVector2f){  x, -y };
+    out->vertices[2] = (XrVector2f){  x,  y };
+    out->vertices[3] = (XrVector2f){ -x,  y };
+    return KLXR_SUCCESS;
+}
+
+static XrResult klxr_GetSpaceSemanticLabelsFB(void *session, void *space, klxr_semantic_labels *out) {
+    if (!klxr_sess(session)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    int i = klxr_anchor_of(space);
+    if (i < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!out) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if (!kl_ovrp_room_has(i, 5)) return KLXR_SPACE_COMPONENT_NOT_SUPPORTED_FB;
+    // The count is the label's characters WITHOUT a terminating NUL: MR Utility
+    // Kit takes the buffer as (pointer, count), and with the NUL counted it read
+    // "FLOOR\0" and logged "Unrecognized label: FLOOR" for every anchor
+    // (DreamSpace, 2026-10-16). The NUL is still written when there is room.
+    // Same answer as ovrp_GetSpaceSemanticLabels.
+    const char *l = kl_ovrp_room_label(i);
+    uint32_t n = (uint32_t)strlen(l);
+    out->bufferCountOutput = n;
+    if (out->bufferCapacityInput == 0) return KLXR_SUCCESS;
+    if (out->bufferCapacityInput < n) KLXR_RET(KLXR_ERROR_SIZE_INSUFFICIENT);
+    if (!out->buffer) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    memcpy(out->buffer, l, n);
+    if (out->bufferCapacityInput > n) out->buffer[n] = 0;
+    return KLXR_SUCCESS;
+}
+
+// Is `name` one of the room's entry points? They are served only while the
+// room is offered (klxr_scene_on); elsewhere a lookup says no, as before.
+static int klxr_is_scene_entry(const char *name) {
+    static const char *const names[] = {
+        "xrDiscoverSpacesMETA", "xrRetrieveSpaceDiscoveryResultsMETA",
+        "xrGetSpaceUuidFB", "xrEnumerateSpaceSupportedComponentsFB",
+        "xrGetSpaceComponentStatusFB", "xrSetSpaceComponentStatusFB",
+        "xrGetSpaceContainerFB", "xrGetSpaceRoomLayoutFB",
+        "xrGetSpaceBoundingBox2DFB", "xrGetSpaceBoundingBox3DFB",
+        "xrGetSpaceBoundary2DFB", "xrGetSpaceSemanticLabelsFB",
+    };
+    for (size_t k = 0; k < sizeof names / sizeof names[0]; k++)
+        if (!strcmp(names[k], name)) return 1;
+    return 0;
 }
 
 // The play area, in metres. XR_SPACE_BOUNDS_UNAVAILABLE is a SUCCESS code (7),
@@ -6231,6 +6659,9 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     s->frame_begun = 0;
     klxr_note_frame_chains(info, (uint64_t)s->frames_ended);
     s->frames_ended++;
+    // A passthrough layer filed through OVRPlugin counts on this frame boundary
+    // too (Meta's OpenXR backend; see kl_ovrp_openxr_frame_end).
+    kl_ovrp_openxr_frame_end();
 
     // Back-pressure for a GLES guest that out-runs the GPU. xrWaitFrame paces by
     // the clock, and ANGLE queues a frame's commands without waiting for them,
@@ -7603,7 +8034,9 @@ static XrResult klxr_LocateSpace(void *space, void *base_space, int64_t time,
     // alternative is an unfilled struct becoming the client's basis for pose
     // prediction.
     int base_static = bs->reference_type == KLXR_REF_SPACE_LOCAL ||
-                      bs->reference_type == KLXR_REF_SPACE_STAGE;
+                      bs->reference_type == KLXR_REF_SPACE_STAGE ||
+                      bs->reference_type == KLXR_REF_SPACE_LOCAL_FLOOR ||
+                      KLXR_IS_ANCHOR(bs->reference_type);
     // ...and only if it is a measurement. Without this the derived-velocity
     // seam would report zeros as valid for exactly the samples that have no
     // basis, which is the lie this whole path exists to avoid.
@@ -7778,6 +8211,19 @@ static void klxr_install(void) {
         {"xrPassthroughLayerPauseFB",   (void *)klxr_PassthroughLayerPauseFB},
         {"xrPassthroughLayerResumeFB",  (void *)klxr_PassthroughLayerResumeFB},
         {"xrPassthroughLayerSetStyleFB",(void *)klxr_PassthroughLayerSetStyleFB},
+        // the room — see klxr_is_scene_entry for when these are handed out
+        {"xrDiscoverSpacesMETA",                 (void *)klxr_DiscoverSpacesMETA},
+        {"xrRetrieveSpaceDiscoveryResultsMETA",  (void *)klxr_RetrieveSpaceDiscoveryResultsMETA},
+        {"xrGetSpaceUuidFB",                     (void *)klxr_GetSpaceUuidFB},
+        {"xrEnumerateSpaceSupportedComponentsFB",(void *)klxr_EnumerateSpaceSupportedComponentsFB},
+        {"xrGetSpaceComponentStatusFB",          (void *)klxr_GetSpaceComponentStatusFB},
+        {"xrSetSpaceComponentStatusFB",          (void *)klxr_SetSpaceComponentStatusFB},
+        {"xrGetSpaceContainerFB",                (void *)klxr_GetSpaceContainerFB},
+        {"xrGetSpaceRoomLayoutFB",               (void *)klxr_GetSpaceRoomLayoutFB},
+        {"xrGetSpaceBoundingBox2DFB",            (void *)klxr_GetSpaceBoundingBox2DFB},
+        {"xrGetSpaceBoundingBox3DFB",            (void *)klxr_GetSpaceBoundingBox3DFB},
+        {"xrGetSpaceBoundary2DFB",               (void *)klxr_GetSpaceBoundary2DFB},
+        {"xrGetSpaceSemanticLabelsFB",           (void *)klxr_GetSpaceSemanticLabelsFB},
         // the session, and the state machine xrPollEvent drives
         {"xrCreateSession",        (void *)klxr_CreateSession},
         {"xrDestroySession",       (void *)klxr_DestroySession},
@@ -7856,6 +8302,7 @@ const char *kl_openxr_name(int i) {
 void *kl_openxr_lookup(const char *name) {
     klxr_install();
     klxr_row *row = klxr_row_for(name);
+    if (row && klxr_is_scene_entry(name) && !klxr_scene_on()) row = NULL;
     if (!row) return NULL;      // a lookup must still be able to say no
     row->resolved++;
     return row->fn;

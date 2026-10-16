@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import CompositorServices
 import UIKit
+import WebKit
 import Network
 
 /// The local-network permission, asked for while a window can show the question.
@@ -279,6 +280,16 @@ struct KleptonApp: App {
             .defaultSize(width: 560, height: 240)
             .windowResizability(.contentSize)
 
+        // A web page the guest asked to open (see KLRun.watchKeyboard). One
+        // window per URL; closing it is the way back to the game. Never brought
+        // back at launch: visionOS restores the windows that were open when an
+        // app ended, and a web window restored ALONE meant the start window — the
+        // one that boots the game — never came up (DreamSpace, 2026-10-16).
+        WindowGroup(id: "web", for: URL.self) { $url in KleptonWebWindow(url: url) }
+            .defaultSize(width: 1100, height: 760)
+            .restorationBehavior(.disabled)
+            .defaultLaunchBehavior(.suppressed)
+
         ImmersiveSpace(id: SurrealAimGuide.spaceID) { KleptonSurrealAimSpace() }
             .immersionStyle(selection: .constant(.mixed), in: .mixed)
 
@@ -357,8 +368,91 @@ final class KLRun: ObservableObject {
                     kl_mono_set_text_input(0)
                     if !KbState.shared.open { self.openWindow?(id: "kbentry") }
                 }
+                // A web page the guest asked for (an Android VIEW intent, mapped in
+                // kl_jni_android's startActivity) opens in a window of OUR OWN
+                // ("web", KleptonWebWindow), not in Safari: handing it to Safari
+                // sent this app to the background, which ends it
+                // (KL_EXIT_ON_BACKGROUND) — DreamSpace closed the moment its
+                // Spotify button opened the page (2026-10-16). A window beside the
+                // immersive space keeps the game running behind it.
+                var buf = [CChar](repeating: 0, count: 2048)
+                if kl_mono_take_open_url(&buf, Int32(buf.count)) != 0,
+                   let s = String(validatingUTF8: buf), let given = URL(string: s),
+                   let url = KleptonWebWindow.allowed(given, navigation: false) {
+                    NSLog("[app] opening \(s) in a web window")
+                    self.openWindow?(id: "web", value: url)
+                }
                 try? await Task.sleep(for: .milliseconds(200))
             }
+        }
+    }
+}
+
+/// The guest's web page, in a web view of our own. Every navigation in it — the
+/// first load, links, redirects, frames, pages that ask for a new window — goes
+/// through kl_mono_web_url, the rule the page was opened by: https on the
+/// listed hosts only, an http address upgraded. A refused one is cancelled and
+/// logged; the window stays on the page it had.
+struct KleptonWebWindow: UIViewRepresentable {
+    let url: URL?
+
+    func makeCoordinator() -> Navigation { Navigation() }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let view = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        view.navigationDelegate = context.coordinator
+        view.uiDelegate = context.coordinator
+        if let url, let ok = KleptonWebWindow.allowed(url, navigation: false) {
+            view.load(URLRequest(url: ok))
+        }
+        return view
+    }
+
+    func updateUIView(_ view: WKWebView, context: Context) {}
+
+    /// kl_mono_web_url for a URL: the address to load, or nil (refused, logged).
+    static func allowed(_ url: URL, navigation: Bool) -> URL? {
+        var out = [CChar](repeating: 0, count: 4096)
+        var why: UnsafePointer<CChar>? = nil
+        guard kl_mono_web_url(url.absoluteString, &out, UInt(out.count),
+                              navigation ? 1 : 0, &why) != 0 else {
+            NSLog("[app] web window: refused \(url.absoluteString): \(why.map { String(cString: $0) } ?? "?")")
+            return nil
+        }
+        return URL(string: String(cString: out))
+    }
+
+    @MainActor
+    final class Navigation: NSObject, WKNavigationDelegate, WKUIDelegate {
+        // Asked for every navigation, server redirects included.
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+            guard let url = action.request.url,
+                  let ok = KleptonWebWindow.allowed(url, navigation: true) else { return .cancel }
+            if url.scheme?.lowercased() == "http" {
+                // Upgraded: the https address is loaded instead (in the main frame).
+                if action.targetFrame?.isMainFrame ?? true { webView.load(URLRequest(url: ok)) }
+                return .cancel
+            }
+            return .allow
+        }
+
+        // A redirect is also checked where it lands, in case one got past the above.
+        func webView(_ webView: WKWebView,
+                     didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+            if let url = webView.url, KleptonWebWindow.allowed(url, navigation: true) == nil {
+                webView.stopLoading()
+            }
+        }
+
+        // target=_blank and window.open: no second window; the page opens here,
+        // by the same rule.
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if let url = action.request.url, let ok = KleptonWebWindow.allowed(url, navigation: false) {
+                webView.load(URLRequest(url: ok))
+            }
+            return nil
         }
     }
 }

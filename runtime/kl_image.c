@@ -623,7 +623,12 @@ static int apply_relocs(kl_image *img, const Elf64_Rela *r, size_t count) {
                                                            strcmp(t, "x4360608937312293") == 0 ||
                                                            strcmp(t, "x2773034772778845") == 0 ||
                                                            strcmp(t, "x3634830803298285") == 0 ||
-                                                           strcmp(t, "x9386827918099701") == 0));
+                                                           strcmp(t, "x9386827918099701") == 0 ||
+                    // ...and DreamSpace (x9449316705178989): Meta's MR Utility
+                    // Kit (libmrutilitykitshared) is refused without it, and the
+                    // title's scene layer then throws a NullReferenceException
+                    // (2026-10-16).
+                                                           strcmp(t, "x9449316705178989") == 0));
                 }
                 if (!on) {
                     err("unhandled relocation type %u at %#llx (ELF TLS; KL_ELF_TLSDESC=1 serves it)",

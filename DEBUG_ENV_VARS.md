@@ -107,6 +107,9 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   the display's full resolution (foveated) dropped a song to 60 Hz halfway.
   The setting is offered to two guests (`klfb_msaa_guest`): Beat Saber from
   1.45 on and Maestro, which ask for the multisampled attachment themselves.
+  DreamSpace (`x9449316705178989`) asks for it too and has it on by default
+  without the setting: its foliage is cut out by alpha-to-coverage, which
+  single-sampled leaves brown patches.
   `KL_GL_MSAA_PLAIN=1` (with `KL_GL_MSAA_MV=1`) also upgrades a guest's plain
   multiview attachments, colour and depth-stencil — what Doom 3 had in 1.1.7,
   where its picture flickered black now and then.
@@ -127,10 +130,27 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   of `KL_MIXED_BLACK` is left out. Default 1 for TRIANGLE STRATEGY
   (`x5340130476095884`), Demeo (`x3634830803298285`), Richie's Plank Experience
   (`x1642239225880682`), Synth Riders (`x2436558143118760`) and LES MILLS BODYCOMBAT
-  (`x4015163475201433`), 0 for everyone else,
+  (`x4015163475201433`) and DreamSpace (`x9449316705178989`), 0 for everyone else,
   who are told "unsupported" as before. A layer filed through
   `ovrp_EnqueueSubmitLayer2` (Unity) counts like one in `ovrp_EndFrame4`'s
-  list. Log lines start `[ovrp] passthrough:`.
+  list; for a guest on Meta's OpenXR backend (frames end in `xrEndFrame`,
+  never in `ovrp_EndFrame4`) it is counted at `xrEndFrame`
+  (`kl_ovrp_openxr_frame_end`), the eye alpha read as coverage unless
+  `KL_OVRP_PT_ALPHA` says otherwise. Log lines start `[ovrp] passthrough:`.
+- `KL_OVRP_PT_LUT=0|1` — (`kl_ovrp.c`) accept passthrough colour look-up
+  tables (`ovrp_Create/Update/DestroyPassthroughColorLut`, and a
+  MaxColorLutResolution of 64 in the capabilities) without applying them:
+  visionOS's passthrough takes no colour table, so the room keeps its own
+  colours. Only where `KL_OVRP_PASSTHROUGH` is on. Default 1 for DreamSpace
+  (`x9449316705178989`), whose themes refuse to load without one, else 0
+  (refused, as before).
+- `KL_OVRP_SCENE_ROOM=0|1` — (`kl_ovrp.c`) offer an emulated room (a box
+  around the head, or visionOS's planes with `KL_OVRP_SCENE_PLANES=1`) to the
+  ovrp_* scene calls and, for a guest on Meta's OpenXR backend, to the OpenXR
+  scene entry points (`xrDiscoverSpacesMETA`, `xrGetSpaceRoomLayoutFB`, the
+  FB spatial-entity component queries; `kl_openxr.c`), which are "not served"
+  where it is off. Default 1 for Synth Riders (`x2436558143118760`) and
+  DreamSpace (`x9449316705178989`, Meta's MR Utility Kit), else 0.
 - `KL_PLAT_USER_NAME=<name>` / `KL_PLAT_USER_ID=<number>` — (`kl_ovrplat.c`)
   the offline user's name and id (`KL_PLAT_USER`). The name is what the start
   window's "Player name" holds: the display name as typed, the Oculus ID the
@@ -199,7 +219,10 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   Saber from 1.45 on (`kl_guest_beatsaber_openxr`: the row is `beatsaber140` or
   `beatsaber` and the APK ships `libUnityOpenXR.so`), off for every other guest
   and for Beat Saber 1.40. The same test turns on that build's offline user,
-  its OVRPlugin version (1.106.0), its eye-size cap (4000) and `.full`.
+  its OVRPlugin version (1.106.0), its eye-size cap (4000) and `.full`. Also on
+  by default for DreamSpace (`x9449316705178989`, Unity 6 + OpenXR, the same
+  case), which is told OVRPlugin 1.203.0 and gets the GLES 3.0 capability
+  profile (as Space Channel does) so Unity does not skin on the GPU.
 - `KL_NET_NO_META=0|1` — (`runtime/libc/kl_shim.c`) names under oculus.com,
   oculuscdn.com, facebook.com, facebook.net, fbcdn.net and meta.com do not
   resolve (`EAI_NONAME`, as on a headset without a network); every other host
@@ -863,7 +886,8 @@ The guest's own memory management, and the three seams that used to disable it.
   (Wooorld, whose sign-in needs `libovravatar2`), `x2773034772778845`
   (Premium Bowling, same library), `x3634830803298285` (Demeo,
   `libInteractionSdk`) and `x9386827918099701` (BattleGroupVR2, the
-  `LibRuntimeOptimizer` it ships), else 0 — a title that works may ship an
+  `LibRuntimeOptimizer` it ships) and `x9449316705178989` (DreamSpace, Meta's
+  `libmrutilitykitshared`), else 0 — a title that works may ship an
   optional library it has been running without.
 - `KL_MADV_DONTNEED=remap|reusable|zero|passthrough` — how a guest
   `madvise(MADV_DONTNEED)` is served. Default `remap`. **`MADV_DONTNEED` is 4 on
@@ -964,6 +988,25 @@ the run as an unimplemented JNI call.
   immediately by committing the text the guest opened it with — the engine's
   only end-of-entry native is an accept, and an entry nobody closes leaves the
   widget holding input for the rest of the session.
+- `KL_JNI_OPEN_URL=0|1` — (`runtime/jni/kl_jni_android.c`,
+  `Context.startActivity`) an intent to VIEW a web page (or a Quest app link
+  with a web counterpart: Spotify, YouTube) is handed to the app, which opens
+  the page in a web window of its own beside the immersive space (not Safari,
+  which would send the app to the background and end it). Default 1 for
+  DreamSpace (`x9449316705178989`), else 0: the intent is logged and refused,
+  as before. One rule (`kl_mono_web_url`, `runtime/guest/kl_mono.c`) decides
+  both the page an intent opens and every navigation inside the window
+  afterwards — links, server redirects, frames, pages that ask for a new
+  window (the app's navigation delegate calls the same function): https only
+  (an `http://` address is upgraded); the host must be spotify.com,
+  youtube.com, youtu.be, meta.com, oculus.com or a subdomain of one, or
+  exactly facebook.com; it must be a plain DNS name (no user part, no IPv4 or
+  IPv6 literal, no raw IDN, labels of 1-63 letters, digits and inner dashes,
+  253 characters in all). Anything else is refused and logged with the
+  reason. Google is not on the list, so a YouTube sign-in that goes to
+  accounts.google.com is refused, and the Meta browser's own button (which
+  had no web page but Google's) opens nothing. `make check` runs
+  `tests/t_jni_url.c`.
 - `KL_UE_KEYBOARD_TEXT=<s>` — the default auto-close commits `<s>` instead of
   the seed (initials on a score screen). Never applied to a password field.
 - `KL_TRACE_DLSYM=1` — also covers the synthetic `libandroid.so` handle
@@ -3081,7 +3124,13 @@ front door is a knob, not a build. `build_run_host.sh`'s flags map onto these:
   direction, +Y up, +X right**, so a hilt centre ahead of the tracked origin has
   a NEGATIVE z.
 - `KL_XR_GRIP_POS="x,y,z"` — metres, in the grip's own frame, added to the
-  CONTROLLER pose after `KL_XR_GRIP_PITCH`. `_L`/`_R` per hand. Default 0,0,0.
+  CONTROLLER pose after `KL_XR_GRIP_PITCH`. `_L`/`_R` per hand. Default 0,0,0;
+  for DreamSpace (`x9449316705178989`) 0,-0.10,-0.02 unless any of the three is
+  set (its Quest controller models sat above PSVR2 Sense controllers).
+- `KL_XR_LOCAL_FLOOR=0|1` — (`kl_openxr.c`) offer the LOCAL_FLOOR reference
+  space (core in OpenXR 1.1; here the pose STAGE has) to an instance created
+  with apiVersion >= 1.1. Default 1 for DreamSpace (`x9449316705178989`),
+  which never began its session without it, else 0.
 
   **A pitch alone rotates where the controller points and not where it PIVOTS.**
   The frame turns about the origin the platform gave us, so the point that

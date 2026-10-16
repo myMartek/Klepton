@@ -609,10 +609,31 @@ int  kl_ovrp_eyeless_black(void);
 // so no black goes behind it — neither the one above nor the mixed space's.
 int  kl_ovrp_passthrough_live(void);
 
+// The same bookkeeping for a guest on Meta's OpenXR backend, which files its
+// passthrough layer through ovrp_EnqueueSubmitLayer2 but ends its frames with
+// xrEndFrame rather than ovrp_EndFrame4. Called by kl_openxr once per frame.
+void kl_ovrp_openxr_frame_end(void);
+
 // Hands one OpenXR event (an XrEventDataBuffer) to every handler the guest
 // registered through ovrp_RegisterOpenXREventHandler. Called by kl_openxr's
 // xrPollEvent for each event it delivers.
 void kl_ovrp_dispatch_openxr_event(void *event);
+
+// The emulated room (KL_OVRP_SCENE_ROOM), for kl_openxr's scene entry points.
+// Index 0 the room, 1 floor, 2 ceiling, 3.. walls; components are
+// XrSpaceComponentTypeFB numbers. kl_ovrp_room_prepare builds the room (anew
+// when asked to, as a discovery of rooms does) and returns how many anchors.
+int  kl_ovrp_room_on(void);
+int  kl_ovrp_room_prepare(int rebuild);
+int  kl_ovrp_room_count(void);
+void kl_ovrp_room_uuid(int i, unsigned char out[16]);
+int  kl_ovrp_room_index_of_uuid(const unsigned char u[16]);
+int  kl_ovrp_room_has(int i, int comp);
+const char *kl_ovrp_room_label(int i);
+void kl_ovrp_room_extent(int i, float *x, float *y);
+int  kl_ovrp_room_locatable(int i);
+void kl_ovrp_room_set_locatable(int i, int on);
+void kl_ovrp_room_pose(int i, float q[4], float p[3]);
 
 // How many swapchain stages we tell the guest it has (KL_OVRP_STAGES). The
 // answer to ovrp_GetEyeTextureStageCount, so it bounds every (eye, stage) key

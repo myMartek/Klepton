@@ -298,6 +298,15 @@ void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) 
         kl_egl_set_gles_version(3, 0);
         fprintf(stderr, "  [gl] Space Channel: GLES 3.0 capability profile (ANGLE backend)\n");
     }
+    if (t && !strcmp(t->name, "x9449316705178989")) {
+        // DreamSpace: the same story. Told 3.2, Unity skinned on the GPU, every
+        // Internal-Skinning kernel was invalid (~160k log lines a session) and a
+        // vertex shader reading a storage buffer failed to compile on ES 3.0 — a
+        // theme's tree showed its leaves and no trunk (2026-10-16). Told 3.0,
+        // Unity takes the paths this backend has.
+        kl_egl_set_gles_version(3, 0);
+        fprintf(stderr, "  [gl] DreamSpace: GLES 3.0 capability profile (ANGLE backend)\n");
+    }
 
 }
 

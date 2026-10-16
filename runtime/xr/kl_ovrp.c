@@ -664,6 +664,11 @@ static const char *klovrp_version_str(void) {
         // itself — "Failed to initialize Insight Passthrough ... Failure_Unsupported"
         // without calling in — and the room stays black (on device, 2026-10-15).
         else if (t && strcmp(t, "x4015163475201433") == 0)  v = "1.98.0";
+        // DreamSpace: Mixed Reality Home ships 1.203.0 and runs on Meta's OpenXR
+        // backend. Told 1.60.0, its C# never calls ovrp_UnityOpenXR_OnInstanceCreate
+        // ("[MetaXRFeature] OnInstanceCreate returned an error") and OVRPlugin
+        // stays uninitialised (2026-10-09).
+        else if (t && strcmp(t, "x9449316705178989") == 0)  v = "1.203.0";
         else                                                v = KLOVRP_VERSION_DEFAULT;
     }
     return v;
@@ -4080,6 +4085,8 @@ static void klovrp_mirror_array_eyes(const void *layer_submits, int count);
 // ...and whether the list holds a passthrough layer — the guest's own mixed
 // reality, further down beside the eye-layer switch.
 static void klovrp_pt_submits(const void *layer_submits, int count);
+static int klovrp_pt_lut_on(void);
+#define KLOVRP_PT_LUT_MAX_RES 64   // the largest colour LUT accepted (see klovrp_pt_lut_on)
 static void klovrp_mirror_enq_gl(void);
 static void klovrp_enq_age(void);
 
@@ -7649,7 +7656,8 @@ static int klovrp_pt_on(void) {
                                                     !strcmp(t, "x3634830803298285") ||
                                                     !strcmp(t, "x1642239225880682") ||
                                                     !strcmp(t, "x2436558143118760") ||
-                                                    !strcmp(t, "x4015163475201433")));
+                                                    !strcmp(t, "x4015163475201433") ||
+                                                    !strcmp(t, "x9449316705178989")));
         if (on)
             fprintf(stderr, "  [ovrp] passthrough: offered to the guest — the room shows "
                             "through the eye picture while it submits a passthrough layer\n");
@@ -7695,6 +7703,40 @@ static void klovrp_pt_resumed(int layer_id) {
     int32_t data = layer_id;                   // PassthroughLayerResumedData { int LayerId }
     klovrp_event_push(KLOVRP_EVENT_PASSTHROUGH_LAYER_RESUMED, &data, sizeof data);
     fprintf(stderr, "  [ovrp] passthrough: PassthroughLayerResumed (layer %d) queued\n", layer_id);
+}
+
+// An OpenXR-backend guest (MetaXRFeature; DreamSpace, 2026-10-16) files its
+// OVRPassthroughLayer through ovrp_EnqueueSubmitLayer2 every frame, exactly as
+// a Unity guest on the OVRPlugin path does, but its frames end in kl_openxr's
+// xrEndFrame and never reach ovrp_EndFrame4 — so klovrp_pt_submits never ran,
+// passthrough never went live, and the guest's transparent background was
+// composited over black. Here the eye picture is the OpenXR projection layer,
+// whose alpha is the standard one (1 = the guest's picture): coverage, unless
+// KL_OVRP_PT_ALPHA says otherwise. Only where passthrough is offered at all,
+// and only once such a layer has been filed: an OpenXR guest that never files
+// one keeps its eye alpha as it was.
+void kl_ovrp_openxr_frame_end(void) {
+    extern void kl_reproject_set_eye_alpha(int mode);
+    if (!klovrp_pt_on() || g_pt_enq_since >= 1000000u) return;
+    if (g_pt_enq_since < 1000000u) g_pt_enq_since++;
+    int enqueued = g_pt_enq_since <= 3;
+    int was_live = kl_ovrp_passthrough_live();
+    if (enqueued) g_pt_frames_since = 0;
+    else if (g_pt_frames_since < 1000000u) g_pt_frames_since++;
+    int live = kl_ovrp_passthrough_live();
+    static int forced = -2;
+    if (forced == -2) {
+        const char *e = kl_env_str("KL_OVRP_PT_ALPHA", NULL);
+        forced = !e || !*e ? -1
+               : (!strcmp(e, "opaque") || !strcmp(e, "0")) ? 0
+               : (!strcmp(e, "inverse") || !strcmp(e, "2")) ? 2 : 1;
+    }
+    kl_reproject_set_eye_alpha(live ? (forced >= 0 ? forced : 1) : 0);
+    if (live != was_live)
+        fprintf(stderr, "  [ovrp] passthrough: %s (OpenXR frames; layer filed through "
+                        "ovrp_EnqueueSubmitLayer2, shape %s) — eye alpha %s\n",
+                live ? "LIVE" : "off", klovrp_shape_name(g_pt_enq_shape),
+                !live ? "opaque" : forced == 0 ? "opaque" : forced == 2 ? "inverse" : "coverage");
 }
 
 static void klovrp_pt_submits(const void *layer_submits, int count) {
@@ -7818,7 +7860,9 @@ static int klovrp_scene_on(void) {
     static int on = -1;
     if (on < 0) {
         const char *t = kl_driver_target_name();
-        on = kl_env_on("KL_OVRP_SCENE_ROOM", t && !strcmp(t, "x2436558143118760"));
+        // DreamSpace (x9449316705178989) is a mixed-reality home built on rooms.
+        on = kl_env_on("KL_OVRP_SCENE_ROOM", t && (!strcmp(t, "x2436558143118760") ||
+                                                   !strcmp(t, "x9449316705178989")));
         if (on) fprintf(stderr, "  [ovrp] scene: an emulated room is offered (KL_OVRP_SCENE_ROOM)\n");
     }
     return on;
@@ -8247,6 +8291,37 @@ static uint64_t klovrp_DestroySpace(const uint64_t *space) {
     if (!klovrp_scene_on()) return OVRP_FAIL_UNSUPPORTED;
     return (space && klr_index(*space) >= 0) ? OVRP_SUCCESS : (uint64_t)-1013;
 }
+// The same room for OpenXR. A guest on Meta's OpenXR backend (MR Utility Kit:
+// xrDiscoverSpacesMETA, xrGetSpaceRoomLayoutFB, ...) asks kl_openxr, not
+// ovrp_*, and must be told about the SAME room — same anchors, same uuids, same
+// poses — so kl_openxr serves those calls from here. Indices are the room's:
+// 0 the room, 1 floor, 2 ceiling, 3.. walls. Component numbers are
+// XrSpaceComponentTypeFB's, which are the ovrp ones (KLR_C_*).
+int kl_ovrp_room_on(void) { return klovrp_scene_on(); }
+int kl_ovrp_room_prepare(int rebuild) {
+    if (!klovrp_scene_on()) return 0;
+    if (rebuild || !g_room.built) klr_build();
+    return g_room.n;
+}
+int kl_ovrp_room_count(void) { return g_room.built ? g_room.n : 0; }
+void kl_ovrp_room_uuid(int i, unsigned char out[16]) { klr_uuid(i, out); }
+int kl_ovrp_room_index_of_uuid(const unsigned char u[16]) { return klr_index_of_uuid(u); }
+int kl_ovrp_room_has(int i, int comp) { return i >= 0 && i < g_room.n && klr_has(i, comp); }
+const char *kl_ovrp_room_label(int i) { return klr_label(i); }
+void kl_ovrp_room_extent(int i, float *x, float *y) {
+    int ok = i >= 0 && i < KLR_N;
+    *x = ok ? g_room.ext_x[i] : 0; *y = ok ? g_room.ext_y[i] : 0;
+}
+int kl_ovrp_room_locatable(int i) { return i >= 0 && i < KLR_N && g_room.locatable_on[i]; }
+void kl_ovrp_room_set_locatable(int i, int on) { if (i >= 0 && i < KLR_N) g_room.locatable_on[i] = on != 0; }
+// Orientation x y z w, then position — in the tracking space the guest's head
+// is given in (klr_tracked), which is the space kl_openxr's STAGE is.
+void kl_ovrp_room_pose(int i, float q[4], float p[3]) {
+    klr_posef t = i >= 0 && i < KLR_N ? klr_tracked(i) : (klr_posef){ 0, 0, 0, 1, 0, 0, 0 };
+    q[0] = t.qx; q[1] = t.qy; q[2] = t.qz; q[3] = t.qw;
+    p[0] = t.px; p[1] = t.py; p[2] = t.pz;
+}
+
 // ovrpBool.
 static uint64_t klovrp_GetInsightPassthroughInitialized(void) {
     ovrp_hit("ovrp_GetInsightPassthroughInitialized");
@@ -8334,7 +8409,8 @@ static uint64_t klovrp_GetPassthroughCapabilities(int32_t *caps) {
     ovrp_hit("ovrp_GetPassthroughCapabilities");
     if (!caps) return OVRP_FAIL_INVALID_PARAM;
     caps[1] = klovrp_pt_on() ? 0x3 : 0;
-    caps[2] = 0;
+    // MaxColorLutResolution: what the SDK reads as "colour LUTs supported".
+    caps[2] = klovrp_pt_lut_on() ? KLOVRP_PT_LUT_MAX_RES : 0;
     return OVRP_SUCCESS;
 }
 // ovrpPassthroughPreferences { Flags } — bit 0 is "the user's home is in
@@ -10737,14 +10813,52 @@ KLOVRP_ENVDEPTH_ABSENT(klovrp_GetEnvironmentDepthTextureStageCount,
 KLOVRP_PASSTHROUGH_REFUSE(klovrp_SetInsightPassthroughKeyboardHandsIntensity,
                           "ovrp_SetInsightPassthroughKeyboardHandsIntensity")
 
-KLOVRP_PASSTHROUGH_REFUSE(klovrp_CreatePassthroughColorLut,
-                          "ovrp_CreatePassthroughColorLut")
-
-KLOVRP_PASSTHROUGH_REFUSE(klovrp_DestroyPassthroughColorLut,
-                          "ovrp_DestroyPassthroughColorLut")
-
-KLOVRP_PASSTHROUGH_REFUSE(klovrp_UpdatePassthroughColorLut,
-                          "ovrp_UpdatePassthroughColorLut")
+// Colour look-up tables for passthrough: a mixed-reality title tints or darkens
+// the room through one (DreamSpace's themes — Batcave and the rest — each build
+// one when chosen, and threw "Passthrough Color LUTs are not supported" and
+// loaded nothing; 2026-10-16). The room here is visionOS's own passthrough, which
+// takes no colour table, so a table is ACCEPTED and not applied: the theme loads
+// and the room keeps its own colours. Offered (capability and entry points) only
+// where KL_OVRP_PT_LUT says so — default DreamSpace — and refused as before
+// everywhere else. Shapes from the real 1.203.0 plugin:
+//   Create(int channels, int resolution, {uint size; void *buf} data, uint64 *lut)
+//   Update(uint64 lut, {size, buf} data)        Destroy(uint64 lut)
+// (the 16-byte data struct travels in two registers, so the out-param is x4).
+static int klovrp_pt_lut_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        on = klovrp_pt_on() && kl_env_on("KL_OVRP_PT_LUT", t && !strcmp(t, "x9449316705178989"));
+        if (on) fprintf(stderr, "  [ovrp] passthrough: colour LUTs accepted, not applied (KL_OVRP_PT_LUT)\n");
+    }
+    return on;
+}
+static uint64_t g_pt_next_lut = 0x6b6c4c00;
+static uint64_t klovrp_CreatePassthroughColorLut(int channels, int resolution, uint64_t size,
+                                                 const void *buf, uint64_t *lut) {
+    if (!klovrp_pt_lut_on()) return klovrp_refuse("ovrp_CreatePassthroughColorLut");
+    ovrp_hit("ovrp_CreatePassthroughColorLut");
+    (void)size; (void)buf;
+    if (!lut) return OVRP_FAIL_INVALID_PARAM;
+    if (resolution <= 0 || resolution > KLOVRP_PT_LUT_MAX_RES) return OVRP_FAIL_INVALID_PARAM;
+    *lut = ++g_pt_next_lut;
+    static int said;
+    if (said++ < 4)
+        fprintf(stderr, "  [ovrp] passthrough: colour LUT %d channels, %d^3 -> %#llx (not applied)\n",
+                channels, resolution, (unsigned long long)*lut);
+    return OVRP_SUCCESS;
+}
+static uint64_t klovrp_UpdatePassthroughColorLut(uint64_t lut, uint64_t size, const void *buf) {
+    if (!klovrp_pt_lut_on()) return klovrp_refuse("ovrp_UpdatePassthroughColorLut");
+    ovrp_hit("ovrp_UpdatePassthroughColorLut");
+    (void)size; (void)buf;
+    return lut ? OVRP_SUCCESS : OVRP_FAIL_INVALID_PARAM;
+}
+static uint64_t klovrp_DestroyPassthroughColorLut(uint64_t lut) {
+    if (!klovrp_pt_lut_on()) return klovrp_refuse("ovrp_DestroyPassthroughColorLut");
+    ovrp_hit("ovrp_DestroyPassthroughColorLut");
+    return lut ? OVRP_SUCCESS : OVRP_FAIL_INVALID_PARAM;
+}
 
 static uint64_t klovrp_Media_Shutdown(void) {
     ovrp_hit("ovrp_Media_Shutdown");

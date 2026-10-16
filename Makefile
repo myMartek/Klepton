@@ -535,6 +535,14 @@ build/t_jni_io: tests/t_jni_io.c $(RUNTIME) $(RUNTIME_HDRS)
 jni-io: build/t_jni_io
 	./build/t_jni_io
 
+# Which web pages the DreamSpace web window may show (kl_mono_web_url, also
+# asked by its navigation delegate) and what an intent names
+# (kl_jni_intent_web): https only, http upgraded, listed hosts only, plain DNS
+# names only. Pure string checks; in `make check`.
+build/t_jni_url: tests/t_jni_url.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_jni_url.c $(RUNTIME) $(LDLIBS)
+
 # BattleGroupVR2's own answers (fix 38), each with the proof that no other
 # title gets them: the Firebase and Vivox starts that throw instead of
 # stopping the process, and the Unity 6.2 memory callback with the title's
@@ -1039,7 +1047,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1098,6 +1106,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@echo "=== android_dlopen_ext ===" && tail -1 build/dl-ext.log
 	@./build/t_jni_io > build/jni-io.log 2>&1 || { cat build/jni-io.log; exit 1; }
 	@echo "=== JNI file output ===" && tail -1 build/jni-io.log
+	@./build/t_jni_url > build/jni-url.log 2>&1 || { cat build/jni-url.log; exit 1; }
+	@echo "=== JNI web addresses ===" && tail -1 build/jni-url.log
 	@./build/t_jni_firebase > build/jni-firebase.log 2>&1 || { cat build/jni-firebase.log; exit 1; }
 	@./build/t_jni_vivox > build/jni-vivox.log 2>&1 || { cat build/jni-vivox.log; exit 1; }
 	@./build/t_jni_memory > build/jni-memory.log 2>&1 || { cat build/jni-memory.log; exit 1; }

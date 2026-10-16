@@ -24,6 +24,7 @@
 #include "kl_ovrp.h"
 #include "kl_avdec.h"
 #include "kl_egl.h"
+#include "../guest/kl_mono.h"
 #include "kl_ndk.h"
 #include "kl_va.h"
 #include <zlib.h>
@@ -1044,11 +1045,86 @@ static klj_val klj_Uri_parse(void *env, void *clazz, const klj_val *a, int n) {
     klj_own(obj, free);
     return (klj_val){.l = obj};
 }
-// There is no Android here to hand an intent to: no other app, no browser.
-// startActivity is answered all the same (an unbound call ends the run) and the
-// intent it was given is logged and refused. (On Android an intent nobody can
-// handle throws ActivityNotFoundException; doing nothing is the gentler of the
-// two for a guest that does not catch it.)
+// There is no Android here to hand an intent to — no Meta browser, no Spotify,
+// no YouTube app. What CAN be honoured is a web page: an intent to VIEW one is
+// turned into an https URL and handed to the frontend, which opens it in a web
+// window of its own (kl_mono_request_open_url). Quest's own app links are
+// mapped to the web page of the same service — DreamSpace's Spotify button asks
+// the Meta browser for `ovrweb://pwa?packageName=com.spotify.horizon`. Anything
+// else does nothing and says so. (On Android an intent nobody can handle throws
+// ActivityNotFoundException; doing nothing is the gentler of the two for a guest
+// that does not catch it.)
+//   KL_JNI_OPEN_URL=0|1 — hand such a page to the frontend. Default 1 for
+//       DreamSpace (x9449316705178989), else 0: every other guest's intent is
+//       logged and refused, as before. Only what kl_mono_web_url allows is
+//       handed over.
+static int klj_open_url_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_JNI_OPEN_URL", t && !strcmp(t, "x9449316705178989"));
+    }
+    return on;
+}
+static const struct { const char *pkg, *url; } g_web_for_pkg[] = {
+    { "com.spotify.horizon",                       "https://open.spotify.com/" },
+    { "com.spotify.music",                         "https://open.spotify.com/" },
+    { "com.google.android.apps.youtube.vr.oculus", "https://www.youtube.com/" },
+    { "com.google.android.youtube",                "https://www.youtube.com/" },
+    { "com.youtube.horizon",                       "https://www.youtube.com/" },
+};
+static const char *klj_web_for_pkg(const char *p) {
+    if (!p || !*p) return NULL;
+    for (size_t i = 0; i < sizeof g_web_for_pkg / sizeof g_web_for_pkg[0]; i++)
+        if (!strcmp(p, g_web_for_pkg[i].pkg)) return g_web_for_pkg[i].url;
+    return NULL;
+}
+// A query parameter's value (no percent-decoding needed for the ones read here
+// except url=, which is decoded).
+static int klj_query_param(const char *uri, const char *key, char *out, size_t cap) {
+    const char *q = strchr(uri, '?');
+    size_t kl = strlen(key);
+    for (const char *p = q; p && *p; ) {
+        p++;
+        if (!strncmp(p, key, kl) && p[kl] == '=') {
+            const char *v = p + kl + 1;
+            size_t o = 0;
+            for (; *v && *v != '&' && o + 1 < cap; v++) {
+                if (*v == '%' && isxdigit((unsigned char)v[1]) && isxdigit((unsigned char)v[2])) {
+                    char h[3] = { v[1], v[2], 0 };
+                    out[o++] = (char)strtol(h, NULL, 16); v += 2;
+                } else out[o++] = *v;
+            }
+            out[o] = 0;
+            return o > 0;
+        }
+        p = strchr(p, '&');
+    }
+    return 0;
+}
+// The web address an intent names, before kl_mono_web_url's rule: its data
+// when it VIEWs an http(s) address, the url= (or the web page of the
+// packageName=) of an ovrweb:// link, or the web page of its target package.
+int kl_jni_intent_web(const char *act, const char *uri, const char *pkg,
+                      char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    out[0] = 0;
+    uri = uri ? uri : "";
+    int view = act && !strcmp(act, "android.intent.action.VIEW");
+    if (view && (!strncmp(uri, "https://", 8) || !strncmp(uri, "http://", 7))) {
+        snprintf(out, cap, "%s", uri);
+    } else if (view && !strncmp(uri, "ovrweb://", 9)) {
+        char v[1024];
+        if (klj_query_param(uri, "url", v, sizeof v))
+            snprintf(out, cap, "%s", v);
+        else if (klj_query_param(uri, "packageName", v, sizeof v) && klj_web_for_pkg(v))
+            snprintf(out, cap, "%s", klj_web_for_pkg(v));
+    } else if (klj_web_for_pkg(pkg)) {
+        snprintf(out, cap, "%s", klj_web_for_pkg(pkg));
+    }
+    return out[0] != 0;
+}
 static klj_val klj_Context_startActivity(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self;
     void *intent = n > 0 ? a[0].l : NULL;
@@ -1063,6 +1139,22 @@ static klj_val klj_Context_startActivity(void *env, void *self, const klj_val *a
         }
     pthread_mutex_unlock(&g_intent_mu);
     char brief[320];
+    char web[2048], page[2048];
+    const char *why = NULL;
+    if (klj_open_url_on() && kl_jni_intent_web(act, uri, pkg, web, sizeof web)) {
+        char where[320];
+        if (kl_mono_web_url(web, page, sizeof page, 0, &why)) {
+            KLJ_LOG("startActivity(%s %s, package %s) -> opening %s in a web window",
+                    act ? act : "(null)", klj_uri_brief(uri, brief, sizeof brief),
+                    pkg[0] ? pkg : "-", klj_uri_brief(page, where, sizeof where));
+            kl_mono_request_open_url(page);
+        } else {
+            KLJ_LOG("startActivity(%s %s, package %s) — refused to open %s: %s",
+                    act ? act : "(null)", klj_uri_brief(uri, brief, sizeof brief),
+                    pkg[0] ? pkg : "-", klj_uri_brief(web, where, sizeof where), why);
+        }
+        return (klj_val){.j = 0};
+    }
     KLJ_LOG("startActivity(%s %s, package %s) — refused: no other app to open on this host",
             act ? act : "(null)", klj_uri_brief(uri, brief, sizeof brief), pkg[0] ? pkg : "-");
     return (klj_val){.j = 0};

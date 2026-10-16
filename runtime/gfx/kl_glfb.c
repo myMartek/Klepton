@@ -4145,6 +4145,9 @@ static int klfb_msaa_guest(void) {
     const char *t = kl_driver_target_name();
     if (kl_guest_beatsaber_openxr()) return 1;
     if (t && strcmp(t, "x6963344583787383") == 0) return 1;
+    // DreamSpace: Unity 6 on OpenXR, SinglePassInstanced into an array swapchain
+    // like Beat Saber 1.45 (klgl_want_msrtt), so it asks for the same attachment.
+    if (t && strcmp(t, "x9449316705178989") == 0) return 1;
     (void)t;
     return kl_env_on("KL_GL_MSAA_PLAIN", 0) ? 2 : 0;
 }
@@ -4153,7 +4156,15 @@ static void (*g_msaa_real)(uint32_t, uint32_t, uint32_t, int32_t, int32_t, int32
 static void klfb_msaa_init(void) {
     if (g_msaa_on >= 0) return;
     g_msaa_kind   = klfb_msaa_guest();
-    g_msaa_on     = kl_env_on("KL_GL_MSAA_MV", g_msaa_kind && g_msaa_default > 0);
+    // DreamSpace: on unless switched off. Its foliage is cut out by
+    // alpha-to-coverage, which on a single-sampled attachment leaves the cut-out
+    // parts of a leaf card as solid brown patches (2026-10-16); the start window
+    // offers no setting for it, so the default is the decision.
+    extern const char *kl_driver_target_name(void);
+    const char *t = kl_driver_target_name();
+    int msaa_dflt = (g_msaa_kind && g_msaa_default > 0) ||
+                    (t && strcmp(t, "x9449316705178989") == 0);
+    g_msaa_on     = kl_env_on("KL_GL_MSAA_MV", msaa_dflt);
     g_msaa_forced = kl_env_int("KL_GL_MSAA_MV_SAMPLES", g_msaa_default > 0 ? g_msaa_default : 0);
     if (g_msaa_on) g_msaa_real = asym("glFramebufferTextureMultisampleMultiviewOVR");
     // Said once, whichever way it goes: a log then answers "was the picture

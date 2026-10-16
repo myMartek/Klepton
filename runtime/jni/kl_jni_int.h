@@ -379,5 +379,9 @@ int klj_horizon_message_field(void *obj, const char *cls, const char *name,
 // Fields of UE4's MediaPlayer14$VideoTrackInfo (kl_jni_ue4.c); 0 when obj is not one.
 int klj_ue4_media_track_field(void *obj, const char *cls, const char *name,
                               const char *sig, klj_val *out);
+// The web address an outgoing intent names (kl_jni_android.c, KL_JNI_OPEN_URL),
+// before kl_mono_web_url decides whether it may be opened: 1 with it in `out`.
+int kl_jni_intent_web(const char *act, const char *uri, const char *pkg,
+                      char *out, size_t cap);
 
 #endif /* KL_JNI_INT_H */
