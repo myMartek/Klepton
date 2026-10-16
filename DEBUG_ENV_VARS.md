@@ -1005,8 +1005,10 @@ the run as an unimplemented JNI call.
   letters, digits and inner dashes, 253 characters in all). Anything else is refused and logged with the
   reason. accounts.google.com is allowed (exactly) so a YouTube sign-in can
   finish; the rest of Google is not, so the Meta browser's own button (which
-  had no web page but www.google.com) opens nothing. `make check` runs
-  `tests/t_jni_url.c`.
+  had no web page but www.google.com) opens nothing. The window also
+  downloads nothing, gives a page no camera or microphone, and shows no link
+  previews. The log shows only the scheme and host of an address. `make check`
+  runs `tests/t_jni_url.c`.
 - `KL_UE_KEYBOARD_TEXT=<s>` — the default auto-close commits `<s>` instead of
   the seed (initials on a score screen). Never applied to a password field.
 - `KL_TRACE_DLSYM=1` — also covers the synthetic `libandroid.so` handle
