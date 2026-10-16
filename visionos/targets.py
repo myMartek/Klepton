@@ -190,6 +190,9 @@ TARGETS = {
         # staged too (real bundles from the headset, or the placeholders
         # tools/walkabout_stub_bundles.py writes).
         "stage_files": "Android/obb/com.MightyCoconut.WalkaboutMiniGolf",
+        # The NAME is load-bearing in runtime/kl_dl.c: libMetaXRAudioUnity, refused
+        # on every guest, is served to this one as a no-op library, because its
+        # audio setup throws on each call into the absent plugin (KL_METAXR_AUDIO_STUB).
         # See beatsaber128: the game draws its own hands and putter where the
         # user's are, so the system's matte of the real arms is a second pair in
         # the same place. False opens the space with

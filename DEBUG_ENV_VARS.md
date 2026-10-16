@@ -717,6 +717,14 @@ Built for the loading-pace investigation; all default off.
   **isolation** — `KL_DLOPEN_REFUSE=phonon` takes Steam Audio out of a VRChat
   run, which is the difference between reaching the frame loop and not.
   Nothing is refused by default and every refusal is named.
+- `KL_METAXR_AUDIO_STUB=0|1` — serve `libMetaXRAudioUnity` (refused on every
+  guest: it trips AMFI) as a library that is there, whose every function
+  returns 0 (ovrSuccess) and whose version calls answer the shipped plugin's
+  version. On by default for `walkabout` only: its audio setup calls the SDK's
+  managed interface and each P/Invoke behind it threw DllNotFoundException,
+  every frame, cutting those methods short. The engine registers no
+  spatializer either way. `0` is the plain refusal again; `1` serves the stub
+  on any target.
 - `KL_TRACE_DLOPEN_FRAMES=1` — on a FAILED guest `dlopen`, walk the guest stack
   and print it. A P/Invoke that cannot resolve throws from IL2CPP's resolver and
   the managed method that declared it is named nowhere in the exception; the

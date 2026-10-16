@@ -463,6 +463,62 @@ void kl_dl_report_images(FILE *f) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Meta XR Audio as an INSTALLED library whose every function does nothing.
+//
+// libMetaXRAudioUnity is refused by name for every guest (kl_target_default_
+// refused below: it trips AMFI). Most games take that as a plugin that is not
+// there. Walkabout Mini Golf does not: its own audio setup drives the SDK's
+// managed interface ("Meta XR Audio Native Interface initialized with Unity
+// plugin", "Setting spatial voice limit: 64", "No Meta XR Audio Room found,
+// setting default room"), and every P/Invoke behind those lines throws
+// DllNotFoundException — 300 in one minute's log, the room acoustics update
+// retrying each frame — and whatever the throwing method was about to do after
+// the call is not done. Served instead, for that target: a handle whose every
+// symbol is a function that returns 0, which is ovrSuccess, with the two
+// version calls answering the shipped plugin's version so a managed string
+// operation on the result does not throw. Unity's own plugin registration
+// goes through the same stub (UnityGetAudioEffectDefinitions -> 0 effects), so
+// the engine's side stays exactly what the refusal left it: no spatializer,
+// plain panning. KL_METAXR_AUDIO_STUB=0 is the refusal again; =1 serves the
+// stub on any target.
+static const char g_mxa_handle[] = "klepton-metaxraudio-stub";
+#if defined(__aarch64__)
+// 0 in both the integer and the floating-point return register: the ABI
+// has ovrResult/int/pointer results in x0 and the few float results in s0.
+__asm__(".text\n.p2align 2\n_kl_mxa_zero:\n    mov x0, #0\n    movi d0, #0\n    ret\n");
+extern void kl_mxa_zero(void);
+#else
+static long kl_mxa_zero(void) { return 0; }
+#endif
+static const char *kl_mxa_version(int *major, int *minor, int *patch) {
+    if (major) *major = 1;
+    if (minor) *minor = 103;
+    if (patch) *patch = 0;
+    return "1.103.0";
+}
+static int kl_mxa_claims(const char *path) {
+    if (!path || !strstr(path, "MetaXRAudioUnity")) return 0;
+    const char *t = kl_driver_target_name();
+    return kl_env_on("KL_METAXR_AUDIO_STUB", t && strcmp(t, "walkabout") == 0);
+}
+static void *kl_mxa_dlopen(const char *path) {
+    if (!kl_mxa_claims(path)) return NULL;
+    static int said;
+    if (!said++)
+        fprintf(stderr, "  [klepton] guest dlopen(\"%s\") -> no-op Meta XR Audio handle: "
+                        "every function returns 0 (ovrSuccess), the engine registers no "
+                        "spatializer (KL_METAXR_AUDIO_STUB=0 refuses it instead)\n", path);
+    return (void *)g_mxa_handle;
+}
+static int kl_mxa_is_handle(const void *h) { return h == (const void *)g_mxa_handle; }
+static void *kl_mxa_sym(const char *name) {
+    if (!name) return NULL;
+    if (!strcmp(name, "ovrAudio_GetVersion") || !strcmp(name, "MetaXRAudio_GetVersion"))
+        return (void *)kl_mxa_version;
+    return (void *)kl_mxa_zero;
+}
+
 // Would klb_dlopen() succeed for `path`? This is the question anything answering
 // an existence check on the guest's behalf has to ask, and it is strictly wider
 // than kl_can_load(): a library can be loadable two ways, and only one of them
@@ -497,7 +553,7 @@ int kl_can_dlopen(const char *path) {
     return kl_egl_claims(path)  || kl_opensl_claims(path)   || kl_ovrp_claims(path) ||
            kl_ovrplat_claims(path) || kl_steamapi_claims(path) || kl_mediandk_claims(path) ||
            kl_vulkan_claims(path) || kl_aaudio_claims(path) ||
-           kl_ndk_claims(path)    ||
+           kl_ndk_claims(path)    || kl_mxa_claims(path)    ||
            kl_openxr_claims(path) || kl_core_shim_claims(path) || kl_can_load(path);
 }
 
@@ -704,6 +760,9 @@ void *klb_dlopen(const char *path, int flags) {
     (void)flags;
     { static int once; if (!once) { once = 1; kl_dl_trace_shims(); } }
     if (!path) return (void *)-1;                    // RTLD_DEFAULT-ish: whole process
+    // Before the refusals: this one stands in for a library that IS refused.
+    void *mxa = kl_mxa_dlopen(path);
+    if (mxa) return mxa;
     if (kl_dlopen_refused(path)) return NULL;
     // Asked before, and it was not here. The dlerror the guest reads next is set
     // to the same text the first attempt produced, so a caller that reports it
@@ -869,6 +928,7 @@ static void *klb_dlsym_null(const char *name) {
 }
 
 void *klb_dlsym(void *handle, const char *name) {
+    if (kl_mxa_is_handle(handle)) return kl_mxa_sym(name);
     if (kl_egl_is_handle(handle)) return kl_egl_sym(name);
     if (kl_opensl_is_handle(handle)) return kl_opensl_sym(name);
     if (kl_ovrp_is_handle(handle)) return kl_ovrp_sym(name);
