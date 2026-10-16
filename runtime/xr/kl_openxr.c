@@ -1515,8 +1515,14 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
     // Steam host, not from here), so it is the target to watch for a
     // regression.
     props->vendorId = (uint32_t)kl_env_int("KL_XR_VENDOR_ID", 0x2833);
+    // steamlink-vr presents a Quest 3 (kl_jni.c, klj_field_sval), and the system
+    // name says the same so the two identities agree.
+    extern const char *kl_driver_target_name(void);
+    const char *t = kl_driver_target_name();
     snprintf(props->systemName, sizeof props->systemName, "%s",
-             kl_env_str("KL_XR_SYSTEM_NAME", "Oculus Quest2"));
+             kl_env_str("KL_XR_SYSTEM_NAME",
+                        t && strcmp(t, "steamlink-vr") == 0 ? "Meta Quest 3"
+                                                            : "Oculus Quest2"));
     // The maxima are a ceiling on what a swapchain may ask for, not a
     // recommendation — so they are generous, and the recommendation lives in
     // the view configuration below where the guest will actually read it.
@@ -3436,7 +3442,9 @@ enum { KLXR_ACTION_TYPE_BOOLEAN = 1, KLXR_ACTION_TYPE_FLOAT = 2,
 // shim presents a Quest 2 everywhere else (Build.MODEL, Build.PRODUCT
 // "hollywood", ovrp_GetSystemHeadsetType), and the guest's own oculus entry
 // reads "Oculus Quest2 (Left Controller)" / "oculus_touch". Answering a
-// different profile would be the inconsistent act.
+// different profile would be the inconsistent act. (Steam Link itself is now
+// told of a Quest 3, for the stream size; the Touch profile is still one a
+// Quest 3 runtime binds, so the lookup above is unchanged.)
 //
 // It is not, however, the ONLY profile we can drive, and it cannot be
 // hardcoded: VRChat NEVER suggests the Touch profile. A

@@ -2138,8 +2138,15 @@ static const char *klj_field_sval(const klj_field *f) {
     // Kept on the Android-10/API-29 base the rest of the surface is built for, so
     // only the hardware identity changes; if a run shows batman also gates on the
     // OS version, bump SDK_INT/RELEASE for it too.
+    // Steam Link (steamlink-vr) as well, for a different reason: it tells the
+    // Steam host which headset it is by Build.PRODUCT ("[DeviceHMD] Found device
+    // static props for: hollywood"), and the host sizes the stream for that
+    // headset's panel. As a Quest 2 the picture arrived as a 1152x4608 HEVC
+    // stream, 2304x2304 an eye once unwarped, and was upscaled from there to a
+    // display that is far finer — washed out on the Vision Pro (owner,
+    // 2026-10-16). eureka is the finest panel in its hmd_config.json table.
     const char *t = kl_driver_target_name();
-    if (t && strcmp(t, "batman") == 0) {
+    if (t && (strcmp(t, "batman") == 0 || strcmp(t, "steamlink-vr") == 0)) {
         if (!strcmp(f->name, "MODEL"))    return "Quest 3";
         if (!strcmp(f->name, "DEVICE"))   return "eureka";
         if (!strcmp(f->name, "PRODUCT"))  return "eureka";

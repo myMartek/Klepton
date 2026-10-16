@@ -955,7 +955,14 @@ The guest's own memory management, and the three seams that used to disable it.
 - `KL_BUILD_<FIELD>=<value>` — override one `android/os/Build` (or
   `Build$VERSION`) String constant, e.g. `KL_BUILD_MODEL="Pixel 6"`,
   `KL_BUILD_MANUFACTURER=Google`. The default is a Quest 2 and that is a
-  settled decision — this is the A/B, not a new answer.
+  settled decision — this is the A/B, not a new answer. Two targets present a
+  Quest 3 (eureka) instead: batman, which refuses older hardware, and
+  steamlink-vr, whose host sizes the stream for the headset it is told of
+  (`KL_XR_SYSTEM_NAME` defaults to `Meta Quest 3` there to match).
+  `KL_BUILD_PRODUCT=hollywood KL_BUILD_DEVICE=hollywood KL_BUILD_MODEL="Quest 2"
+  KL_BUILD_FINGERPRINT=oculus/hollywood/hollywood:10/SQ3A.220605.009.A1/1:user/release-keys
+  KL_XR_SYSTEM_NAME="Oculus Quest2"` is the way back for Steam Link (a Quest 2
+  streamed 2304x2304 an eye, a Quest 3 2560x2560).
 
   The override is applied at the single source both readers go through, so
   `Build.MODEL` over JNI and `ro.product.model` through
@@ -2972,6 +2979,10 @@ front door is a knob, not a build. `build_run_host.sh`'s flags map onto these:
 - `KL_XR_SYSTEM_NAME=<string>` / `KL_XR_RUNTIME_NAME=<string>` /
   `KL_XR_VENDOR_ID=<n>` — the device identity an OpenXR guest reads.
   Defaults `Oculus Quest2`, `Oculus`, `0x2833` (the Oculus USB vendor id).
+  Steam Link (steamlink-vr, exact target) is the one exception: its system
+  name defaults to `Meta Quest 3`, matching the Quest 3 (eureka) it presents in
+  `Build.*` so the host streams at that panel's size (see `KL_BUILD_<FIELD>`).
+  The variable still wins over that default on every target.
 
   **These are the ONLY things an OpenXR guest can identify the device by**, and
   they have to agree with the identity every other seam gives. We present a
