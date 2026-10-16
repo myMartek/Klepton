@@ -553,6 +553,8 @@ static const char kl_msl_overlay[] =
 "    uint     cyl_segments;\n"
 "    float    cyl_radius;\n"
 "    float    cyl_half_angle;\n"
+"    float4   color_scale;\n"
+"    float4   color_offset;\n"
 "};\n"
 "vertex VOut kl_ov_v(uint vid [[vertex_id]],\n"
 "                    constant KLOv *us [[buffer(0)]],\n"
@@ -598,6 +600,7 @@ static const char kl_msl_overlay[] =
 "        c.rgb = select(hi, lo, c.rgb <= float3(0.04045));\n"
 "    }\n"
 "    if (u.opaque != 0u) c.a = 1.0;\n"
+"    c = c * u.color_scale + u.color_offset;\n"
 "    return c;\n"
 "}\n";
 
@@ -1030,7 +1033,12 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
     u.uv_rect    = simd_make_float4(0, 0, 1, 1);
     u.slice      = 0;
     u.visible    = 0;
+    u.color_scale = simd_make_float4(1, 1, 1, 1);
     if (!ov) return u;
+    if (ov->color_override) {
+        memcpy(&u.color_scale, ov->color_scale, sizeof ov->color_scale);
+        memcpy(&u.color_offset, ov->color_offset, sizeof ov->color_offset);
+    }
 
     // The Quad and the Cylinder are implemented, and any other shape is
     // REFUSED rather than drawn as a quad: an equirect placed as a flat

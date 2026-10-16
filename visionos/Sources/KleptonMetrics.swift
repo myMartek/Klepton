@@ -158,6 +158,25 @@ enum KLMetricsPanel {
         return parts.joined(separator: "   ·   ")
     }
 
+    /// One line over a picture that is sitting still while Metal compiles the
+    /// game's shaders. There is no total to fill a bar with: Unity asks for
+    /// them one at a time and does not say how many remain, so the number
+    /// itself is the progress.
+    static let bannerPixels = (w: 1400, h: 280)
+    static let bannerSize = SIMD2<Float>(1.05, 0.21)
+
+    static func drawBanner(_ ctx: CGContext, count: UInt64) {
+        let w = CGFloat(bannerPixels.w), h = CGFloat(bannerPixels.h)
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(back)
+        ctx.addPath(CGPath(roundedRect: CGRect(x: 0, y: 0, width: w, height: h), cornerWidth: 36,
+                           cornerHeight: 36, transform: nil))
+        ctx.fillPath()
+        text(ctx, "Compiling shaders…  \(count)", x: 64, y: 168, font: font(64, bold: true), color: bright)
+        text(ctx, "The picture stays like this until this count stops.", x: 64, y: 84,
+             font: font(32), color: dim)
+    }
+
     static func drawLine(_ ctx: CGContext, sample: KLMetricsSample) {
         let w = CGFloat(linePixels.w), h = CGFloat(linePixels.h)
         ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))

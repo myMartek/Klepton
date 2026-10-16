@@ -65,6 +65,8 @@ int kl_ovrp_scene_wanted(void);
 // multiplies the velocity by a per-frame noise factor; see klovrp_derive_motion
 // for the full account. Call immediately before kl_ovrp_set_head_pose, from the
 // same thread. A frontend that never calls this keeps the call-time behaviour.
+// Publish completion only after the host has rebased head and controller poses.
+void kl_ovrp_notify_recenter(void);
 void kl_ovrp_set_head_pose_time(double t);
 
 // The pose the FRONTEND last published — where the head is now, including the
@@ -419,6 +421,8 @@ typedef struct {
     // compositor's own default, which is what every layer filed before this
     // field existed gets.
     float eq_hscale;
+    int color_override;
+    float color_scale[4], color_offset[4];
 } kl_ovrp_overlay;
 
 // How many non-eye layers the guest submitted with its most recent frame, and
@@ -427,6 +431,7 @@ typedef struct {
 // list rather than half of two — which for a static splash is the same list.
 //
 // Returns 0 and leaves *out untouched for an index that is not there.
+int kl_ovrp_layer_lifecycle_selftest(void);
 int kl_ovrp_overlay_count(void);
 int kl_ovrp_overlay_get(int i, kl_ovrp_overlay *out);
 

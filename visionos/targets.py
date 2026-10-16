@@ -1028,6 +1028,14 @@ GENERIC_ENV = "KLEPTON_GENERIC_TARGET"
 # and a loading screen that never ends.
 GENERIC_OBB = {
     "x2544573735586536": "Android/obb/com.JustAddWater.SniperEliteVR",
+    # Ghost Town (com.FireproofStudios.GhostTown, x9531494193591052) is Unity,
+    # and its scenes are loose AssetBundles the store delivers into Android's
+    # obb directory, not a main.<version>.<package>.obb. At the fade-in it
+    # asks Context.getObbDir() ("OBB Path: ...") and then reports every bundle
+    # missing. The Unity default <files>/obb is empty; the bundles are staged
+    # at <files>/Android/obb/<package>, which is the directory Android's
+    # getObbDir() names.
+    "x9531494193591052": "Android/obb/com.FireproofStudios.GhostTown",
 }
 
 

@@ -1014,6 +1014,23 @@ static int32_t klaa_getXRunCount(klaa_stream *s) {
 // model rather than one built on a promise we cannot keep.
 static int32_t klaa_isMMapUsed(klaa_stream *s) { (void)s; return 0; }
 
+// Android mmap is unavailable, but AAudio's ordinary callback transport is
+// supported. AUTO permits that fallback; NEVER makes Oboe select OpenSL ES
+// before trying AAudio at all. Stream_isMMapUsed still truthfully returns false.
+static int32_t g_mmap_policy = 2; // AAUDIO_POLICY_AUTO
+static int32_t klaa_getMMapPolicy(void) {
+    return __atomic_load_n(&g_mmap_policy, __ATOMIC_RELAXED);
+}
+static int32_t klaa_getPlatformMMapPolicy(void) { return 1; } // NEVER
+static int32_t klaa_setMMapPolicy(int32_t policy) {
+    if (policy < 0 || policy > 3) return AAUDIO_ERROR_ILLEGAL_ARGUMENT;
+    if (policy == 3) return AAUDIO_ERROR_UNAVAILABLE;
+    __atomic_store_n(&g_mmap_policy, policy, __ATOMIC_RELAXED);
+    return AAUDIO_OK;
+}
+static int32_t klaa_isMMapSupported(void) { return 0; }
+
+
 // The guest's idiom is "ask to start, then wait for STARTING to become
 // something else". Our start is synchronous, so the state has already moved
 // and this returns immediately — which is the same answer a fast HAL gives.
@@ -1116,6 +1133,11 @@ static const klaa_entry g_aaudio[] = {
     A("AAudioStream_getSessionId",                 klaa_getSessionId),
     A("AAudioStream_getXRunCount",                 klaa_getXRunCount),
     A("AAudioStream_isMMapUsed",                   klaa_isMMapUsed),
+    A("AAudio_getMMapPolicy",                      klaa_getMMapPolicy),
+    A("AAudio_setMMapPolicy",                      klaa_setMMapPolicy),
+    A("AAudio_getPlatformMMapPolicy",              klaa_getPlatformMMapPolicy),
+    A("AAudio_getPlatformMMapExclusivePolicy",     klaa_getPlatformMMapPolicy),
+    A("AAudio_isMMapSupported",                    klaa_isMMapSupported),
 };
 #undef A
 

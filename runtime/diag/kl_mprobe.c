@@ -774,6 +774,48 @@ static void probe_xr_display(unsigned frame) {
             ho ? *(int32_t *)il.object_unbox(ho) : -1,
             so ? (double)*(float *)il.object_unbox(so) : -1.0,
             oo ? (*(uint8_t *)il.object_unbox(oo) ? "1" : "0") : "?");
+
+    // Read-only snapshot; never restart XR while measuring the failure.
+    if (kl_env_on("KL_GHOSTTOWN_DIAG", 0)) {
+        const MethodInfo *instance = find_method("UnityEngine.XR.Management", "XRGeneralSettings", "get_Instance", 0);
+        const MethodInfo *manager = find_method("UnityEngine.XR.Management", "XRGeneralSettings", "get_Manager", 0);
+        const MethodInfo *active = find_method("UnityEngine.XR.Management", "XRManagerSettings", "get_activeLoader", 0);
+        const MethodInfo *complete = find_method("UnityEngine.XR.Management", "XRManagerSettings", "get_isInitializationComplete", 0);
+        Il2CppObject *settings = invoke(instance, NULL, "XR settings");
+        Il2CppObject *mgr = settings ? invoke_on(settings, manager, NULL, "XR manager") : NULL;
+        Il2CppObject *loader = mgr ? invoke_on(mgr, active, NULL, "XR loader") : NULL;
+        Il2CppObject *ready = mgr ? invoke_on(mgr, complete, NULL, "XR initialization") : NULL;
+        fprintf(stderr, "  [gt-diag f%u] manager=%p loader=%p initialized=%d\n", frame,
+                (void *)mgr, (void *)loader, ready ? *(uint8_t *)il.object_unbox(ready) : -1);
+        Il2CppClass *camera = find_class("UnityEngine", "Camera");
+        const MethodInfo *all = find_method("UnityEngine", "Resources", "FindObjectsOfTypeAll", 1);
+        const MethodInfo *go_method = find_method("UnityEngine", "Component", "get_gameObject", 0);
+        if (camera && all) {
+            void *args[] = { il.type_get_object(il.class_get_type(camera)) };
+            Il2CppObject *list = invoke(all, args, "camera census");
+            unsigned count = list ? (unsigned)il.array_length(list) : 0;
+            fprintf(stderr, "  [gt-diag f%u] cameras=%u (details capped at 32)\n", frame, count);
+            for (unsigned i = 0; i < count && i < 32; ++i) {
+                Il2CppObject *cam = ((Il2CppObject **)((uint8_t *)list + ARR_DATA))[i];
+                if (!cam) continue;
+                Il2CppObject *go = invoke_on(cam, go_method, NULL, "camera GameObject");
+                fprintf(stderr, "  [gt-diag f%u] camera[%u]=%p", frame, i, (void *)cam);
+                const char *properties[] = { "get_enabled", "get_isActiveAndEnabled", "get_stereoEnabled", "get_stereoTargetEye", "get_cullingMask", "get_targetDisplay", "get_pixelWidth", "get_pixelHeight" };
+                for (unsigned p = 0; p < sizeof properties / sizeof *properties; ++p) {
+                    const char *klass = p < 2 ? "Behaviour" : "Camera";
+                    const MethodInfo *m = find_method("UnityEngine", klass, properties[p], 0);
+                    Il2CppObject *v = invoke_on(cam, m, NULL, properties[p]);
+                    int value = v ? (p < 3 ? *(uint8_t *)il.object_unbox(v) : *(int32_t *)il.object_unbox(v)) : -1;
+                    fprintf(stderr, " %s=%d", properties[p], value);
+                }
+                const MethodInfo *ah = find_method("UnityEngine", "GameObject", "get_activeInHierarchy", 0);
+                Il2CppObject *v = go ? invoke_on(go, ah, NULL, "camera hierarchy active") : NULL;
+                const MethodInfo *rt = find_method("UnityEngine", "Camera", "get_targetTexture", 0);
+                Il2CppObject *target = invoke_on(cam, rt, NULL, "camera render target");
+                fprintf(stderr, " hierarchyActive=%d targetTexture=%p\n", v ? *(uint8_t *)il.object_unbox(v) : -1, (void *)target);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

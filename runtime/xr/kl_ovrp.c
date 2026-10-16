@@ -410,11 +410,16 @@ static int klovrp_adapter_is_phys(void) {
         // LUID answer, one device walked, "Your device does not match the
         // hardware requirements", a GLES 2.0 context and a black eye with
         // every mesh draw skipped while its audio and game ran on.
+        // Ghost Town (x9531494193591052, Unity 2022.3.49) is the sixth: the LUID
+        // answer, one device walked, the probe instance destroyed, then a GLES2
+        // context and "shader compiler platform 5" — the left eye stayed on
+        // that black frame and the right eye was never given a layer.
         on = kl_env_on("KL_OVRP_ADAPTER_PHYS",
                        t && (strcmp(t, "walkabout") == 0 || strcmp(t, "batman") == 0 ||
                              strcmp(t, "x5269080709783454") == 0 ||
                              strcmp(t, "x3634830803298285") == 0 ||
-                             strcmp(t, "x5245041552210029") == 0));
+                             strcmp(t, "x5245041552210029") == 0 ||
+                             strcmp(t, "x9531494193591052") == 0));
     }
     return on;
 }
@@ -832,10 +837,14 @@ static uint64_t klovrp_GetSystemHeadsetType2(int *out) {
 // Real plugin is ovrpResult + int* out-param (0x172530), NOT a scalar return;
 // it NULL-checks x0 and writes the count. Nothing has ever been recentered on
 // this host, so the honest answer is 0.
+static int g_host_recenter_count;
+void kl_ovrp_notify_recenter(void) {
+    __atomic_add_fetch(&g_host_recenter_count, 1, __ATOMIC_RELEASE);
+}
 static uint64_t klovrp_GetLocalTrackingSpaceRecenterCount(int *out) {
     ovrp_hit("ovrp_GetLocalTrackingSpaceRecenterCount");
     if (!out) return -1001;
-    *out = 0;
+    *out = __atomic_load_n(&g_host_recenter_count, __ATOMIC_ACQUIRE);
     return OVRP_SUCCESS;
 }
 
@@ -1785,7 +1794,10 @@ static int klovrp_unify_default(void) {
     // viewport: eye0 0,0 3936x2465 eye1 0,0 3936x2465`, "Symmetric Projection
     // - True" in its own log — and its owner on device, 2026-10-12: the two
     // eyes show no picture that can be laid over one another.
-    static const char *on[] = { "intotheradius", "x5817243991680545", "walkabout", "x3634830803298285" };
+    // Ghost Town uses the same widened eye texture and full-width viewport
+    // for both eyes (3936x2465, then 5088x3204 with its resolution scale).
+    // Match the compositor's cones to that symmetric-projection rendering.
+    static const char *on[] = { "intotheradius", "x5817243991680545", "walkabout", "x3634830803298285", "x9531494193591052" };
     const char *t = kl_driver_target_name();
     if (t) for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++)
         if (strcmp(t, on[i]) == 0) return 1;
@@ -4393,7 +4405,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
                                  int layer_submit_count, void *sync) {
     ovrp_hit("ovrp_EndFrame4");
     if (g_loadvid_frames_since < 1000000u) g_loadvid_frames_since++;
-    if (g_enq_frames_since < 1000000u) g_enq_frames_since++;
+    klovrp_enq_age();
     { static unsigned n; if (n < 48 || n % 300 == 0 || klovrp_pose_trace(n)) {
         uint64_t tid=0; pthread_threadid_np(NULL,&tid);
         fprintf(stderr, "  [ovrp] frameloop EndFrame4 #%u frameIdx=%d layers=%d "
@@ -7367,7 +7379,7 @@ static int klovrp_enq_owns_overlays(void) {
         const char *t = kl_driver_target_name();
         v = kl_env_on("KL_OVRP_ENQ_OWNS_OVERLAYS", t && !strcmp(t, "x5812519008825194"));
     }
-    return v && g_enq_frames_since < KLOVRP_ENQ_LIVE_FRAMES;
+    return v && __atomic_load_n(&g_enq_frames_since, __ATOMIC_RELAXED) < KLOVRP_ENQ_LIVE_FRAMES;
 }
 
 static void klovrp_record_overlays(const void *layer_submits, int count) {
@@ -8518,7 +8530,31 @@ static int klovrp_submit_stage(const void *layer_submits, int count) {
         const ovrp_layer_submit *s = list[i];
         if (!s) continue;
         struct klovrp_layer *l = klovrp_layer(s->layer_id);
-        if (l && l->is_eye) return s->texture_stage;
+        if (l && l->is_eye) {
+            // A bounded joint record distinguishes a residual eye picture from
+            // a still-published quad without guessing from its visual shape.
+            static unsigned frames, reports;
+            if (kl_env_on("KL_GHOSTTOWN_OVERLAY_TRACE", 0) &&
+                frames++ % 300 == 0 && reports++ < 120) {
+                pthread_mutex_lock(&g_frames.mu);
+                fprintf(stderr, "  [gt-scene] eye=%d stage=%d desc=%dx%d storage=%dx%d "
+                                "viewport=%d,%d %dx%d serial=%llu overlays=%d enq_age=%u",
+                        l->id, s->texture_stage, l->desc.texture_size.w, l->desc.texture_size.h,
+                        g_eye_storage_w, g_eye_storage_h,
+                        s->viewport[0].x, s->viewport[0].y, s->viewport[0].w, s->viewport[0].h,
+                        (unsigned long long)g_frames.serial, g_overlays.n,
+                        __atomic_load_n(&g_enq_frames_since, __ATOMIC_RELAXED));
+                for (int j = 0; j < g_overlays.n; ++j) {
+                    const kl_ovrp_overlay *o = &g_overlays.v[j];
+                    fprintf(stderr, " {id=%d stage=%d tex=%llx flags=%x head=%d pos=%.3f/%.3f/%.3f}",
+                            o->layer_id, o->stage, o->tex, o->flags, o->head_locked,
+                            o->pose[4], o->pose[5], o->pose[6]);
+                }
+                fprintf(stderr, "\n");
+                pthread_mutex_unlock(&g_frames.mu);
+            }
+            return s->texture_stage;
+        }
     }
     return -1;
 }
@@ -8670,8 +8706,13 @@ static int klovrp_spacewarp_tex(void) {
     static int v = -1;
     if (v < 0) {
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_OVRP_SPACEWARP_TEX", t && (!strcmp(t, "x5812519008825194") ||
-                                                     !strcmp(t, "x5245041552210029")));
+        // Arizona Sunshine 2 and Ghost Town both request SpaceWarp
+        // (flags=0x1300). Ghost Town's native provider has the four
+        // stack-address outputs in x3..x6 required by this ABI.
+        v = kl_env_on("KL_OVRP_SPACEWARP_TEX", t &&
+                      (!strcmp(t, "x5812519008825194") ||
+                       !strcmp(t, "x5245041552210029") ||
+                       !strcmp(t, "x9531494193591052")));
     }
     return v;
 }
@@ -9052,6 +9093,7 @@ static uint64_t klovrp_EnqueueSetupLayer2(const ovrp_layer_desc_eyefov *desc,
 // Record each submitted non-eye layer into a per-frame set and publish it to the
 // compositor at the frame boundary — the same layer id appearing again (see the
 // note at the test for why frameIndex is no part of it).
+static pthread_mutex_t g_enq_mu = PTHREAD_MUTEX_INITIALIZER;
 static kl_ovrp_overlay g_enq[KLOVRP_MAX_LAYERS];
 static int g_enq_n;
 // Every layer id submitted in the frame being gathered, hidden ones included —
@@ -9063,6 +9105,24 @@ static int g_enq_pub[KLOVRP_MAX_LAYERS], g_enq_pub_n;
 static unsigned long long g_enq_pub_tex[KLOVRP_MAX_LAYERS];   // texL as submitted
 static pthread_mutex_t g_enq_pub_mu = PTHREAD_MUTEX_INITIALIZER;
 static void klovrp_enq_flush(void) {
+    if (kl_env_on("KL_GHOSTTOWN_OVERLAY_TRACE", 0)) {
+        static unsigned reports;
+        static int previous_count = -1;
+        static unsigned lines;
+        if (lines < 160 && (reports < 8 || previous_count != g_enq_n || reports % 300 == 0)) {
+            ++lines;
+            fprintf(stderr, "  [gt-overlay] publish #%u count=%d", reports, g_enq_n);
+            for (int i = 0; i < g_enq_n; ++i) {
+                const kl_ovrp_overlay *o = &g_enq[i];
+                fprintf(stderr, " {id=%d stage=%d flags=%x size=%dx%d tint=%d scale=%.2f/%.2f/%.2f/%.2f}",
+                        o->layer_id, o->stage, o->flags, o->tex_w, o->tex_h, o->color_override,
+                        o->color_scale[0], o->color_scale[1], o->color_scale[2], o->color_scale[3]);
+            }
+            fprintf(stderr, "\n");
+        }
+        previous_count = g_enq_n;
+        ++reports;
+    }
     // An EMPTY set is published too: a frame in which every panel was hidden
     // has to take the previous frame's panels down, not leave them standing.
     kl_ovrp_overlays_external(g_enq, g_enq_n);
@@ -9092,15 +9152,22 @@ static void klovrp_enq_flush(void) {
 // player for good. After KLOVRP_ENQ_LIVE_FRAMES end-of-frames with no enqueue,
 // publish the empty set once, the same decision EndFrame4's path makes.
 static void klovrp_enq_age(void) {
-    if (g_enq_frames_since >= 1000000u) return;          // never enqueued
-    if (++g_enq_frames_since != KLOVRP_ENQ_LIVE_FRAMES) return;
+    pthread_mutex_lock(&g_enq_mu);
+    unsigned age = __atomic_load_n(&g_enq_frames_since, __ATOMIC_RELAXED);
+    if (age >= 1000000u) { pthread_mutex_unlock(&g_enq_mu); return; }
+    __atomic_store_n(&g_enq_frames_since, ++age, __ATOMIC_RELAXED);
+    if (age != KLOVRP_ENQ_LIVE_FRAMES) { pthread_mutex_unlock(&g_enq_mu); return; }
+    // Expiration is a batch boundary too. EndFrame4 previously aged only the
+    // visible set, leaving the unfinished batch to resurrect on the next panel.
+    g_enq_n = 0;
+    g_enq_seen_n = 0;
     pthread_mutex_lock(&g_enq_pub_mu);
     int had = g_enq_pub_n;
     g_enq_pub_n = 0;
     pthread_mutex_unlock(&g_enq_pub_mu);
+    if (had) kl_ovrp_overlays_external(g_enq, 0);
+    pthread_mutex_unlock(&g_enq_mu);
     if (!had) return;
-    g_enq_n = 0;
-    kl_ovrp_overlays_external(g_enq, 0);
     static int said;
     if (said++ < 8)
         fprintf(stderr, "  [ovrp] enqueued panels: none submitted for %d frames — "
@@ -9180,7 +9247,8 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
                                            int override_color, const float *color_scale,
                                            const float *color_offset) {
     ovrp_hit("ovrp_EnqueueSubmitLayer2");
-    g_enq_frames_since = 0;
+    pthread_mutex_lock(&g_enq_mu);
+    __atomic_store_n(&g_enq_frames_since, 0, __ATOMIC_RELAXED);
     (void)override_color; (void)color_scale; (void)color_offset;
     { struct klovrp_layer *eq = klovrp_layer(layer_id);
       if (eq && !eq->is_eye && eq->desc.shape == 5 && !(flags & 0x200))
@@ -9230,19 +9298,30 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
     }
     if (g_enq_seen_n < KLOVRP_MAX_LAYERS) g_enq_seen[g_enq_seen_n++] = layer_id;
     (void)frame_index;
-    if (flags & KLOVRP_SUBMIT_HIDDEN) return OVRP_SUCCESS;
+    if (flags & KLOVRP_SUBMIT_HIDDEN) {
+        pthread_mutex_unlock(&g_enq_mu);
+        return OVRP_SUCCESS;
+    }
     struct klovrp_layer *l = klovrp_layer(layer_id);
     // A passthrough layer has no picture to hand on; that it is being filed is
     // the whole of it (klovrp_pt_submits).
     if (l && !l->is_eye && klovrp_shape_is_passthrough(l->desc.shape)) {
         klovrp_pt_enqueued(l->desc.shape);
         if (klovrp_pt_on()) klovrp_pt_resumed(layer_id);
+        pthread_mutex_unlock(&g_enq_mu);
         return OVRP_SUCCESS;
     }
     if (l && !l->is_eye && g_enq_n < KLOVRP_MAX_LAYERS) {
         kl_ovrp_overlay *o = &g_enq[g_enq_n++];
         memset(o, 0, sizeof *o);
         o->layer_id = layer_id;
+        if (kl_env_on("KL_GHOSTTOWN_OVERLAY_COLOR", 0) &&
+            override_color == 1 && color_scale && color_offset &&
+            klovrp_color_sane(color_scale) && klovrp_color_sane(color_offset)) {
+            o->color_override = 1;
+            memcpy(o->color_scale, color_scale, sizeof o->color_scale);
+            memcpy(o->color_offset, color_offset, sizeof o->color_offset);
+        }
         o->shape    = l->desc.shape;
         o->stage    = 0;   // these layers are set up single-buffered at stage 0
         o->tex_w    = l->desc.texture_size.w;
@@ -9287,6 +9366,7 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
             }
         }
     }
+    pthread_mutex_unlock(&g_enq_mu);
     // Diagnostic: every ~600 submits, dump the layer images' lit counts so we
     // can see if the guest is drawing UI into them or submitting empties.
     static unsigned cap;
@@ -9314,11 +9394,48 @@ static uint64_t klovrp_SetOverlayQuad3(void) {
 
 static uint64_t klovrp_DestroyLayer(int layer_id) {
     ovrp_hit("ovrp_DestroyLayer");
+    pthread_mutex_lock(&g_enq_mu);
     struct klovrp_layer *l = klovrp_layer(layer_id);
+    if (kl_env_on("KL_GHOSTTOWN_OVERLAY_TRACE", 0)) {
+        static unsigned destroy_reports;
+        if (destroy_reports++ < 64)
+            fprintf(stderr, "  [gt-scene] DestroyLayer id=%d lookup=%s\n",
+                    layer_id, !l ? "missing" : l->is_eye ? "eye" : "overlay");
+    }
     // A panel's compositor-side rows go back for another id's use (the eye
     // layer's stay, see below): only said here, freed on the mirroring thread
     // (kl_glfb_forget_layer).
-    if (l && !l->is_eye) kl_glfb_forget_layer(layer_id);
+    if (l && !l->is_eye) {
+        kl_glfb_forget_layer(layer_id);
+        // Removing the allocation alone leaves a published overlay pointing
+        // at retained Vulkan storage. Retire it from both the visible snapshot
+        // and the pending enqueue batch, so a later flush cannot resurrect it.
+        pthread_mutex_lock(&g_frames.mu);
+        for (int i = 0; i < g_overlays.n; ) {
+            if (g_overlays.v[i].layer_id != layer_id) { ++i; continue; }
+            memmove(&g_overlays.v[i], &g_overlays.v[i + 1],
+                    (size_t)(g_overlays.n - i - 1) * sizeof g_overlays.v[0]);
+            --g_overlays.n;
+        }
+        pthread_mutex_unlock(&g_frames.mu);
+        for (int i = 0; i < g_enq_n; ) {
+            if (g_enq[i].layer_id != layer_id) { ++i; continue; }
+            memmove(&g_enq[i], &g_enq[i + 1],
+                    (size_t)(g_enq_n - i - 1) * sizeof g_enq[0]);
+            --g_enq_n;
+        }
+        pthread_mutex_lock(&g_enq_pub_mu);
+        for (int i = 0; i < g_enq_pub_n; ) {
+            if (g_enq_pub[i] != layer_id) { ++i; continue; }
+            --g_enq_pub_n;
+            memmove(&g_enq_pub[i], &g_enq_pub[i + 1],
+                    (size_t)(g_enq_pub_n - i) * sizeof g_enq_pub[0]);
+            memmove(&g_enq_pub_tex[i], &g_enq_pub_tex[i + 1],
+                    (size_t)(g_enq_pub_n - i) * sizeof g_enq_pub_tex[0]);
+        }
+        pthread_mutex_unlock(&g_enq_pub_mu);
+        fprintf(stderr, "  [ovrp] retired overlay %d from visible and queued layers\n", layer_id);
+    }
     // The teardown mirror. The GL names are NOT deleted here, and the slot keeps
     // them: this arrives on the provider's gfx-thread stop, the eye textures are
     // still attached to framebuffers the capture and the compositor hold, and
@@ -9326,8 +9443,81 @@ static uint64_t klovrp_DestroyLayer(int layer_id) {
     // it across a restart that is about to ask for the same layer again.
     // klovrp_SetupLayer above is the other half — it hands the same textures back.
     if (l) { l->prev_id = l->id; l->id = 0; }
+    for (int i = 0; i < g_enq_seen_n; ) {
+        if (g_enq_seen[i] != layer_id) { ++i; continue; }
+        --g_enq_seen_n;
+        memmove(&g_enq_seen[i], &g_enq_seen[i + 1],
+                (size_t)(g_enq_seen_n - i) * sizeof g_enq_seen[0]);
+    }
+    pthread_mutex_unlock(&g_enq_mu);
     kl_loadvid_recount();
     return OVRP_SUCCESS;
+}
+
+static int klovrp_layer_id_arg(uintptr_t raw);
+static uint64_t klovrp_EnqueueDestroyLayer(uintptr_t layer_arg);
+
+// Host regression gate: isolated process, no graphics device or guest content.
+int kl_ovrp_layer_lifecycle_selftest(void) {
+    ovrp_layer_desc_eyefov desc = {0};
+    desc.texture_size = (ovrp_sizei){16, 16};
+    int a = 0, b = 0;
+    if (klovrp_SetupLayer(NULL, &desc, &a)) return 0;
+    float pose[7] = {0, 0, 0, 1, 0, 0, -2}, size[3] = {1, 1, 1};
+#define ENQUEUE(id, flags) klovrp_EnqueueSubmitLayer2(flags, NULL, NULL, id, 0, pose, size, 0, 0, NULL, 0, NULL, NULL)
+#define REQUIRE(x) do { if (!(x)) { fprintf(stderr, "layer lifecycle failed: %s\n", #x); return 0; } } while (0)
+    ENQUEUE(a, 0); ENQUEUE(a, 0);
+    REQUIRE(g_enq_n == 1 && kl_ovrp_overlay_count() == 1);
+    // EndFrame4's no-submit interval must clear BOTH pending and published,
+    // even if the visible set has already been cleared by another producer.
+    for (int i = 0; i < KLOVRP_ENQ_LIVE_FRAMES; ++i) klovrp_EndFrame4(i, NULL, 0, NULL);
+    REQUIRE(g_enq_n == 0 && g_enq_seen_n == 0 && g_enq_pub_n == 0);
+    REQUIRE(kl_ovrp_overlay_count() == 0);
+    ENQUEUE(a, 0);
+    REQUIRE(g_enq_n == 1 && g_enq_pub_n == 0);
+    for (int i = 0; i < KLOVRP_ENQ_LIVE_FRAMES; ++i) klovrp_enq_age();
+    REQUIRE(g_enq_n == 0 && g_enq_seen_n == 0);
+    ENQUEUE(a, 0); ENQUEUE(a, 0);
+    klovrp_DestroyLayer(a);
+    REQUIRE(g_enq_n == 0 && g_enq_seen_n == 0 && g_enq_pub_n == 0);
+    REQUIRE(kl_ovrp_overlay_count() == 0);
+    REQUIRE(!klovrp_SetupLayer(NULL, &desc, &b) && b != a);
+    ENQUEUE(b, 0); ENQUEUE(b, 0);
+    kl_ovrp_overlay out;
+    REQUIRE(kl_ovrp_overlay_count() == 1 && kl_ovrp_overlay_get(0, &out) && out.layer_id == b);
+    ENQUEUE(b, KLOVRP_SUBMIT_HIDDEN); ENQUEUE(b, KLOVRP_SUBMIT_HIDDEN);
+    REQUIRE(kl_ovrp_overlay_count() == 0);
+    klovrp_DestroyLayer(b);
+    // The pointer form: the id lives at the address the guest passes.
+    int handle = 0;
+    REQUIRE(!klovrp_SetupLayer(NULL, &desc, &handle) && handle != 0);
+    ENQUEUE(handle, 0); ENQUEUE(handle, 0);
+    REQUIRE(kl_ovrp_overlay_count() == 1);
+    klovrp_EnqueueDestroyLayer((uintptr_t)&handle);
+    REQUIRE(g_enq_n == 0 && g_enq_seen_n == 0 && g_enq_pub_n == 0);
+    REQUIRE(kl_ovrp_overlay_count() == 0 && !klovrp_layer(handle));
+    ENQUEUE(handle, 0); ENQUEUE(handle, 0);
+    REQUIRE(kl_ovrp_overlay_count() == 0);
+#undef REQUIRE
+#undef ENQUEUE
+    return 1;
+}
+
+// The argument is not one shape. AC Nexus passes the layer id as an int.
+// Ghost Town's plugin treats x0 as a pointer (it null-checks the full
+// register and hashes that pointer): it is the same int* EnqueueSetupLayer2
+// wrote the id through. Reading the low 32 bits of that pointer looks up a
+// missing id, so the quad stays published after the game has destroyed it.
+static int klovrp_layer_id_arg(uintptr_t raw) {
+    if (raw < 0x10000) return (int)raw;
+    int id = 0;
+    vm_size_t got = 0;
+    if (vm_read_overwrite(mach_task_self(), (vm_address_t)raw, sizeof id,
+                          (vm_address_t)&id, &got) == KERN_SUCCESS &&
+        got == sizeof id && klovrp_layer(id))
+        return id;
+    if (klovrp_layer((int)raw)) return (int)raw;
+    return 0;
 }
 
 // ovrp_EnqueueDestroyLayer(layerId) - the Enqueue-ABI sibling of DestroyLayer,
@@ -9337,9 +9527,14 @@ static uint64_t klovrp_DestroyLayer(int layer_id) {
 // every panel the game freed kept its slot forever and the 32-slot table filled
 // in seconds - SetupLayer then failed for the rest of the run and the render
 // loop stalled. Frees the slot the same careful way DestroyLayer does (the
-// textures are kept for reuse, only the id is cleared).
-static uint64_t klovrp_EnqueueDestroyLayer(int layer_id) {
+// textures are kept for reuse, only the id is cleared). A retired id is not a
+// live layer, so a later submit of it cannot be published again.
+static uint64_t klovrp_EnqueueDestroyLayer(uintptr_t layer_arg) {
     ovrp_hit("ovrp_EnqueueDestroyLayer");
+    int layer_id = klovrp_layer_id_arg(layer_arg);
+    if (kl_env_on("KL_GHOSTTOWN_OVERLAY_TRACE", 0))
+        fprintf(stderr, "  [gt-scene] EnqueueDestroyLayer arg=%#llx id=%d\n",
+                (unsigned long long)layer_arg, layer_id);
     return klovrp_DestroyLayer(layer_id);
 }
 
@@ -9837,7 +10032,16 @@ static int klovrp_texptr_indirect(void) {
     static int v = -1;
     if (v < 0) {
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_OVRP_TEXPTR_INDIRECT", t && !strcmp(t, "x5812519008825194"));
+        // Ghost Town (x9531494193591052) does the same read. GetLayerTexturePtr
+        // handed it the VkImage, the next vkCreateImageView was on one wild
+        // handle ending in the MoltenVK vtable (…d99d0) for every fade layer,
+        // and the 1×1 quad it stretches across the view stayed the blank it
+        // was cleared to — a white sheet, with the fade's real pixel never
+        // stored. The indirect word is what OVROverlay passes to
+        // CreateExternalTexture.
+        v = kl_env_on("KL_OVRP_TEXPTR_INDIRECT",
+                      t && (!strcmp(t, "x5812519008825194") ||
+                            !strcmp(t, "x9531494193591052")));
     }
     return v;
 }

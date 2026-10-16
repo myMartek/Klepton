@@ -661,14 +661,44 @@ static const struct SLBufferQueueItf_ g_bq_vt = {
 };
 
 // ---- SLAndroidConfigurationItf ----
+// Android configuration must be readable: Meta's Oboe treats a refused
+// performance-mode query as fatal and reports it upstream as Unsupported format.
+// Keep values per interface, not globally across independent players.
+static pthread_mutex_t g_cfg_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { SLConfigItf owner; char key[40]; SLuint32 value; } g_cfg_values[64];
 static SLresult cfg_Set(SLConfigItf s, const char *k, const void *v, SLuint32 n) {
-    (void)s; (void)v; (void)n;
-    fprintf(stderr, "  [sl] SetConfiguration(\"%s\") — recorded, not applied\n",
-            k ? k : "?");
-    return SL_RESULT_SUCCESS;
+    if (!s || !k || !v || n != sizeof(SLuint32) || strlen(k) >= 40) return 2;
+    pthread_mutex_lock(&g_cfg_lock);
+    int slot = -1;
+    for (int i = 0; i < 64; ++i) {
+        if (g_cfg_values[i].owner == s && !strcmp(g_cfg_values[i].key, k)) { slot = i; break; }
+        if (!g_cfg_values[i].owner && slot < 0) slot = i;
+    }
+    if (slot >= 0) {
+        g_cfg_values[slot].owner = s;
+        snprintf(g_cfg_values[slot].key, sizeof g_cfg_values[slot].key, "%s", k);
+        memcpy(&g_cfg_values[slot].value, v, sizeof(SLuint32));
+    }
+    pthread_mutex_unlock(&g_cfg_lock);
+    return slot >= 0 ? SL_RESULT_SUCCESS : SL_RESULT_FEATURE_UNSUPPORTED;
 }
 static SLresult cfg_Get(SLConfigItf s, const char *k, SLuint32 *n, void *v) {
-    (void)s; (void)k; (void)v; if (n) *n = 0; return SL_RESULT_FEATURE_UNSUPPORTED;
+    if (!s || !k || !n) return 2;
+    SLuint32 value = !strcmp(k, "androidPlaybackStreamType") ? 3 : 0;
+    int known = !strcmp(k, "androidPerformanceMode") || !strcmp(k, "androidPlaybackStreamType");
+    pthread_mutex_lock(&g_cfg_lock);
+    for (int i = 0; i < 64; ++i)
+        if (g_cfg_values[i].owner == s && !strcmp(g_cfg_values[i].key, k)) {
+            value = g_cfg_values[i].value; known = 1; break;
+        }
+    pthread_mutex_unlock(&g_cfg_lock);
+    if (!known) return SL_RESULT_FEATURE_UNSUPPORTED;
+    if (!v) { *n = sizeof value; return SL_RESULT_SUCCESS; }
+    if (*n < sizeof value) { *n = sizeof value; return 7; }
+    memcpy(v, &value, sizeof value);
+    *n = sizeof value;
+    fprintf(stderr, "  [sl] GetConfiguration(%s) -> %u\n", k, value);
+    return SL_RESULT_SUCCESS;
 }
 static const struct SLConfigItf_ g_cfg_vt = { cfg_Set, cfg_Get };
 
@@ -745,6 +775,11 @@ static SLresult eng_CreateAudioPlayer(SLEngineItf self, SLObjectItf *out,
     p->play_vt = &g_play_vt;
     p->bq_vt = &g_bq_vt;
     p->cfg_vt = &g_cfg_vt;
+    pthread_mutex_lock(&g_cfg_lock);
+    for (int i = 0; i < 64; ++i)
+        if (g_cfg_values[i].owner == (SLConfigItf)&p->cfg_vt)
+            memset(&g_cfg_values[i], 0, sizeof g_cfg_values[i]);
+    pthread_mutex_unlock(&g_cfg_lock);
     p->state = SL_PLAYSTATE_STOPPED;
     p->rate = 48000; p->channels = 2; p->bits = 16;
     pthread_mutex_init(&p->lock, NULL);
