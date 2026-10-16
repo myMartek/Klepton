@@ -1520,6 +1520,7 @@ static const klj_binding *klj_find_binding(const char *cls, const char *name,
     const klj_binding *own = klj_firebase_binding(cls, name, sig);
     if (!own) own = klj_vivox_binding(cls, name, sig);
     if (!own) own = klj_vertigo_binding(cls, name, sig);
+    if (!own) own = klj_ghosttown_binding(cls, name, sig);
     if (own) return own;
     // Exact wins outright across EVERY family table, so the answer does not
     // depend on which file a class landed in; a loose match is only ever the

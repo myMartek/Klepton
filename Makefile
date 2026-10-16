@@ -47,7 +47,7 @@ RUNTIME_JNI := runtime/kl_jni.c \
            runtime/jni/kl_jni_ue4.c runtime/jni/kl_jni_electra.c runtime/jni/kl_jni_fmod.c runtime/jni/kl_jni_jkxr.c \
            runtime/jni/kl_jni_haptics.c \
            runtime/jni/kl_jni_firebase.c runtime/jni/kl_jni_vivox.c \
-           runtime/jni/kl_jni_vertigo.c
+           runtime/jni/kl_jni_vertigo.c runtime/jni/kl_jni_ghosttown.c
 
 # The Linux process runtime (runtime/linux/) and its door. Part of what ships:
 # a Linux guest in the visionOS app is the same code as build/m_linux.
@@ -1302,8 +1302,8 @@ xros: $(XROS_GATES) build/Klepton.xcframework swiftcheck
 swiftcheck:
 	@xcrun -sdk xros swiftc -typecheck -target arm64-apple-xros26.0 \
 	  -import-objc-header visionos/Sources/Klepton-Bridging-Header.h \
-	  $(RUNTIME_INC) visionos/Sources/*.swift visionos/SteamCloudKit/Sources/SteamCloudKit/*.swift 2>&1 | grep -E '^[^ ].*error:' && exit 1; \
-	  echo "  swiftcheck: the visionOS app typechecks against runtime/*.h"
+	  $(RUNTIME_INC) visionos/Sources/*.swift visionos/SteamCloudKit/Sources/SteamCloudKit/*.swift
+	@echo "  swiftcheck: the visionOS app typechecks against runtime/*.h"
 
 # The archives are real targets with real prerequisites, not side effects of a
 # .PHONY rule. That distinction cost a debugging pass: with only a phony rule

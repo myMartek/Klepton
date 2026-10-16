@@ -187,6 +187,14 @@ int  kl_vulkan_frame_wait(unsigned ms);
 void kl_vulkan_frame_publish(void);
 unsigned long long kl_vulkan_frame_serial(void);
 
+// Pipelines the guest has had Metal compile, and how many milliseconds ago the
+// last one finished. `done` is 0 until the first. `age_ms` is all-bits-set
+// until then. The compositor reads both from its own thread: they are published
+// with atomics from the guest thread that compiles, so a torn read cannot
+// happen. There is no total — Unity does not say how many are left — so a
+// climbing `done` is the progress there is.
+void kl_vulkan_shader_progress(unsigned long long *done, unsigned long long *age_ms);
+
 // How many frames have been presented, and how many were written out. The
 // end-of-run report reads these; a run with a healthy frame loop and zero
 // captures is a different bug from one that never presented.

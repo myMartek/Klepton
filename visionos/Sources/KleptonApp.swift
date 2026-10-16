@@ -299,7 +299,7 @@ struct KleptonApp: App {
         // before kl_app_configure, so a static read always saw the pre-target
         // default. Observing the object means .full takes hold reactively before
         // the space opens, for the native VR kind (GTA Vice City). KL_FULL wins.
-        .immersionStyle(selection: .constant(chroma.immersionFull ? .full : .mixed),
+        .immersionStyle(selection: .constant(!KleptonProximity.shared.applies && chroma.immersionFull ? .full : .mixed),
                         in: .mixed, .full)
         // See Immersive.systemOverlays. On the scene, not on a view inside it:
         // a CompositorLayer has no view hierarchy for the View-level modifier to
@@ -675,6 +675,7 @@ struct BootView: View {
             else if Self.productStart { startScreen }
             else { bootReport }
         }
+        .safeAreaInset(edge: .bottom) { KLProximityControls() }
         .task { await watchPresentation() }
         // Steam Link streams over the local network; see KLLocalNetwork.
         .task { if klTargetName() == "steamlink-vr" { KLLocalNetwork.ask() } }

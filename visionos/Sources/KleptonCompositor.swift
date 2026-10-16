@@ -213,6 +213,10 @@ private func klEyePixelFormat(_ glInternal: UInt32) -> MTLPixelFormat? {
 final class KleptonCompositor {
     private let layerRenderer: LayerRenderer
     private var device: MTLDevice!
+    // Separate queue: previously submitted guest fence waits must not hold room reveal.
+    private var proximityQueue: MTLCommandQueue?
+    private var proximityNoticeTex: MTLTexture?
+    private var noticeFollow: (pos: SIMD3<Float>, rot: simd_quatf, time: TimeInterval)?
     // Optional, not implicitly unwrapped, and that is the whole fix for one
     // crash: when ANGLE has no MTLDevice this used to stay nil while the loop
     // carried on, and primeDisplay trapped on it before the guest thread was
@@ -344,6 +348,7 @@ final class KleptonCompositor {
     // for the head and nodes 3/4 for the hands.
     private let arSession = ARKitSession()
     private let worldTracking = WorldTrackingProvider()
+    @MainActor private var proximityScene: SceneReconstructionProvider?
     private let handTracking = HandTrackingProvider()
     private let controllers = KleptonControllers()
     private var arRunning = false
@@ -707,7 +712,20 @@ final class KleptonCompositor {
         }
     }
 
-    private func runARKit() async {
+    @MainActor private var arRestartActive = false
+    @MainActor private var arRestartPending = false
+    @MainActor private func runARKit() async {
+        arRestartPending = true
+        guard !arRestartActive else { return }
+        arRestartActive = true
+        defer { arRestartActive = false }
+        while arRestartPending {
+            arRestartPending = false
+            await rebuildARKit()
+        }
+    }
+
+    @MainActor private func rebuildARKit() async {
         do {
             // Hand tracking is requested separately because it is the half
             // that can be refused: world tracking is available to any full
@@ -720,12 +738,33 @@ final class KleptonCompositor {
             Self.headAtTracker = worldTracking
             kl_ovrp_set_head_at(Self.headAt)
             var providers: [any DataProvider] = [worldTracking]
+            // Keep reconstruction and its stream alive across accessory-only reruns.
+            // Replacing it discarded the map and repeatedly restarted readiness.
+            var scene = proximityScene
+            var newScene = false
+            if KleptonProximity.shared.applies && scene == nil {
+                if SceneReconstructionProvider.isSupported {
+                    let permission = await arSession.requestAuthorization(for: [.worldSensing])
+                    if permission[.worldSensing] == .allowed {
+                        scene = SceneReconstructionProvider(); newScene = true
+                    } else {
+                        KleptonProximity.shared.invalidate("Room visible: allow World Sensing in Settings, then reopen the app.")
+                    }
+                } else {
+                    KleptonProximity.shared.invalidate("Room visible: scene reconstruction is unsupported on this device.")
+                }
+            }
+            if let scene { providers.append(scene) }
             if HandTrackingProvider.isSupported { providers.append(handTracking) }
             let accessories = await controllers.makeAccessoryProvider()
             if let accessories { providers.append(accessories) }
             try await arSession.run(providers)
             arRunning = true
             Self.startRoomPlanes()
+            if let scene, newScene {
+                proximityScene = scene
+                KleptonProximity.shared.start(scene)
+            }
             NSLog("[cp] ARKit running (hands: \(HandTrackingProvider.isSupported), "
                   + "sense: \(controllers.senseConnected))")
             if let accessories {
@@ -734,6 +773,8 @@ final class KleptonCompositor {
                 Task { await controllers.consumeAccessoryAnchors(accessories) }
             }
         } catch {
+            KleptonProximity.shared.stop()
+            KleptonProximity.shared.invalidate("Room visible: ARKit failed: \(error). Check permissions and reopen the app.")
             NSLog("[cp] ARKit failed to start: \(error) — falling back to the "
                   + "synthetic standing head kl_ovrp provides")
         }
@@ -818,6 +859,7 @@ final class KleptonCompositor {
     /// ordering reason the Choreographer is ticked before nativeRender.
     private func updatePoses(at presentationTime: TimeInterval) {
         guard arRunning else { return }
+        KleptonProximity.shared.capture(world: worldTracking, controllers: controllers)
 
         // Predicted to the presentation time, not "now": the pose the guest
         // renders with should be the pose the display will show it at, which is
@@ -833,7 +875,7 @@ final class KleptonCompositor {
             // pose and the offsets pushEyeOffsets sent, and those two have to
             // be stated about one origin or every near object sits wrong.
             let (p, q) = Self.decompose(
-                Self.headFrom(anchor.originFromAnchorTransform, midpoint: eyeMidpointInDevice))
+                Self.headFrom(originFromDevice(anchor), midpoint: eyeMidpointInDevice))
             // Date the pose with the instant it is about. It was predicted to
             // `presentationTime`, so that — not "now" — is the clock the head
             // velocity has to be differenced on. The two differ by this
@@ -859,6 +901,7 @@ final class KleptonCompositor {
             // it left behind so a disconnected controller cannot hold its last
             // pose while the hand fallback waits behind it.
             controllers.forgetAccessoryPoses()
+            KleptonProximity.shared.invalidate("Room visible: reconnecting controllers")
             Task { await runARKit() }
         }
 
@@ -1781,6 +1824,7 @@ final class KleptonCompositor {
         loop: while true {
             switch layerRenderer.state {
             case .invalidated:
+                KleptonProximity.shared.stop()
                 break loop
             case .paused:
                 NSLog("[cp] layer paused at iteration \(iterations) — waiting")
@@ -2066,7 +2110,7 @@ final class KleptonCompositor {
         // picture already there against the newer pose. That case is the whole
         // reason the pass exists, and it was unreachable while the thing being
         // reprojected was the thing blocking this loop.
-        if syncGuest {
+        if syncGuest && !KleptonProximity.shared.shouldReveal {
             _ = kl_app_frame()
         } else {
             kl_app_guest_publish()
@@ -2103,6 +2147,54 @@ final class KleptonCompositor {
         // reason, and ALVR loops over the array likewise.
         let drawables = frame.queryDrawables()
         guard !drawables.isEmpty else { bailNoDrawable += 1; return 0 }
+        // Highest priority: before guest stage reads, fence waits, or ANY drawing
+        // (projection, overlays, startup masks, loading UI, metrics and lasers).
+        if KleptonProximity.shared.shouldReveal {
+            if proximityQueue == nil { proximityQueue = device.makeCommandQueue() }
+            guard let clear = proximityQueue?.makeCommandBuffer() else { return 0 }
+            frame.startSubmission()
+            for drawable in drawables {
+                let at = LayerRenderer.Clock.Instant.epoch.duration(to: drawable.frameTiming.presentationTime).timeInterval
+                drawable.deviceAnchor = worldTracking.queryDeviceAnchor(atTimestamp: at)
+                for (i, color) in drawable.colorTextures.enumerated() {
+                    // Clear every slice, even for layered/foveated drawables.
+                    for slice in 0..<color.arrayLength {
+                        let pass = MTLRenderPassDescriptor()
+                        pass.colorAttachments[0].texture = color
+                        pass.colorAttachments[0].slice = slice
+                        pass.colorAttachments[0].loadAction = .clear
+                        pass.colorAttachments[0].storeAction = .store
+                        pass.colorAttachments[0].clearColor = MTLClearColorMake(0,0,0,0)
+                        if i < drawable.depthTextures.count {
+                            pass.depthAttachment.texture = drawable.depthTextures[i]
+                            pass.depthAttachment.slice = slice
+                            pass.depthAttachment.loadAction = .clear
+                            pass.depthAttachment.storeAction = .store
+                            pass.depthAttachment.clearDepth = 0
+                        }
+                        clear.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+                    }
+                }
+            }
+            if KleptonProximity.shared.tooClose, let first = drawables.first {
+                let at = LayerRenderer.Clock.Instant.epoch
+                    .duration(to: first.frameTiming.presentationTime).timeInterval
+                let origin = Self.headFrom(originFromDevice(displayAnchor(at: at)),
+                                           midpoint: eyeMidpointInDevice)
+                let pose = smoothedNoticePose(origin, now: at)
+                for drawable in drawables {
+                    encodeProximityNotice(clear, drawable: drawable, pose: pose)
+                }
+            } else {
+                noticeFollow = nil
+            }
+            for drawable in drawables {
+                drawable.encodePresent(commandBuffer: clear)
+            }
+            clear.commit()
+            frame.endSubmission()
+            return 0
+        }
         guard let cmd = queue?.makeCommandBuffer(), pipeline != nil, sampler != nil else {
             bailNoPipeline += 1
             return 0
@@ -2262,6 +2354,10 @@ final class KleptonCompositor {
                 simd_float4( sy, 0,  cy, 0),
                 simd_float4( px, 0,  pz, 1))
             recenterXform = m.inverse * recenterXform
+            controllers.trackingRebase = recenterXform
+            // Publish the new tracking-space poses before notifying the guest.
+            updatePoses(at: ProcessInfo.processInfo.systemUptime)
+            kl_ovrp_notify_recenter()
             NSLog("[cp] RECENTER: yaw %.1f deg, pos (%.2f, %.2f) folded into the origin",
                   yaw * 180 / .pi, px, pz)
         }
@@ -4026,6 +4122,98 @@ final class KleptonCompositor {
         return 1
     }
 
+    // A one-line count while Metal compiles the game's shaders and the picture
+    // does not change. Ghost Town's first frame is a white fade, and it submits
+    // nothing else until the compiles return, so without this the headset looks
+    // stuck. It stays down while frames keep arriving: a game that draws its own
+    // "compiling shaders" screen (Wrath 2) is not covered by a second one.
+    // KL_SHADER_NOTE=0 hides it.
+    private static var ghostTownBlackStartup: Bool { klEnvOn("KL_GHOSTTOWN_BLACK_STARTUP", default: false) }
+    private var ghostTownStartupReleased = false
+    private var ghostTownStartupSince: Double?
+    private static let shaderNoteOn = klEnvOn("KL_SHADER_NOTE", default: true)
+    private var shaderNoteSerial: UInt64 = .max
+    private var shaderNoteSince: Double = 0
+    private var shaderNoteText = ""
+    private var shaderNoteFront: MTLTexture?
+    private var shaderNoteBack: MTLTexture?
+    private var shaderNoteLogged = false
+
+    private func encodeShaderNote(_ enc: MTLRenderCommandEncoder,
+                                  viewIndices: [Int],
+                                  drawable: LayerRenderer.Drawable,
+                                  originFromHead: simd_float4x4) -> Int {
+        guard Self.shaderNoteOn, let pipe = overlayPipeline else { return 0 }
+        var done: UInt64 = 0, ageMs: UInt64 = 0
+        kl_vulkan_shader_progress(&done, &ageMs)
+        let serial = kl_vulkan_frame_serial()
+        var ts = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &ts)
+        let now = Double(ts.tv_sec) + Double(ts.tv_nsec) / 1e9
+        if serial != shaderNoteSerial {
+            shaderNoteSerial = serial
+            shaderNoteSince = now
+        }
+        // Still compiling, and the last picture has been up for a moment.
+        // Two seconds of quiet means the batch ended; the line goes away.
+        let frozen = shaderNoteSince != 0 && now - shaderNoteSince > 0.4
+        guard done > 0, ageMs < 2000, frozen else { return 0 }
+        let line = "Compiling shaders…  \(done)"
+        if shaderNoteFront == nil {
+            let px = KLMetricsPanel.bannerPixels
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
+                                                                width: px.w, height: px.h, mipmapped: false)
+            desc.usage = .shaderRead
+            shaderNoteFront = device.makeTexture(descriptor: desc)
+            shaderNoteBack = device.makeTexture(descriptor: desc)
+        }
+        if line != shaderNoteText, let back = shaderNoteBack,
+           let ctx = KLMetricsPanel.makeContext(w: KLMetricsPanel.bannerPixels.w,
+                                                h: KLMetricsPanel.bannerPixels.h),
+           let data = ctx.data {
+            shaderNoteText = line
+            KLMetricsPanel.drawBanner(ctx, count: done)
+            back.replace(region: MTLRegionMake2D(0, 0, KLMetricsPanel.bannerPixels.w,
+                                                 KLMetricsPanel.bannerPixels.h),
+                         mipmapLevel: 0, withBytes: data,
+                         bytesPerRow: KLMetricsPanel.bannerPixels.w * 4)
+            swap(&shaderNoteFront, &shaderNoteBack)
+            if !shaderNoteLogged {
+                shaderNoteLogged = true
+                NSLog("[cp] compiling shaders: a count is shown while the picture sits still")
+            }
+        }
+        guard !shaderNoteText.isEmpty, let tex = shaderNoteFront else { return 0 }
+        var ov = kl_ovrp_overlay()
+        ov.shape = 0
+        ov.head_locked = 1
+        ov.tex_w = Int32(tex.width); ov.tex_h = Int32(tex.height)
+        ov.viewport.0 = (0, 0, Int32(tex.width), Int32(tex.height))
+        ov.viewport.1 = (0, 0, Int32(tex.width), Int32(tex.height))
+        let size = KLMetricsPanel.bannerSize
+        ov.pose = (0, 0, 0, 1, 0, 0.06, -1.4)
+        ov.size = (size.x, size.y)
+        ov.origin_top_left = 1
+        var uniforms: [kl_overlay_uniforms] = []
+        for vi in viewIndices {
+            uniforms.append(kl_overlay_build(&ov, Int32(vi), originFromHead,
+                                             Self.headFromView(drawable.views[vi].transform,
+                                                               midpoint: eyeMidpointInDevice),
+                                             drawable.computeProjection(viewIndex: vi)))
+        }
+        guard uniforms.contains(where: { $0.visible != 0 }) else { return 0 }
+        if let depthState { enc.setDepthStencilState(depthState) }
+        enc.setRenderPipelineState(pipe)
+        enc.setFragmentTexture(tex, index: 0)
+        if let sampler { enc.setFragmentSamplerState(sampler, index: 0) }
+        uniforms.withUnsafeBytes { buf in
+            enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
+            enc.setFragmentBytes(buf.baseAddress!, length: buf.count, index: 0)
+        }
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        return 1
+    }
+
     // Black behind the quads of a frame that carries no eye picture (kl_ovrp.c,
     // kl_ovrp_eyeless_black). In a mixed space the system shows the room
     // wherever this pass wrote no depth, so "nothing behind the loading screen"
@@ -4204,6 +4392,182 @@ final class KleptonCompositor {
         withUnsafeBytes(of: &field) { raw in
             String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
         }
+    }
+
+    private func proximityNoticeTexture() -> MTLTexture? {
+        if let proximityNoticeTex { return proximityNoticeTex }
+        let w = 1600, h = 520
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.translateBy(x: 0, y: CGFloat(h)); ctx.scaleBy(x: 1, y: -1)
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+        UIGraphicsPushContext(ctx)
+        let plate = UIBezierPath(roundedRect: CGRect(x: 24, y: 36, width: CGFloat(w - 48), height: CGFloat(h - 72)),
+                                 cornerRadius: 64)
+        UIColor(red: 0.62, green: 0.05, blue: 0.04, alpha: 0.94).setFill()
+        plate.fill()
+        let red = UIColor(red: 1, green: 0.28, blue: 0.24, alpha: 1)
+        let soft = UIColor(red: 1, green: 0.55, blue: 0.50, alpha: 1)
+        let symbol = UIImage.SymbolConfiguration(pointSize: 210, weight: .medium)
+        UIImage(systemName: "person.wave.2.fill", withConfiguration: symbol)?
+            .withTintColor(red, renderingMode: .alwaysOriginal)
+            .draw(in: CGRect(x: 78, y: 130, width: 250, height: 250))
+        let title = klT("Too close", "Zu nah")
+        let body = klT("Something is near you. Step back to continue.",
+                       "Etwas ist nah bei dir. Tritt einen Schritt zurück.")
+        func draw(_ text: String, _ font: UIFont, _ color: UIColor, _ y: CGFloat) {
+            let para = NSMutableParagraphStyle()
+            para.alignment = .left
+            let s = NSAttributedString(string: text, attributes: [
+                .font: font, .foregroundColor: color, .paragraphStyle: para
+            ])
+            s.draw(with: CGRect(x: 390, y: y, width: CGFloat(w - 460), height: 200),
+                   options: [.usesLineFragmentOrigin], context: nil)
+        }
+        draw(title, Self.cardFont("bold", 108), red, 118)
+        draw(body, Self.cardFont("semibold", 48), soft, 268)
+        UIGraphicsPopContext()
+        guard let data = ctx.data else { return nil }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w,
+                                                            height: h, mipmapped: false)
+        desc.usage = .shaderRead
+        guard let tex = device.makeTexture(descriptor: desc) else { return nil }
+        tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: data, bytesPerRow: w * 4)
+        proximityNoticeTex = tex
+        return tex
+    }
+
+    /// Two metres ahead of the gaze, eased toward it rather than glued to the
+    /// head. The first frame of a warning starts already in front; after that
+    /// it catches up over a fraction of a second.
+    private func smoothedNoticePose(_ originFromHead: simd_float4x4, now: TimeInterval) -> (SIMD3<Float>, simd_quatf) {
+        let head = SIMD3<Float>(originFromHead.columns.3.x,
+                                originFromHead.columns.3.y,
+                                originFromHead.columns.3.z)
+        var forward = -SIMD3<Float>(originFromHead.columns.2.x,
+                                    originFromHead.columns.2.y,
+                                    originFromHead.columns.2.z)
+        let length = simd_length(forward)
+        forward = length > 0.001 ? forward / length : SIMD3(0, 0, -1)
+        let targetPos = head + forward * 2
+        let targetRot = simd_quatf(originFromHead)
+        guard let held = noticeFollow else {
+            noticeFollow = (targetPos, targetRot, now)
+            return (targetPos, targetRot)
+        }
+        let dt = Float(min(0.05, max(0, now - held.time)))
+        let blend = 1 - exp(-dt / 0.22)
+        let pos = held.pos + (targetPos - held.pos) * blend
+        let rot = simd_slerp(held.rot, targetRot, blend)
+        noticeFollow = (pos, rot, now)
+        return (pos, rot)
+    }
+
+    /// World-locked on a pose that eases toward the gaze. The pass matches the
+    /// eye composite, so the card stays in the middle of each eye.
+    private func encodeProximityNotice(_ cmd: MTLCommandBuffer,
+                                       drawable: LayerRenderer.Drawable,
+                                       pose: (SIMD3<Float>, simd_quatf)) {
+        guard let pipe = overlayPipeline, let depthState, let sampler,
+              let tex = proximityNoticeTexture() else { return }
+        let at = LayerRenderer.Clock.Instant.epoch
+            .duration(to: drawable.frameTiming.presentationTime).timeInterval
+        let originFromHead = Self.headFrom(originFromDevice(displayAnchor(at: at)),
+                                           midpoint: eyeMidpointInDevice)
+        var ov = kl_ovrp_overlay()
+        ov.shape = 0
+        ov.head_locked = 0
+        ov.tex_w = Int32(tex.width); ov.tex_h = Int32(tex.height)
+        ov.viewport.0 = (0, 0, Int32(tex.width), Int32(tex.height))
+        ov.viewport.1 = (0, 0, Int32(tex.width), Int32(tex.height))
+        let q = pose.1
+        ov.pose = (q.imag.x, q.imag.y, q.imag.z, q.real, pose.0.x, pose.0.y, pose.0.z)
+        ov.size = (0.92, 0.30)
+        ov.origin_top_left = 1
+        let layered = layerRenderer.configuration.layout == .layered
+                      && drawable.views.count > 1
+                      && amplification >= drawable.views.count
+        if layered {
+            encodeProximityNoticePass(cmd, drawable: drawable, ov: &ov, tex: tex,
+                                      viewIndices: Array(drawable.views.indices),
+                                      layered: true,
+                                      rateMap: drawable.rasterizationRateMaps.first,
+                                      originFromHead: originFromHead, pipe: pipe,
+                                      depthState: depthState, sampler: sampler)
+            return
+        }
+        let maps = drawable.rasterizationRateMaps
+        let perView = maps.count == drawable.views.count
+        for vi in drawable.views.indices {
+            encodeProximityNoticePass(cmd, drawable: drawable, ov: &ov, tex: tex,
+                                      viewIndices: [vi], layered: false,
+                                      rateMap: perView ? maps[vi] : nil,
+                                      originFromHead: originFromHead, pipe: pipe,
+                                      depthState: depthState, sampler: sampler)
+        }
+    }
+
+    private func encodeProximityNoticePass(_ cmd: MTLCommandBuffer,
+                                           drawable: LayerRenderer.Drawable,
+                                           ov: inout kl_ovrp_overlay,
+                                           tex: MTLTexture,
+                                           viewIndices: [Int],
+                                           layered: Bool,
+                                           rateMap: MTLRasterizationRateMap?,
+                                           originFromHead: simd_float4x4,
+                                           pipe: MTLRenderPipelineState,
+                                           depthState: MTLDepthStencilState,
+                                           sampler: MTLSamplerState) {
+        guard let first = viewIndices.first else { return }
+        let firstMap = drawable.views[first].textureMap
+        guard firstMap.textureIndex < drawable.colorTextures.count else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.colorTextures[firstMap.textureIndex]
+        pass.colorAttachments[0].loadAction = .load
+        pass.colorAttachments[0].storeAction = .store
+        if firstMap.textureIndex < drawable.depthTextures.count {
+            pass.depthAttachment.texture = drawable.depthTextures[firstMap.textureIndex]
+            pass.depthAttachment.loadAction = .load
+            pass.depthAttachment.storeAction = .store
+        }
+        if layered {
+            pass.renderTargetArrayLength = viewIndices.count
+        } else {
+            pass.colorAttachments[0].slice = firstMap.sliceIndex
+            if pass.depthAttachment.texture != nil {
+                pass.depthAttachment.slice = firstMap.sliceIndex
+            }
+        }
+        pass.rasterizationRateMap = rateMap
+        guard let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+        enc.setViewports(viewIndices.map { drawable.views[$0].textureMap.viewport })
+        if layered, viewIndices.count > 1 {
+            var mappings = viewIndices.enumerated().map { (n, vi) in
+                MTLVertexAmplificationViewMapping(
+                    viewportArrayIndexOffset: UInt32(n),
+                    renderTargetArrayIndexOffset: UInt32(drawable.views[vi].textureMap.sliceIndex))
+            }
+            enc.setVertexAmplificationCount(viewIndices.count, viewMappings: &mappings)
+        }
+        var uniforms: [kl_overlay_uniforms] = []
+        for vi in viewIndices {
+            uniforms.append(kl_overlay_build(&ov, Int32(vi), originFromHead,
+                                             Self.headFromView(drawable.views[vi].transform,
+                                                               midpoint: eyeMidpointInDevice),
+                                             drawable.computeProjection(viewIndex: vi)))
+        }
+        enc.setDepthStencilState(depthState)
+        enc.setRenderPipelineState(pipe)
+        enc.setFragmentTexture(tex, index: 0)
+        enc.setFragmentSamplerState(sampler, index: 0)
+        uniforms.withUnsafeBytes { buf in
+            enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
+            enc.setFragmentBytes(buf.baseAddress!, length: buf.count, index: 0)
+        }
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        enc.endEncoding()
     }
 
     private func makeLoadingCard(_ st: inout kl_interstitial) -> MTLTexture? {

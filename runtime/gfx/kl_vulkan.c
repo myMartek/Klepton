@@ -629,11 +629,15 @@ static int klvk_park_instances(void) {
         // Unity Engine Graphics API".
         // Arizona Sunshine 2 (x5245041552210029) takes the handle answer as
         // well, so the probe's device has to outlive the probe here too.
+        // Ghost Town (x9531494193591052) takes the handle answer too
+        // (klovrp_adapter_is_phys), so the probe's device has to still be the
+        // one the instance it keeps enumerates.
         on = kl_env_on("KL_VK_PARK_INSTANCE",
                        t && (strcmp(t, "walkabout") == 0 || strcmp(t, "batman") == 0 ||
                              strcmp(t, "x5269080709783454") == 0 ||
                              strcmp(t, "x3634830803298285") == 0 ||
-                             strcmp(t, "x5245041552210029") == 0));
+                             strcmp(t, "x5245041552210029") == 0 ||
+                             strcmp(t, "x9531494193591052") == 0));
     }
     return on;
 }
@@ -2662,7 +2666,13 @@ void *kl_vulkan_mtl_for_handle(unsigned long long h) {
     static int texl = -1;
     if (texl < 0) {
         const char *t = kl_driver_target_name();
-        texl = kl_env_on("KL_OVERLAY_TEXL", !(t && !strcmp(t, "x5812519008825194")));
+        // Ghost Town (x9531494193591052) takes the indirect texture pointer
+        // (klovrp_texptr_indirect), so the picture is in the layer image.
+        // Sampling texL there put AC Nexus's panels on a pooled texture Unity
+        // had already reused.
+        texl = kl_env_on("KL_OVERLAY_TEXL",
+                         !(t && (!strcmp(t, "x5812519008825194") ||
+                                 !strcmp(t, "x9531494193591052"))));
     }
     if (!texl) return NULL;
     // Only a live, tracked, non-eye image. A wild or already-destroyed handle here
@@ -4568,12 +4578,34 @@ static VkResult VKAPI_CALL klvk_CreateImageView(VkDevice dev,
 // Gated on nothing: it is one fprintf per ~50 pipelines, negligible against a
 // compile measured in tens of milliseconds.
 static unsigned long long g_pipe_gfx, g_pipe_comp, g_pipe_ns;
+// What the compositor's "Compiling shaders" line reads. The counters above are
+// the guest thread's own; these two are the snapshot another thread may load.
+static unsigned long long g_pipe_pub_n, g_pipe_pub_ns;
 static double kl_pipe_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
 }
+static void kl_pipe_publish(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long long now = (unsigned long long)ts.tv_sec * 1000000000ull
+                           + (unsigned long long)ts.tv_nsec;
+    __atomic_store_n(&g_pipe_pub_n, g_pipe_gfx + g_pipe_comp, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_pipe_pub_ns, now, __ATOMIC_RELEASE);
+}
+void kl_vulkan_shader_progress(unsigned long long *done, unsigned long long *age_ms) {
+    unsigned long long n = __atomic_load_n(&g_pipe_pub_n, __ATOMIC_ACQUIRE);
+    unsigned long long then = __atomic_load_n(&g_pipe_pub_ns, __ATOMIC_ACQUIRE);
+    if (done) *done = n;
+    if (!age_ms) return;
+    if (!then) { *age_ms = ~0ull; return; }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long long now = (unsigned long long)ts.tv_sec * 1000000000ull
+                           + (unsigned long long)ts.tv_nsec;
+    *age_ms = now > then ? (now - then) / 1000000ull : 0;
+}
 static void kl_pipe_report(const char *kind, unsigned n, double dt_ms) {
     g_pipe_ns += (unsigned long long)(dt_ms * 1e6);
+    kl_pipe_publish();
     unsigned long long tot = g_pipe_gfx + g_pipe_comp;
     static unsigned long long last;
     if (tot - last >= 50 || dt_ms > 250.0) {

@@ -241,6 +241,8 @@ typedef struct {
     uint32_t      cyl_segments;
     float         cyl_radius;      // metres
     float         cyl_half_angle;  // radians
+    vector_float4 color_scale;
+    vector_float4 color_offset;
 } kl_overlay_uniforms;
 
 // How many vertices the overlay strip has for these uniforms: 4 for a quad.

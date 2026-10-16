@@ -592,14 +592,15 @@ final class KleptonControllers {
             // suppress it — the critical section genuinely must not span a
             // suspension point, and pushing it into a synchronous function is
             // what guarantees that.
-            store(hand: hand, removed: update.event == .removed, anchor: anchor)
+            store(hand: hand, removed: update.event == .removed, anchor: anchor, provider: p)
         }
     }
 
-    private func store(hand: Int, removed: Bool, anchor: AccessoryAnchor) {
-        if !removed { probeSenseFrames(hand: hand, anchor) }
+    private func store(hand: Int, removed: Bool, anchor: AccessoryAnchor, provider: AccessoryTrackingProvider) {
         lock.lock()
         defer { lock.unlock() }
+        guard accessoryProvider === provider else { return }
+        if !removed { probeSenseFrames(hand: hand, anchor) }
         accessoryAnchor[hand] = removed ? nil : anchor
     }
 
@@ -680,6 +681,39 @@ final class KleptonControllers {
     /// two. Falling back to the raw anchor if prediction refuses keeps a
     /// controller that has just appeared (or one the tracker has lost) visible
     /// instead of snapping it to the synthetic head-relative pose.
+    /// Safety uses measured physical accessory origins, never guest corrections.
+    struct ProximitySnapshot {
+        var centers: (SIMD3<Float>, SIMD3<Float>)?
+        var diagnostic: String
+    }
+    func proximitySnapshot(at now: TimeInterval) -> ProximitySnapshot {
+        lock.lock(); defer { lock.unlock() }
+        // SDK accessory_tracking.h: latestAnchors includes most recent inertial
+        // data; anchorUpdates is the lower-frequency stream, not a pose clock.
+        // This method is called on the render thread, as is sensePose prediction.
+        guard let provider = accessoryProvider else {
+            return ProximitySnapshot(diagnostic: "accessory=missing L=missing R=missing")
+        }
+        let anchors = provider.latestAnchors
+        let left = anchors.first { $0.accessory.inherentChirality == .left }
+        let right = anchors.first { $0.accessory.inherentChirality == .right }
+        func details(_ a: AccessoryAnchor?) -> String {
+            guard let a else { return "missing" }
+            return "\(a.trackingState) age=\(String(format: "%.3f", now-a.timestamp))"
+        }
+        let diagnostic = "accessory=\(provider.state) L=\(details(left)) R=\(details(right))"
+        func valid(_ a: AccessoryAnchor) -> Bool {
+            a.trackingState == .positionOrientationTracked
+                && KLProximityFreshness.isFresh(timestamp: a.timestamp, now: now)
+        }
+        guard provider.state == .running, let left, let right, valid(left), valid(right) else {
+            return ProximitySnapshot(diagnostic: diagnostic)
+        }
+        let l = left.originFromAnchorTransform.columns.3
+        let r = right.originFromAnchorTransform.columns.3
+        return ProximitySnapshot(centers: (SIMD3(l.x,l.y,l.z), SIMD3(r.x,r.y,r.z)), diagnostic: diagnostic)
+    }
+
     private func sensePose(hand: Int, at time: TimeInterval)
         -> (SIMD3<Float>, simd_quatf, SIMD3<Float>, SIMD3<Float>)? {
         lock.lock()
@@ -1469,7 +1503,36 @@ final class KleptonControllers {
     /// waiting is a matter of time passing.
     private var pillBits: [UInt32] = [0, 0]
     private static let panelButtons = klEnvOn("KL_STATS_CARD_BUTTONS", default: true)
+    var trackingRebase = matrix_identity_float4x4
+    private var ghostTownRecenterSince: Double?
+    private var ghostTownRecenterFired = false
     private func applyPanelChord() {
+        if klEnvOn("KL_GHOSTTOWN_INPUT", default: false) {
+            lock.lock(); defer { lock.unlock() }
+            let now = ProcessInfo.processInfo.systemUptime
+            let rightDown = state[1].fromController && state[1].pill != 0
+            if rightDown {
+                if ghostTownRecenterSince == nil { ghostTownRecenterSince = now }
+                if !ghostTownRecenterFired, let since = ghostTownRecenterSince, now - since >= 1 {
+                    KleptonCompositor.pendingRecenter = true
+                    ghostTownRecenterFired = true
+                    NSLog("[cp] Ghost Town: right Options hold requested host recenter")
+                }
+            } else {
+                ghostTownRecenterSince = nil
+                ghostTownRecenterFired = false
+            }
+            // Preserve the entire press/hold, rather than delaying it through
+            // the metrics-panel chord. Left is Quest Menu; right also exposes
+            // Back for titles that use that bit for their system-button prompt.
+            for h in 0...1 where state[h].fromController {
+                let down = state[h].pill != 0
+                let menu: UInt32 = down ? (h == 0 ? OVRPRawButton.start : OVRPRawButton.start | OVRPRawButton.back) : 0
+                state[h].buttons = state[h].otherButtons | menu
+                state[h].touches = state[h].otherTouches | state[h].buttons
+            }
+            return
+        }
         guard Self.panelButtons else { return }
         lock.lock(); defer { lock.unlock() }
         // A tap is passed on after the button is up again, with the bits it had.
@@ -2437,6 +2500,14 @@ final class KleptonControllers {
                 continue
             }
 
+            if let rawP = st.position, let rawQ = st.orientation {
+                let rot = simd_quatf(trackingRebase)
+                let hp = trackingRebase * SIMD4<Float>(rawP.x, rawP.y, rawP.z, 1)
+                st.position = SIMD3<Float>(hp.x, hp.y, hp.z)
+                st.orientation = rot * rawQ
+                st.linearVelocity = rot.act(st.linearVelocity)
+                st.angularVelocity = rot.act(st.angularVelocity)
+            }
             submit(st, hand: hand)
         }
         reportPinch()

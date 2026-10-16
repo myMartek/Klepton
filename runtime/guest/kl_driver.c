@@ -205,6 +205,32 @@ static void kl_driver_env_defaults(const kl_target *t) {
             setenv("KL_VK_FOZ_APP", "Source2", 0);
         }
     }
+    else if (!strcmp(t->name, "x9531494193591052")) {
+        // One comprehensive diagnostic run: XR state/cameras, plugin calls,
+        // and all guest-thread samples. No XR restart or rendering overrides.
+        setenv("KL_GHOSTTOWN_INPUT", "1", 0);
+        setenv("KL_ELF_TLSDESC", "1", 0);
+        setenv("KL_AUDIO_ONE_OUTPUT", "1", 0);
+        setenv("KL_GHOSTTOWN_OVERLAY_TRACE", "1", 0);
+        setenv("KL_GHOSTTOWN_OVERLAY_COLOR", "1", 0);
+        // Unity submits panels separately from its eye-only EndFrame list.
+        // That list must not periodically erase the live panels/fade cover.
+        setenv("KL_OVRP_ENQ_OWNS_OVERLAYS", "1", 0);
+        fprintf(stderr, "  [ghosttown] overlay lifecycle v2: enqueue ownership and explicit retirement enabled\n");
+        setenv("KL_GHOSTTOWN_DIAG", "1", 0);
+        setenv("KL_OVRP_VERBOSE", "1", 0);
+        setenv("KL_SAMPLE_MS", "250", 0);
+        setenv("KL_SAMPLE_REPORT_S", "15", 0);
+        setenv("KL_SAMPLE_STACKS", "1", 0);
+        setenv("KL_PROBE_STACKTRACE", "2", 0);
+        setenv("KL_PROBE_XR", "1", 0);
+        setenv("KL_PROBE_XR_FROM", "300", 0);
+        setenv("KL_PROBE_XR_EVERY", "600", 0);
+        setenv("KL_PROBE_INPUT", "1", 0);
+        setenv("KL_PROBE_FROM", "2400", 0);
+        setenv("KL_PROBE_EVERY", "1200", 0);
+        setenv("KL_PROBE_TYPES", "UnityEngine.Camera,OVRCameraRig,OVRManager,OVROverlay,Unity.XR.CoreUtils.XROrigin", 0);
+    }
     else if (!strcmp(t->name, "wrath2")) {
         // wrath2's world never appears because the GAME thread grinds through FMOD
         // Studio bank loading (UEngine::LoadMap -> LoadBanksForMap -> loadBankFile),
