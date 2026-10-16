@@ -157,8 +157,11 @@ int kl_errno_from_linux(int e) {
 // followed by a host call that fails with exactly the errno the slot was last
 // filled from, with no __errno() call in between, reads as "Darwin did not
 // move" and keeps the guest's value. That needs the same code twice in a row
-// around a guest write, and it is no worse than the old rule, which lost every
-// guest write.
+// around a guest write — which is not rare at all: a non-blocking reader that
+// clears errno and polls gets EAGAIN on every empty read, and read 0 back
+// (Walkabout Mini Golf's curl: "Recv failure: Undefined error: 0"). A shim
+// that knows its host call failed resolves it with kl_errno_set; the socket
+// shims and read do (kl_net_ret in kl_shim.c). Direct forwards cannot.
 static _Thread_local int g_guest_errno, g_errno_filled, g_errno_darwin;
 int *klb_errno(void) {
     int d = *__error();

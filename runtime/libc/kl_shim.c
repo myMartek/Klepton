@@ -936,6 +936,25 @@ static int klb_getifaddrs(struct ifaddrs **out) {
 }
 static void klb_freeifaddrs(struct ifaddrs *ifa) { freeifaddrs(ifa); }
 
+// A failed socket call publishes its errno through kl_errno_set, so the guest
+// reads the failure and not a value it stored itself before the call.
+//
+// klb_errno (kl_libc.c) keeps a guest's own errno write unless Darwin's errno
+// moved since the slot was last filled. A non-blocking reader repeats the same
+// failure — recv -> EAGAIN, again and again — so Darwin's errno does NOT move,
+// and a guest that cleared errno in between (`errno = 0; recv(...)`) reads 0
+// back. curl takes -1 with errno 0 as a broken connection: "Curl error 56:
+// Recv failure: Undefined error: 0". Walkabout Mini Golf's PlayFab sign-in
+// died on it, and the game sat out its offline wait in the loading screen
+// (on the headset, 2026-10-16: 563.2 and 567 slow, 371 signed in at once).
+// A shim knows its host call failed, so it says so; `e` is errno as the host
+// call left it, taken before any trace output can change it.
+void kl_errno_set(int darwin_errno);    // kl_libc.c
+static ssize_t kl_net_ret(ssize_t r, int e) {
+    if (r < 0) kl_errno_set(e);
+    return r;
+}
+
 // JNI_GetCreatedJavaVMs(vmBuf, bufLen, nVMs) — the JNI invocation API's "hand me
 // the JavaVM already running in this process". Meta's MR Utility Kit
 // (libmrutilitykitshared, pulled in by olar/UE5) calls it to reach the VM;
@@ -969,13 +988,14 @@ static int kl_connect(int fd, const struct sockaddr *sa, socklen_t len) {
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     int r = connect(fd, sa, len);
+    int e = errno;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     if (kl_net_trace())
         fprintf(stderr, "  [net] connect(%s) -> %d (%s) in %.2fs [fam=%d len=%d]\n", host, r,
                 r ? strerror(errno) : "ok",
                 (double)(t1.tv_sec - t0.tv_sec) + 1e-9 * (double)(t1.tv_nsec - t0.tv_nsec),
                 sa ? ((const struct sockaddr_storage *)sa)->ss_family : -1, (int)len);
-    return r;
+    return (int)kl_net_ret(r, e);
 }
 // A guest binding a fixed port is normally alone on the device. Here it is not:
 // developing against a Steam host on the SAME Mac puts Steam's own UDP *:27036
@@ -1461,11 +1481,12 @@ static ssize_t kl_sendto(int fd, const void *buf, size_t n, int flags,
         errno = e;
         if (r < 0) r = (ssize_t)n;              // the datagram did go out
     }
+    int e = errno;
     if (kl_net_trace())
         fprintf(stderr, "  [net] sendto(fd=%d, %zu B, flags=0x%x->0x%x, %s) -> %zd%s\n",
-                fd, n, flags, dflags, host, r, r < 0 ? strerror(errno) : "");
+                fd, n, flags, dflags, host, r, r < 0 ? strerror(e) : "");
     kl_hexdump("->", buf, r);
-    return r;
+    return kl_net_ret(r, e);
 }
 // send/recv carry the same flag word and were forwarded raw. curl's every
 // write is send(..., MSG_NOSIGNAL) on Linux, which arrived here as Darwin's
@@ -1599,6 +1620,7 @@ static ssize_t kl_recvfrom(int fd, void *buf, size_t n, int flags,
                            struct sockaddr *sa, socklen_t *len) {
     int dflags = kl_msg_flags(flags, NULL);
     ssize_t r = recvfrom(fd, buf, n, dflags, sa, len);
+    int e = errno;
     kl_net_rate_note(fd, r);
     kl_net_rx_boost(r);
     char host[80] = "-";
@@ -1608,9 +1630,9 @@ static ssize_t kl_recvfrom(int fd, void *buf, size_t n, int flags,
     }
     if (kl_net_trace())
         fprintf(stderr, "  [net] recvfrom(fd=%d, %zu B, flags=0x%x->0x%x) -> %zd from %s%s\n",
-                fd, n, flags, dflags, r, host, r < 0 ? strerror(errno) : "");
+                fd, n, flags, dflags, r, host, r < 0 ? strerror(e) : "");
     kl_hexdump("<-", buf, r);
-    return r;
+    return kl_net_ret(r, e);
 }
 
 // FORTIFY's recvfrom: __recvfrom_chk(fd, buf, len, __bos(buf), flags, sa, len).
@@ -1761,11 +1783,12 @@ static ssize_t kl_sendmsg(int fd, const void *gmsg, int flags) {
             for (int i = 0; i < (int)h.msg_iovlen; i++) r += (ssize_t)h.msg_iov[i].iov_len;
         }
     }
+    int e = errno;
     if (kl_net_trace())
         fprintf(stderr, "  [net] sendmsg(fd=%d, %d iov, %u B ctl, flags=0x%x->0x%x, %s) -> %zd%s\n",
                 fd, (int)h.msg_iovlen, (unsigned)h.msg_controllen, flags, dflags,
-                host, r, r < 0 ? strerror(errno) : "");
-    return r;
+                host, r, r < 0 ? strerror(e) : "");
+    return kl_net_ret(r, e);
 }
 static ssize_t kl_recvmsg(int fd, void *gmsg, int flags) {
     kl_lx_msghdr *g = gmsg;
@@ -1783,6 +1806,7 @@ static ssize_t kl_recvmsg(int fd, void *gmsg, int flags) {
                                        ? g->msg_controllen : sizeof cbuf);
     }
     ssize_t r = recvmsg(fd, &h, kl_msg_flags(flags, NULL));
+    int e = errno;
     kl_net_rate_note(fd, r);
     kl_net_rx_boost(r);
     char host[80] = "-";
@@ -1821,8 +1845,8 @@ static ssize_t kl_recvmsg(int fd, void *gmsg, int flags) {
     }
     if (kl_net_trace())
         fprintf(stderr, "  [net] recvmsg(fd=%d, flags=0x%x) -> %zd from %s%s\n",
-                fd, flags, r, host, r < 0 ? strerror(errno) : "");
-    return r;
+                fd, flags, r, host, r < 0 ? strerror(e) : "");
+    return kl_net_ret(r, e);
 }
 static int kl_getpeername(int fd, struct sockaddr *sa, socklen_t *len) {
     int r = getpeername(fd, sa, len);
@@ -1855,7 +1879,8 @@ ssize_t kl_shim_read(int fd, void *buf, size_t n) {
     int handled; ssize_t vr = kl_obbmap_read(fd, buf, n, &handled);
     if (handled) return vr;   // OBB read-through fd — served from the archive
     ssize_t r = read(fd, buf, n);
-    if (r >= 0 && (size_t)r < n && r != 0 && kl_fd_is_regular(fd)) {
+    if (r < 0) return kl_net_ret(r, errno);  // a non-blocking pipe's EAGAIN, as for recv
+    if ((size_t)r < n && r != 0 && kl_fd_is_regular(fd)) {
         size_t done = (size_t)r;
         while (done < n) {
             ssize_t k = read(fd, (char *)buf + done, n - done);
