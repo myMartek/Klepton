@@ -29,23 +29,57 @@ project generator, which must stay "wrote ...".
 
   python3 steam_art.py <steam_app> <target> <out>
 """
-import os, shutil, subprocess, sys, urllib.request
+import os, re, shutil, subprocess, sys, urllib.request
 
 CDN = "https://shared.steamstatic.com/store_item_assets/steam/apps/%s/%s"
 ICON_PX = 1024          # a visionOS icon layer
 LOGO_PX = 720           # the title's longest edge on it, so art shows around it
 HERO_W, HERO_H = 2560, 1440
+MAX_BYTES = 20 * 1024 * 1024   # a download larger than this is not art
+TIMEOUT = 30                   # seconds, per request and per read
+JPEG_MAGIC = b"\xff\xd8\xff"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _open(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "klepton-steam-art/1"})
+    return urllib.request.urlopen(req, timeout=TIMEOUT)
+
+
+def looks_like_image(head, name):
+    """The file's first bytes say it is the kind of image its name claims."""
+    return head.startswith(PNG_MAGIC if name.endswith(".png") else JPEG_MAGIC)
 
 
 def fetch(app, name, dest):
     if os.path.isfile(dest) and os.path.getsize(dest) > 0:
-        return True
+        with open(dest, "rb") as f:
+            if looks_like_image(f.read(8), name):
+                return True
+        os.remove(dest)     # a cached file that is not an image is not kept
     part = dest + ".part"
     try:
-        req = urllib.request.Request(CDN % (app, name),
-                                     headers={"User-Agent": "klepton-steam-art/1"})
-        with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as f:
-            shutil.copyfileobj(r, f)
+        with _open(CDN % (app, name)) as r:
+            length = r.headers.get("Content-Length")
+            if length and length.isdigit() and int(length) > MAX_BYTES:
+                raise ValueError(f"{length} bytes is over the {MAX_BYTES} byte limit")
+            got = 0
+            first = b""
+            with open(part, "wb") as f:
+                while True:
+                    chunk = r.read(65536)
+                    if not chunk:
+                        break
+                    if not first:
+                        first = chunk[:8]
+                        if not looks_like_image(first, name):
+                            raise ValueError("not a " + ("PNG" if name.endswith(".png") else "JPEG") + " image")
+                    got += len(chunk)
+                    if got > MAX_BYTES:
+                        raise ValueError(f"more than {MAX_BYTES} bytes")
+                    f.write(chunk)
+            if not got:
+                raise ValueError("empty response")
         os.replace(part, dest)
         return True
     except Exception as e:
@@ -94,6 +128,11 @@ def layer(stack, name, png):
 
 
 def main(app, target, out):
+    # Before the id reaches a URL or a path.
+    if not re.fullmatch(r"[0-9]+", app):
+        print(f"  steam art: {app!r} is not a Steam app id — the build stays iconless",
+              file=sys.stderr)
+        return 1
     src = os.path.join(out, "src")
     os.makedirs(src, exist_ok=True)
     stack = os.path.join(out, f"AppIcon-{target}.solidimagestack")
