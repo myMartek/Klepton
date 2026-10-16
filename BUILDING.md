@@ -176,6 +176,18 @@ Everything below builds what it needs first. `<target>` is any name from
 | any target's shim work list, in seconds | `./build_run_host.sh <target> --gap` |
 | visionOS build gate, no device needed | `make xros` |
 
+### Icon and start picture
+
+The app's icon and the picture behind its start screen are whatever the
+installer left in `visionos/Assets.xcassets` for the target
+(`AppIcon-<target>.solidimagestack`, `StartHero-<target>.imageset`; both
+gitignored). A target whose game is not an APK and names a Steam app instead
+(`steam_app` in `targets.py`, today `alyx`) gets both from Steam's public store
+artwork at project-generation time (`visionos/steam_art.py`, into
+`visionos/build/steamart/<target>/`, kept for rebuilds without a network).
+`KL_NO_STEAM_ART=1` skips that, and a fetch that fails just leaves the build
+iconless, as it was before.
+
 ---
 
 ## Working on ANGLE itself

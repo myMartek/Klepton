@@ -953,6 +953,11 @@ TARGETS = {
         "kind":    "linux",
         "product": "KleptonAlyx",
         "display": "Half-Life Alyx",
+        # The Steam app whose public store artwork gives this target its icon
+        # and start picture (visionos/steam_art.py): there is no APK to take
+        # an icon from, and the installer only looks for Steam's pictures in a
+        # Steam client's cache on the Mac, which most Macs do not have.
+        "steam_app": "546560",
     },
     "x7527722310622065": {
         # Cave Crave 1.1.4 (com.rrrgames.CaveCrave, versionCode 739), Meta Store
@@ -1353,6 +1358,10 @@ def resolve(name):
     # the wrong thumb for this game. "" keeps the default.
     t.setdefault("gamepad_map", "")
     t.setdefault("generic", False)
+    # The Steam app id whose store artwork stands in for an icon when the
+    # installer left none (gen_xcodeproj.py, steam_art.py). "" for the rest:
+    # their icon comes out of the APK.
+    t.setdefault("steam_app", "")
     # Absent means "no data panel for this target" (obb_file) or "no download"
     # (the ids); a Unity target that wants the panel states obb_file, even "".
     for k in ("obb_file", "meta_apk_id", "meta_obb_id"):

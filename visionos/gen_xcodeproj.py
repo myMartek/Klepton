@@ -257,7 +257,25 @@ _launcher_on = _os.environ.get("KL_CUSTOM_LAUNCHER", "").strip().lower() in ("1"
 # store id, register the App ID first, then archive with an explicit
 # KLEPTON_BUNDLE_ID=com.noosphere.hl1vr. Local launcher builds keep the dev id and sign.
 _assets_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "Assets.xcassets")
-def _stack_exists(n): return _os.path.isdir(_os.path.join(_assets_dir, n + ".solidimagestack"))
+# A target without an icon in the shared catalog but with a Steam app id
+# (targets.py "steam_app") gets its icon and start picture from Steam's store
+# artwork, built into build/steamart/<target> by steam_art.py. The installer's
+# own stacks, when it left any, still win: that directory is only looked at
+# second. KL_NO_STEAM_ART=1 skips the fetch (the build is then iconless, as a
+# target with no artwork always was).
+_steam_art_dir = _os.path.join(HERE, "build", "steamart", KLT['name'])
+def _art_path(n):
+    for d in (_assets_dir, _steam_art_dir):
+        p = _os.path.join(d, n)
+        if _os.path.isdir(p):
+            return p
+    return None
+if (KLT['steam_app'] and _os.environ.get("KL_NO_STEAM_ART", "") != "1"
+        and not _os.path.isdir(_os.path.join(_assets_dir, f"AppIcon-{KLT['name']}.solidimagestack"))):
+    # On stderr: run.sh keeps this script's first stdout line, "wrote ...".
+    subprocess.run([sys.executable, _os.path.join(HERE, "steam_art.py"),
+                    KLT['steam_app'], KLT['name'], _steam_art_dir], stdout=sys.stderr)
+def _stack_exists(n): return _art_path(n + ".solidimagestack") is not None
 # With the launcher on, a trademark-free monogram icon (AppIcon-<t>-launcher) replaces
 # the target's normal icon when one is present; otherwise the normal icon stands. Both
 # are gitignored, so this is strictly local/opt-in.
@@ -382,14 +400,14 @@ else:
     open(_os.path.join(_cat_abs, "Contents.json"), "w").write(
         '{\n  "info" : { "author" : "xcode", "version" : 1 }\n}\n')
 for _stack in (_icon_base, f"{_icon_base}-launcher"):
-    _s = _os.path.join(_assets_dir, _stack + ".solidimagestack")
-    if _os.path.isdir(_s):
+    _s = _art_path(_stack + ".solidimagestack")
+    if _s:
         _shutil.copytree(_s, _os.path.join(_cat_abs, _stack + ".solidimagestack"))
 # The start screen's picture, if an installer left one for this target
-# (StartHero-<target>.imageset). It goes into the app under ONE name, so the
-# Swift side asks for "StartHero" whatever the guest is.
-_hero = _os.path.join(_assets_dir, f"StartHero-{KLT['name']}.imageset")
-if _os.path.isdir(_hero):
+# (StartHero-<target>.imageset) or steam_art.py made one. It goes into the app
+# under ONE name, so the Swift side asks for "StartHero" whatever the guest is.
+_hero = _art_path(f"StartHero-{KLT['name']}.imageset")
+if _hero:
     _shutil.copytree(_hero, _os.path.join(_cat_abs, "StartHero.imageset"))
 
 # The two files apktool decodes out of the APK and a headset cannot (the
