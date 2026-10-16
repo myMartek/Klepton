@@ -1830,7 +1830,8 @@ static XrResult klxr_GetVulkanGraphicsDevice2KHR(
 // worn — there is no such signal on the host, and an idle guest looks exactly
 // like a hung one.
 enum { KLXR_MAGIC_SESSION = 0x584b4c53 /* 'XKLS' */ };
-enum { KLXR_EVENT_QUEUE = 16 };
+enum { KLXR_EVENT_QUEUE = 64 };   // was 16; room for a burst (a room discovery
+                                  // plus a status change per anchor, all at once)
 
 // Which graphics API a session is bound with — see `gfx` below.
 enum { KLXR_GFX_NONE = 0, KLXR_GFX_GLES = 1, KLXR_GFX_VULKAN = 2 };
@@ -1939,6 +1940,15 @@ static void klxr_report_frames(FILE *f) {
                     ? "  <- some frames had no compositor slot for this layer" : "");
     }
 }
+
+int kl_openxr_native_handles(uint64_t *instance, uint64_t *session) {
+    if (g_instance.magic != KLXR_MAGIC_INSTANCE || g_session.magic != KLXR_MAGIC_SESSION)
+        return 0;
+    *instance = (uint64_t)(uintptr_t)&g_instance;
+    *session  = (uint64_t)(uintptr_t)&g_session;
+    return 1;
+}
+void *kl_openxr_get_instance_proc_addr(void) { return (void *)klxr_GetInstanceProcAddr; }
 
 static klxr_session *klxr_sess(void *h) {
     klxr_session *s = (klxr_session *)h;
@@ -2431,7 +2441,16 @@ static XrResult klxr_RequestExitSession(void *session) {
 // caller testing `result == XR_SUCCESS` rather than `>= 0` reads an empty queue
 // as an event. That is the guest's business, but it is why this returns the
 // specified code rather than an error.
+static XrResult klxr_PollEvent_inner(void *instance, XrEventDataBuffer *data);
+// Every event handed out is also forwarded to the handlers a guest registered
+// with OVRPlugin (kl_ovrp_dispatch_openxr_event) — what the real plugin's
+// xrPollEvent hook does on Meta's OpenXR backend.
 static XrResult klxr_PollEvent(void *instance, XrEventDataBuffer *data) {
+    XrResult r = klxr_PollEvent_inner(instance, data);
+    if (r == KLXR_SUCCESS) kl_ovrp_dispatch_openxr_event(data);
+    return r;
+}
+static XrResult klxr_PollEvent_inner(void *instance, XrEventDataBuffer *data) {
     KLXR_TRACE("xrPollEvent");
     if (!klxr_inst(instance)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!data) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);

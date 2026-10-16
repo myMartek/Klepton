@@ -160,6 +160,19 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   own plugin version 1.109.0 (`KL_OVRP_VERSION`) so that its C# asks for
   passthrough at all, and can then reach some two hundred entry points nothing
   here has seen called.
+
+  The entry points of Meta's OpenXR backend (OVRPlugin 1.203.0: native OpenXR
+  handles and `xrGetInstanceProcAddr`, `ovrp_RegisterOpenXREventHandler` and
+  its forwarding from `xrPollEvent`, `ovrp_GetAppSpace`,
+  `ovrp_GetUnityInterfaces`, `ovrp_GetRuntimeName`, the telemetry setters and
+  the shutdown-handler pair) have answers for every title, not behind a
+  version or a knob: the plugin version here is the number this runtime TELLS
+  the guest (`KL_OVRP_VERSION`, per target), not one read from the APK, and
+  native code such as Meta's MR Utility Kit calls them whatever the C# was
+  told. Without an answer each of them ended the run (or said UNSUPPORTED
+  where this switch says so); the answers are the real plugin's, and the
+  OpenXR handles fail with NotInitialized for a guest on the OVRPlugin path,
+  which has no OpenXR instance or session here.
 - `KL_OVRP_PT_ALPHA=opaque|coverage|inverse` — what the eye picture's alpha
   means while a passthrough layer is submitted: `coverage` 1 = the game's
   picture, `inverse` 0 = the game's picture, `opaque` ignore it. Unset, it is
@@ -935,6 +948,14 @@ The guest's own memory management, and the three seams that used to disable it.
   staged APK explicitly.
 
 ## JNI surface (`runtime/jni/`)
+
+Not a switch, for orientation: an outgoing Android intent is answered for
+every title (`kl_jni_android.c`). `new Intent()`, `setAction`, `setData`
+(with `Uri.parse`), `setPackage`, `setComponent` (with `new ComponentName`),
+`setClassName`, `setFlags`, `putExtra` and `Intent.ACTION_VIEW` build it;
+`Context`/`Activity.startActivity` logs what it names and refuses it, as
+there is no other app here. Before these were bound, each such call ended
+the run as an unimplemented JNI call.
 
 - `KL_UE_KEYBOARD=1` — hold UE's GameActivity virtual keyboard open
   (`runtime/jni/kl_jni_ue4.c`) so a frontend can type into it through
@@ -2983,6 +3004,7 @@ front door is a knob, not a build. `build_run_host.sh`'s flags map onto these:
   name defaults to `Meta Quest 3`, matching the Quest 3 (eureka) it presents in
   `Build.*` so the host streams at that panel's size (see `KL_BUILD_<FIELD>`).
   The variable still wins over that default on every target.
+  `KL_XR_RUNTIME_NAME` is also what `ovrp_GetRuntimeName` answers.
 
   **These are the ONLY things an OpenXR guest can identify the device by**, and
   they have to agree with the identity every other seam gives. We present a

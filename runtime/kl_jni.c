@@ -2529,6 +2529,11 @@ static const klj_field g_fields[] = {
     // flag, and nothing would report it.
     KLJ_FSTR("android/content/Intent", "ACTION_BATTERY_CHANGED",
              "android.intent.action.BATTERY_CHANGED"),
+    // Opening a link or another app (DreamSpace's Spotify button builds
+    // `new Intent(); setAction(ACTION_VIEW); setData(Uri.parse(url))` and starts
+    // it). Without the constant the run ended there (2026-10-16). What the
+    // intent then meets is klj_Context_startActivity.
+    KLJ_FSTR("android/content/Intent", "ACTION_VIEW", "android.intent.action.VIEW"),
 
     KLJ_FSTR("android/os/Environment", "MEDIA_MOUNTED", "mounted"),
     KLJ_FFN("android/net/Uri", "EMPTY", "Landroid/net/Uri;", klj_Uri_EMPTY),

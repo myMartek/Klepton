@@ -28,6 +28,7 @@
 // signal at all — see klovrp_end_frame_impl).
 #include "kl_egl.h"
 #include "kl_vulkan.h"
+#include "kl_openxr.h"
 
 #define KL_OVRP_MAX 512
 static struct { const char *name; unsigned calls; } g_ovrp[KL_OVRP_MAX];
@@ -737,9 +738,14 @@ static uint64_t klovrp_UOX_OnSessionBegin(uint64_t a)      { (void)a; ovrp_hit("
 static uint64_t klovrp_UOX_OnSessionEnd(uint64_t a)        { (void)a; ovrp_hit("ovrp_UnityOpenXR_OnSessionEnd");     return 0; }
 static uint64_t klovrp_UOX_OnSessionExiting(uint64_t a)    { (void)a; ovrp_hit("ovrp_UnityOpenXR_OnSessionExiting"); return 0; }
 static uint64_t klovrp_UOX_OnSessionDestroy(uint64_t a)    { (void)a; ovrp_hit("ovrp_UnityOpenXR_OnSessionDestroy"); return 0; }
-static uint64_t klovrp_UOX_OnAppSpaceChange(uint64_t a)    { (void)a; ovrp_hit("ovrp_UnityOpenXR_OnAppSpaceChange"); return 0; }
+// The app space is recorded: ovrp_GetAppSpace hands it back (first argument of
+// both forms in the real 1.203.0 plugin).
+static uint64_t g_uox_app_space;
+static uint64_t klovrp_UOX_OnAppSpaceChange(uint64_t a) {
+    ovrp_hit("ovrp_UnityOpenXR_OnAppSpaceChange"); g_uox_app_space = a; return 0;
+}
 static uint64_t klovrp_UOX_OnAppSpaceChange2(uint64_t a, uint64_t f) {
-    (void)a; (void)f; ovrp_hit("ovrp_UnityOpenXR_OnAppSpaceChange2"); return 0;
+    (void)f; ovrp_hit("ovrp_UnityOpenXR_OnAppSpaceChange2"); g_uox_app_space = a; return 0;
 }
 static uint64_t klovrp_UOX_OnSessionStateChange(uint64_t from, uint64_t to) {
     (void)from; (void)to; ovrp_hit("ovrp_UnityOpenXR_OnSessionStateChange"); return 0;
@@ -10262,9 +10268,20 @@ static uint64_t klovrp_GetMixedRealityInitialized(void) {
 // IUnityInterfaces registry. The real OVRPlugin uses it to grab
 // IUnityGraphicsVulkan/GLES; we record it and do nothing, which is correct until
 // there is a renderer to bind to.
+static void *g_unity_interfaces;
 static void klovrp_UnityPluginLoad(void *unity_interfaces) {
+    g_unity_interfaces = unity_interfaces;
     fprintf(stderr, "  [ovrp] UnityPluginLoad(%p) — recorded; no graphics device "
                     "bound yet\n", unity_interfaces);
+}
+// `ovrpResult f(IUnityInterfaces **out)` (-1001 on NULL): the pointer Unity
+// handed UnityPluginLoad, given back. Meta's OpenXR-backend plugins ask for it
+// (DreamSpace, 2026-10-16).
+static uint64_t klovrp_GetUnityInterfaces(void **out) {
+    ovrp_hit("ovrp_GetUnityInterfaces");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = g_unity_interfaces;
+    return OVRP_SUCCESS;
 }
 static void klovrp_UnityPluginUnload(void) {}
 
@@ -10381,6 +10398,119 @@ static int32_t klovrp_GetHandTrackingEnabled(int *out) {
 static int32_t klovrp_GetSkeleton2(int skeleton_type, void *out) {
     if (skeleton_type < 0 || skeleton_type > 3 || !out) return OVRP_FAIL_INVALID_PARAM;
     return OVRP_FAIL_UNSUPPORTED;
+}
+
+// ---------------------------------------------------------------------------
+// The rest of Meta's OpenXR-backend startup (OVRPlugin 1.203.0, DreamSpace,
+// measured in a KL_PERMISSIVE scouting run on 2026-10-09). Shapes read out of
+// that APK's libOVRPlugin.so; the out-parameter ones are here, the pure setters
+// and the refused subsystems in the shared lists below.
+
+// `ovrpResult f(int *handle)`: -1000 on NULL, else an int handle. No telemetry
+// pipe here; a nonzero handle every Telemetry* setter accepts and drops.
+static uint64_t klovrp_TelemetryCreateMetadataHandle(int *out) {
+    ovrp_hit("ovrp_TelemetryCreateMetadataHandle");
+    if (!out) return (uint64_t)(int64_t)-1000;
+    *out = 1;
+    return OVRP_SUCCESS;
+}
+
+// `ovrpResult f(const char **out)` — the name kl_openxr puts in
+// XrInstanceProperties.runtimeName, so the two cannot disagree. Copied once into
+// a buffer of our own: the guest may keep the pointer for the rest of the run.
+static char g_runtime_name[128];   // XR_MAX_RUNTIME_NAME_SIZE, as kl_openxr's copy
+static void klovrp_runtime_name_once(void) {
+    snprintf(g_runtime_name, sizeof g_runtime_name, "%s",
+             kl_env_str("KL_XR_RUNTIME_NAME", "Oculus"));
+}
+static uint64_t klovrp_GetRuntimeName(const char **out) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    ovrp_hit("ovrp_GetRuntimeName");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    pthread_once(&once, klovrp_runtime_name_once);
+    *out = g_runtime_name;
+    return OVRP_SUCCESS;
+}
+
+// `ovrpResult f(XrSpace *out)`: the space Unity named through
+// ovrp_UnityOpenXR_OnAppSpaceChange[2]. Before it has, a failure with the
+// out-parameter untouched.
+static uint64_t klovrp_GetAppSpace(uint64_t *out) {
+    ovrp_hit("ovrp_GetAppSpace");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    if (!g_uox_app_space) return OVRP_FAIL_OPERATION;
+    *out = g_uox_app_space;
+    return OVRP_SUCCESS;
+}
+
+// (hand, step, frameIndex, ovrpBool *out): no inferred hand pose — hand tracking
+// is refused as a group (klovrp_hand_unsupported).
+static uint64_t klovrp_GetHandPoseSourceInferred(int hand, int step, int frame, int *out) {
+    (void)hand; (void)step; (void)frame;
+    ovrp_hit("ovrp_GetHandPoseSourceInferred");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = 0;
+    return OVRP_SUCCESS;
+}
+
+// `ovrpResult f(XrInstance *, XrSession *)` and `ovrpResult f(PFN *)`. Meta's
+// MR Utility Kit asks for these as soon as it loads, to make its own OpenXR
+// calls — its scene loading never goes through ovrp_* at all. The answers are
+// kl_openxr's own, the runtime Unity already talks to, so the kit finds out
+// from that runtime what is and is not served.
+static uint64_t klovrp_GetNativeOpenXRHandles(uint64_t *instance, uint64_t *session) {
+    ovrp_hit("ovrp_GetNativeOpenXRHandles");
+    if (!instance || !session) return OVRP_FAIL_INVALID_PARAM;
+    if (!kl_openxr_native_handles(instance, session)) return OVRP_FAIL_NOT_INITIALIZED;
+    return OVRP_SUCCESS;
+}
+static uint64_t klovrp_GetOpenXRInstanceProcAddrFunc(void **out) {
+    ovrp_hit("ovrp_GetOpenXRInstanceProcAddrFunc");
+    if (!out) return OVRP_FAIL_INVALID_PARAM;
+    *out = kl_openxr_get_instance_proc_addr();
+    return OVRP_SUCCESS;
+}
+
+// OpenXR events, forwarded. On Meta's OpenXR backend the real plugin hooks
+// xrPollEvent and hands every event to the handlers registered here
+// (`ovrpResult f(void (*)(void *event, void *context), void *context)`; the
+// event is an XrEventDataBuffer). Meta's MR Utility Kit does not poll OpenXR
+// itself — it registers its OnOpenXrEvent and learns from it that a space
+// discovery has results — so a registration that is accepted and never called
+// leaves it waiting for a room until it times out ("genuinely wedged",
+// DreamSpace, 2026-10-16). kl_openxr calls kl_ovrp_dispatch_openxr_event for
+// each event its xrPollEvent hands out.
+typedef void (*klovrp_xr_event_fn)(void *event, void *context);
+#define KLOVRP_XR_HANDLERS 8
+static struct { klovrp_xr_event_fn fn; void *ctx; } g_xr_handlers[KLOVRP_XR_HANDLERS];
+static pthread_mutex_t g_xr_handlers_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t klovrp_RegisterOpenXREventHandler(klovrp_xr_event_fn fn, void *ctx) {
+    ovrp_hit("ovrp_RegisterOpenXREventHandler");
+    if (!fn) return OVRP_FAIL_INVALID_PARAM;
+    pthread_mutex_lock(&g_xr_handlers_mu);
+    int i = 0;
+    for (; i < KLOVRP_XR_HANDLERS; i++) if (!g_xr_handlers[i].fn) break;
+    if (i < KLOVRP_XR_HANDLERS) { g_xr_handlers[i].fn = fn; g_xr_handlers[i].ctx = ctx; }
+    pthread_mutex_unlock(&g_xr_handlers_mu);
+    fprintf(stderr, "  [ovrp] OpenXR event handler %p (context %p) %s\n", (void *)fn, ctx,
+            i < KLOVRP_XR_HANDLERS ? "registered" : "NOT registered — table full");
+    return OVRP_SUCCESS;
+}
+static uint64_t klovrp_UnregisterOpenXREventHandler(klovrp_xr_event_fn fn) {
+    ovrp_hit("ovrp_UnregisterOpenXREventHandler");
+    pthread_mutex_lock(&g_xr_handlers_mu);
+    for (int i = 0; i < KLOVRP_XR_HANDLERS; i++)
+        if (g_xr_handlers[i].fn == fn) { g_xr_handlers[i].fn = NULL; g_xr_handlers[i].ctx = NULL; }
+    pthread_mutex_unlock(&g_xr_handlers_mu);
+    return OVRP_SUCCESS;
+}
+void kl_ovrp_dispatch_openxr_event(void *event) {
+    klovrp_xr_event_fn fn[KLOVRP_XR_HANDLERS]; void *ctx[KLOVRP_XR_HANDLERS]; int n = 0;
+    pthread_mutex_lock(&g_xr_handlers_mu);
+    for (int i = 0; i < KLOVRP_XR_HANDLERS; i++)
+        if (g_xr_handlers[i].fn) { fn[n] = g_xr_handlers[i].fn; ctx[n] = g_xr_handlers[i].ctx; n++; }
+    pthread_mutex_unlock(&g_xr_handlers_mu);
+    for (int i = 0; i < n; i++) fn[i](event, ctx[i]);   // outside the lock: a handler may re-enter
 }
 
 static const char g_ovrp_handle[] = "klepton-ovrplugin";
@@ -11078,6 +11208,7 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_StopEnvironmentDepth", (void *)klovrp_StopEnvironmentDepth},
     {"ovrp_UpdatePassthroughColorLut", (void *)klovrp_UpdatePassthroughColorLut},
     {"UnityPluginLoad",   (void *)klovrp_UnityPluginLoad},
+    {"ovrp_GetUnityInterfaces", (void *)klovrp_GetUnityInterfaces},
     {"UnityPluginUnload", (void *)klovrp_UnityPluginUnload},
     {"JNI_OnLoad",        (void *)klovrp_JNI_OnLoad},
     {"ovrp_GetSkeleton2", (void *)klovrp_GetSkeleton2},
@@ -11134,6 +11265,14 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_UnityOpenXR_OnSessionDestroy",        (void *)klovrp_UOX_OnSessionDestroy},
     {"ovrp_UnityOpenXR_OnAppSpaceChange",        (void *)klovrp_UOX_OnAppSpaceChange},
     {"ovrp_UnityOpenXR_OnAppSpaceChange2",       (void *)klovrp_UOX_OnAppSpaceChange2},
+    {"ovrp_GetAppSpace",                   (void *)klovrp_GetAppSpace},
+    {"ovrp_RegisterOpenXREventHandler",    (void *)klovrp_RegisterOpenXREventHandler},
+    {"ovrp_UnregisterOpenXREventHandler",  (void *)klovrp_UnregisterOpenXREventHandler},
+    {"ovrp_GetNativeOpenXRHandles",        (void *)klovrp_GetNativeOpenXRHandles},
+    {"ovrp_GetOpenXRInstanceProcAddrFunc", (void *)klovrp_GetOpenXRInstanceProcAddrFunc},
+    {"ovrp_TelemetryCreateMetadataHandle", (void *)klovrp_TelemetryCreateMetadataHandle},
+    {"ovrp_GetRuntimeName",                (void *)klovrp_GetRuntimeName},
+    {"ovrp_GetHandPoseSourceInferred",     (void *)klovrp_GetHandPoseSourceInferred},
     {"ovrp_UnityOpenXR_OnSessionStateChange",    (void *)klovrp_UOX_OnSessionStateChange},
     {"ovrp_GetNativeSDKVersion",  (void *)klovrp_GetNativeSDKVersion},
     {"ovrp_GetNativeSDKVersion2", (void *)klovrp_GetNativeSDKVersion2},
@@ -11323,6 +11462,30 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
 // the moment an entry point has an *out-parameter* — those must know where the
 // pointer is and what shape it points at, so they get real implementations.
 static const char *const g_ovrp_result_ok[] = {
+    // Meta's OpenXR-backend startup (OVRPlugin 1.203.0, DreamSpace): each is
+    // `ovrpResult f(scalar...)` in the real plugin — a stored field or a forward,
+    // no out-parameter — so record-and-succeed. The telemetry pair goes with
+    // ovrp_TelemetryCreateMetadataHandle (no telemetry pipe here).
+    "ovrp_SetHandSkeletonVersion", "ovrp_SetSimultaneousHandsAndControllersEnabled",
+    "ovrp_SetEyeBufferSecure", "ovrp_TelemetrySetMetadata", "ovrp_SendUnifiedEventV5",
+    // ...and the rest of the telemetry sink, as a family: in the real 1.203.0
+    // plugin every setter is `ovrpResult f(handle, key, value...)` — a call into
+    // EngineTelemetry and `csel w0, wzr, -1000` — and every SendUnifiedEvent
+    // revision only takes arguments. MR Utility Kit calls SetMetadataInt once
+    // the room has loaded. (TelemetryGetMetadata writes an answer back and is
+    // not here.)
+    "ovrp_TelemetrySetMetadataBool", "ovrp_TelemetrySetMetadataInt",
+    "ovrp_TelemetrySetMetadataLong", "ovrp_TelemetrySetMetadataFloat",
+    "ovrp_TelemetrySetMetadataDouble", "ovrp_TelemetrySetMetadataIntArray",
+    "ovrp_TelemetrySetMetadataLongArray", "ovrp_TelemetrySetMetadataDoubleArray",
+    "ovrp_TelemetrySetMetadataStringArray",
+    "ovrp_SendUnifiedEvent", "ovrp_SendUnifiedEventV2", "ovrp_SendUnifiedEventV3",
+    "ovrp_SendUnifiedEventV4",
+    // Shutdown-callback registration (real 1.203.0: hand the pointer to the
+    // backend, return 0). No shutdown is ever announced here, so accepting the
+    // registration is the whole contract. (The OpenXR-event pair has a real body:
+    // klovrp_RegisterOpenXREventHandler.)
+    "ovrp_RegisterShutdownEventHandler", "ovrp_UnregisterShutdownEventHandler",
 // Unity's native plugin interface. All void.
     "UnitySetGraphicsDevice", "UnitySetEventQueue", "UnityShaderCompilerExtEvent",
     "UnityRenderingExtEvent",
@@ -11642,6 +11805,8 @@ static const char *const g_ovrp_bool_no[] = {
 };
 
 static const char *const g_ovrp_result_unsupported[] = {
+    // Hand-tracking state, with the rest of the hand group (DreamSpace asks).
+    "ovrp_GetHandTrackingState",
     // (Insight Passthrough was here — init, its state and the layer style. They
     // have answers of their own now, which are still UNSUPPORTED for every
     // guest passthrough is not offered to: klovrp_pt_on.)

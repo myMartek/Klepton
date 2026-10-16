@@ -614,6 +614,11 @@ int  kl_ovrp_eyeless_black(void);
 // so no black goes behind it — neither the one above nor the mixed space's.
 int  kl_ovrp_passthrough_live(void);
 
+// Hands one OpenXR event (an XrEventDataBuffer) to every handler the guest
+// registered through ovrp_RegisterOpenXREventHandler. Called by kl_openxr's
+// xrPollEvent for each event it delivers.
+void kl_ovrp_dispatch_openxr_event(void *event);
+
 // How many swapchain stages we tell the guest it has (KL_OVRP_STAGES). The
 // answer to ovrp_GetEyeTextureStageCount, so it bounds every (eye, stage) key
 // in the system — a compositor iterating stages must use this rather than its

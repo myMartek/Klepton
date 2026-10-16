@@ -76,6 +76,13 @@ void *kl_openxr_sym(const char *name);
 // shape kl_ovrp_report prints.
 void kl_openxr_report(FILE *f);
 
+// For OVRPlugin's ovrp_GetNativeOpenXRHandles / ovrp_GetOpenXRInstanceProcAddrFunc:
+// on Meta's OpenXR backend native plugins (the MR Utility Kit) ask OVRPlugin for
+// the guest's XrInstance, XrSession and xrGetInstanceProcAddr to make OpenXR
+// calls of their own. Handles: 0 until both exist.
+int   kl_openxr_native_handles(uint64_t *instance, uint64_t *session);
+void *kl_openxr_get_instance_proc_addr(void);
+
 // The reference-space algebra, checked with no session, no guest and no Steam
 // host. Returns non-zero if every invariant holds; `make xrspace`.
 //
