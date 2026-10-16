@@ -980,6 +980,8 @@ build/t_testbuild: tests/t_testbuild.swift visionos/Sources/KleptonTestBuild.swi
 testbuild: build/t_testbuild
 	./build/t_testbuild
 	python3 tests/t_testbuild_gen.py
+	python3 tests/t_steam_art.py
+	python3 tests/t_steam_art.py
 
 # The compositor's array-view cache (KleptonArrayViews.swift): 25 per-eye
 # swapchain rebuilds on the Mac's Metal device; the released images must be
