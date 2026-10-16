@@ -91,40 +91,35 @@ void kl_ovrp_get_head_pose(float *px, float *py, float *pz,
 // KL_OVRP_LATCH=0 disables it and restores the live read.
 void kl_ovrp_frame_latch(void);
 
-// The pose-boundary gate for KL_OVRP_ONE_POSE (kl_ovrp.c, "ONE POSE PER GUEST
-// FRAME"), as a host check: `make posebound`, in `make check`. It drives the
-// real entry points with the gameplay call pattern — the two ovrp_Update2 steps
-// of one frame carrying different frame indices, the frontend publishing in
-// between — and reads off it what the named case must show. Returns 1 on pass.
+// The pose-boundary gate for one pose per guest frame (kl_ovrp.c, "ONE POSE
+// PER GUEST FRAME"), as a host check: `make posebound`, in `make check`. It
+// drives the real entry points with the gameplay call pattern — the two
+// ovrp_Update2 steps of one frame carrying different frame indices, the
+// frontend publishing in between — and reads off it what the named case must
+// show. Returns 1 on pass.
 //
-// The switch and its boundary are each read ONCE, so a case is a process: set
-// the environment first, then call with the case it was set for (a mismatch
-// fails rather than testing something else). tests/t_posebound.c does that.
+// The boundary is read ONCE and the feature's state is per process, so a case
+// is a process: set the environment first, then call with the case it was set
+// for (a mismatch fails rather than testing something else). tests/t_posebound.c
+// does that.
 //
-//   CYCLE  KL_OVRP_ONE_POSE=1 or unset (the default): one head pose per ovrp_WaitToBeginFrame cycle,
-//          it is the one published when the cycle opened, the frame record
-//          carries it, and the eye transform is pinned with it.
+//   CYCLE  the default: one head pose per ovrp_WaitToBeginFrame cycle, it is
+//          the one published when the cycle opened, the frame record carries
+//          it, and the eye transform is pinned with it.
 //   INDEX  ...with KL_OVRP_POSE_BOUNDARY=index: the same pattern SPLITS — two
 //          poses per cycle. Passing means the split was seen, i.e. that the
 //          measurement the CYCLE case passes on is able to fail.
-//   OFF    KL_OVRP_ONE_POSE=0: nothing is frozen, none of the feature's state
-//          becomes valid, and the answers are the per-step ones as before.
-//   XR     KL_OVRP_ONE_POSE=1, a guest that never speaks OVRPlugin
-//          (kl_openxr): the switch is not in force for a guest that never
-//          calls ovrp_WaitToBeginFrame — nothing frozen, the latch's pose and
-//          the live eye transform, as with the switch off.
-//   MIXED  KL_OVRP_ONE_POSE=1, an OpenXR frame loop whose Meta SDK also calls
-//          ovrp_Update2(step 0, frameIdx 0) in mid-frame (Walkabout): the head
-//          read before and after that call is one pose, nothing frozen.
-//   MIXED_OFF  the same frames with KL_OVRP_ONE_POSE=0 — the reference MIXED
-//          has to equal.
+//   XR     a guest that never speaks OVRPlugin (kl_openxr): one-pose is not in
+//          force for a guest that never calls ovrp_WaitToBeginFrame — nothing
+//          frozen, the latch's pose and the live eye transform.
+//   MIXED  an OpenXR frame loop whose Meta SDK also calls ovrp_Update2(step 0,
+//          frameIdx 0) in mid-frame (Walkabout): the head read before and
+//          after that call is the latch's one pose, nothing frozen.
 enum {
     KL_OVRP_POSEBOUND_CYCLE = 0,
     KL_OVRP_POSEBOUND_INDEX,
-    KL_OVRP_POSEBOUND_OFF,
     KL_OVRP_POSEBOUND_XR,
     KL_OVRP_POSEBOUND_MIXED,
-    KL_OVRP_POSEBOUND_MIXED_OFF,
 };
 int kl_ovrp_pose_boundary_selftest(FILE *f, int which);
 

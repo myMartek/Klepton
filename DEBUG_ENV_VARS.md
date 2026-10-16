@@ -2353,10 +2353,12 @@ The composite/timewarp pass — one file, compiled by both compositors
   named instead of returning it as it stands now from the pose entry points.
   **Off by default since 2026-10-15** (the owner tested games with and without
   it on the headset and they ran fine either way); the OVRPlugin half of the
-  same default is `KL_OVRP_ONE_POSE`, which is on. The app's Advanced › Test
-  switch *XR prediction* sets `KL_XR_PREDICT=1` and `KL_OVRP_ONE_POSE=0`
-  together; an installation can start it on (`KLEPTON_TEST_ON=KL_XR_PREDICT`,
-  AVP Play's per-game option). The launch line wins over both.
+  same default is one pose per guest frame, which is always on (see "ONE POSE
+  PER GUEST FRAME" below). The app's Advanced › Test switch *XR prediction*
+  sets `KL_XR_PREDICT=1` (OpenXR games only since the OVRPlugin switch
+  `KL_OVRP_ONE_POSE` was removed); an installation can start it on
+  (`KLEPTON_TEST_ON=KL_XR_PREDICT`, AVP Play's per-game option). The launch
+  line wins over both.
   The prediction is the frontend's (a timestamped device-anchor query, walked
   back 5 ms at a time until the tracker answers), capped 50 ms ahead, and it is
   computed ONCE per (frame, instant): `xrLocateSpace`, `xrLocateViews` and the
@@ -2604,8 +2606,19 @@ The composite/timewarp pass — one file, compiled by both compositors
 
 ## Audio (`runtime/media/kl_audio.c`)
 
-The CoreAudio output sink behind `kl_opensl.c`'s buffer queue (which itself
-reads no knobs).
+The CoreAudio output sink behind `kl_opensl.c`'s buffer queue and
+`kl_aaudio.c`'s streams: rebelancap's sink (his commits 3fc48c9 and 975cad6),
+the only audio path since the switch between it and the earlier one
+(`KL_AUDIO_SINK2`) was removed. Every guest sample format (8, 16, 24, 32 bit,
+float) is widened to float before the resampler; each OpenSL player and AAudio
+stream is a source of its own, and ONE owns the output — the first to hand over
+a buffer that is not silence; the others are paced for their buffer's length
+and dropped, and the owner changes after 2 s of its silence while another
+source is heard. An empty buffer between two blocks of an AAudio guest's mixer
+is waited out of the sink's lead instead of played. `dlsym` on libaaudio
+answers NULL for a name that is not served. A census is printed every 15 s
+(`[au] …` per source, `[aaudio] …` per stream) and one line in the `[hb]` loop.
+The device stays open until the last source has closed.
 
 - `KL_AUDIO=0` — no CoreAudio device at all: the OpenSL feeder goes back to
   pacing each buffer with `usleep` and dropping it, which is what this runtime
@@ -2613,15 +2626,18 @@ reads no knobs).
   like an audio-induced timing change — and read **by value** (`kl_env_on`),
   since it defaults on.
 - `KL_AAUDIO_BURST=<frames>` — the size of every pull an AAudio guest's mixer
-  is asked to serve, 32..8192. Default **256** (since 2026-10-13; it was 240):
+  is asked to serve, 32..8192, when the guest does not set its own with
+  `setFramesPerDataCallback`. Default **256** (since 2026-10-13; it was 240):
   a power of two divides the fixed blocks sound engines mix in, where 240
   against a 1024-frame block left every fifth pull with 176 zeros, a fine
-  crackle. Steam Link keeps 240 (its jitter buffer is configured in multiples
-  of it) and four titles with an older Wwise keep 1024, which is what each was
-  heard with. A value given here overrides all of that.
+  crackle. Five titles whose Wwise was heard to need it get **1024**: AC Nexus
+  (x5812519008825194), The Walking Dead: Saints & Sinners (x2897337400373711),
+  Tales from the Galaxy's Edge (x3484270071659289), Pistol Whip
+  (x2104963472963790) and Tetris Effect (x3386618894743567). A value given
+  here overrides all of that.
 - `KL_AAUDIO_OLD_BURST=1` — the default is 240 again, for the games that had
-  it. The way back if a game sounds worse at 256; a switch in the start
-  window's test group.
+  it (the five Wwise titles keep 1024). The way back if a game sounds worse at
+  256; a switch in the start window's test group.
 - `KL_AUDIO_DUMP=<path>` — tee exactly the frames the render callback will
   hand the hardware into a WAV. The only way to check *what* is being played
   rather than merely that something is: counts and peak levels cannot tell
@@ -2644,20 +2660,42 @@ reads no knobs).
 - `KL_AUDIO_TRACE=1` — one line every 200 writes: input/output frame counts,
   ring fill in frames and ms, underruns. What to turn on when the sound is
   present but wrong.
-- `KL_AUDIO_MIX_UNLOCK=0|1` — with two output streams mixing into the ring, let
-  a writer that waits for room nap *outside* the write lock, so the other
-  stream is not held up behind it. Default on for Pistol Whip
-  (x2104963472963790) and Steam Link (steamlink-vr), whose shell stream and VR
-  client stream together fell behind real time — dropouts every few seconds.
-  While two sources mix, the periodic `guest PCM so far` line is followed by
-  one line per source: its share of real time since it opened and how often it
-  fell behind the reader and was resynced.
-- `KL_SL_SILENT_YIELD=0` — (`runtime/media/kl_opensl.c`) keep feeding the
-  device from an OpenSL player that has only ever produced silence while
-  another same-rate player is audible. Default 1: such a player stops writing
-  (it paces itself) until it hands over a non-silent buffer, because its
-  back-to-back writes starved the audible player's turn at the mix lock — Max
-  Mustard's FMOD output beside Unity's own silent one, heard as choppy audio.
+- `KL_AUDIO_MIX_SOURCES=0|1` — no owner: every source reaches the device,
+  MIXED. Each is widened from its own format and resampled from its own rate
+  with its own resampler position, and summed into the ring at a cursor of its
+  own; one stream pausing or flushing leaves the others playing. **Default on
+  for Steam Link** (steamlink-vr), which keeps two AAudio outputs open during a
+  stream — the 2D shell's SDL3 one (float, 960 frames) and the VR client's own
+  (int16, 256) — and both carry sound (community fix #49). While two sources
+  mix, the periodic `guest PCM so far` line and the 15 s census are followed by
+  one line per source: its share of real time since it came and how often it
+  fell behind the reader and was resynced. `make audio-mix` checks it against
+  the real output device.
+- `KL_AUDIO_MIX_UNLOCK=0|1` — while sources mix, let a writer that waits for
+  room nap *outside* the mix lock, so the other stream is not held up behind
+  it. Default on for Steam Link and Pistol Whip (x2104963472963790): Steam
+  Link's pair managed ~200 writes a second where real time is ~237 with the
+  nap under the lock — dropouts every few seconds.
+- `KL_AUDIO_SOURCE=opensl|aaudio` — force the owner: only that backend reaches
+  the device.
+- `KL_AUDIO_PREFER=opensl|aaudio` — while a stream of that backend is open it
+  owns the output from its first buffer, heard or not, and the others are
+  paced and dropped; with none open, the usual rules. **Default `aaudio` for
+  Pistol Whip**, whose Unity OpenSL player is near-silent beside Wwise's AAudio
+  stream (community fixes #26/#27: AAudio owns the device exclusively).
+- `KL_AUDIO_STEAL_MS=<n>` — how long the owner must be silent before another
+  source that is heard takes over (2000).
+- `KL_AAUDIO_HOLE_DROP=<n>`, `KL_AAUDIO_SEAM_WAIT_MS=<ms>`,
+  `KL_AAUDIO_SEAM_LEAD_MS=<ms>` — the block-seam handling; `…_WAIT_MS=0`
+  drops an empty buffer and pulls again without waiting.
+- `KL_AUDIO_REPORT_SECS=<n>` — the census interval (15; 0 turns it off).
+- `KL_AAUDIO_DUMP=<path>`, `KL_AUDIO_DUMP_S=<n>` — a WAV of what the guest's
+  callback handed over (beside `KL_AUDIO_DUMP`, what goes to the device), `n`
+  seconds each (20), closed by themselves.
+- Gates: `make audio-formats` (sample formats, OpenSL sources) is in `make
+  check`; `make aaudio-seam` (the block-seam harness, 20 s) and `make
+  audio-mix` (two streams mixed) run in real time against the output device
+  and are not.
 - `KL_AUDIO_SPATIAL=1` — visionOS only. Leave the system's spatialiser in the
   path. The default is `setIntendedSpatialExperience(.bypassed)` plus two
   preferred output channels (`KleptonAudio.directStereo`, imported from ALVR's
@@ -3956,31 +3994,26 @@ rendering at "high". "high" itself changed with it for every Vulkan game: box 0.
 0.30 and 0.08); the Test switch `KL_FOVE_BOX=0.30` + `KL_FOVE_FLOOR=0.08` is the way back.
 
 After the release, one piece of his pose core (his commit be18669): added as a
-switch that was off (2026-10-13), **on by default since 2026-10-15** as the
-OVRPlugin half of "no XR prediction". It is no longer a Test switch of its own;
-the Test switch *XR prediction* turns it off (`KL_OVRP_ONE_POSE=0`), and so does
-a run from `Documents/lx/env.txt` or the launch line. `runtime/xr/kl_ovrp.c`,
-the block `ONE POSE PER GUEST FRAME`.
+switch that was off (2026-10-13), on by default from 2026-10-15 as the
+OVRPlugin half of "no XR prediction", and **always on** since its switch
+(`KL_OVRP_ONE_POSE`) was removed. `runtime/xr/kl_ovrp.c`, the block `ONE POSE
+PER GUEST FRAME`.
 
-- `KL_OVRP_ONE_POSE=1` (or `index`; **the default since 2026-10-15**) — one
-  head pose per guest frame, the OVRPlugin half of "no XR prediction" (see
-  `KL_XR_PREDICT`). `KL_OVRP_ONE_POSE=0` is the way back, which the app's Test
-  switch *XR prediction* sets. At the
+- One head pose per guest frame, for a guest that delimits its frames with
+  `ovrp_WaitToBeginFrame` (see `KL_XR_PREDICT` for the OpenXR side). At the
   frame's boundary the published head pose is frozen together with the eye
   transform (offsets and cant), and every head-derived answer for the rest of
   that frame returns it: both `ovrp_Update2/3` steps, every
   `ovrp_GetNodePoseState`, the eye view and the head an OpenXR guest reads.
   Hands and controllers stay live. The frame record filed for reprojection is
   taken from the same samples and so carries the frozen pose.
-  **Off** (`0`, `off`, `no`, `false`, `live`): nothing is frozen and every read
-  takes the path it took before; unset or anything else is on, as in his fork. Without it an OVRPlugin
-  guest gets one sample per step, so the Physics and the Render step differ, and
-  a second Render sample in the same frame differs again. `KL_OVRP_LATCH` and
-  the step samples keep running underneath. A read that names a frame index
-  (`ovrp_GetNodePoseState3`) is still answered from that index's own sample
-  (`KL_OVRP_RECORD_INDEXED`), which with this switch on is the pose frozen when
-  the guest sampled for that index.
-- `KL_OVRP_POSE_BOUNDARY=cycle|index` — with `KL_OVRP_ONE_POSE` only: what
+  Without it an OVRPlugin guest got one sample per step, so the Physics and the
+  Render step differed, and a second Render sample in the same frame differed
+  again. `KL_OVRP_LATCH` and the step samples keep running underneath. A read
+  that names a frame index (`ovrp_GetNodePoseState3`) is still answered from
+  that index's own sample (`KL_OVRP_RECORD_INDEXED`), which is the pose frozen
+  when the guest sampled for that index. `make posebound` is the gate.
+- `KL_OVRP_POSE_BOUNDARY=cycle|index` — for a guest that arms one-pose: what
   renews the frozen pose. **Default `cycle`**: once per `ovrp_WaitToBeginFrame`.
   `index`: whenever `ovrp_Update2/3` carries a new frame index — which freezes
   twice in a frame whose two steps carry different indices (Unity with the
@@ -4016,58 +4049,6 @@ the block `ONE POSE PER GUEST FRAME`.
     above that, reads named another frame's index (a render thread still
     drawing the previous frame — each such read still matches that frame's
     record) or straddled the boundary.
-
-His audio sink (his commits 3fc48c9 and 975cad6), whole, as a switch that is
-off (2026-10-14; the owner heard Moss both ways on the headset and both
-sounded right). A row in the window's Test group. It is not merged into the
-audio path that has shipped: both are linked in, and
-`runtime/media/kl_audio_switch.c` answers every `kl_audio_*`, `kl_opensl_*` and
-`kl_aaudio_*` name from the one chosen for the run.
-
-- `KL_AUDIO_SINK2=1` — play through the second audio path
-  (`runtime/media/kl_sink2_audio.c`, `kl_sink2_opensl.c`, `kl_sink2_aaudio.c`;
-  his files, changed only in the names of the headers they include). What is
-  different with it on:
-  - every guest sample format (8, 16, 24, 32 bit, float) is widened to float
-    before the resampler; the first path converts the other widths to 16 bit in
-    the OpenSL feeder and takes 16 bit and float from AAudio;
-  - each OpenSL player and each AAudio stream is a source of its own, and ONE
-    owns the output: the first to hand over a buffer that is not silence. The
-    others are paced for their buffer's length and dropped. The owner changes
-    after 2 s of its silence while another source is heard. The first path
-    settles the device by rate and mixes sources at the same rate
-    (`kl_opensl_yield_device`, `take_device`, `silent_yield`);
-  - an AAudio stream is asked for 256 frames whatever the game — the five
-    Wwise titles the first path asks 1024 of are asked 256 too — and an empty
-    buffer between two blocks of the guest's mixer is waited out of the sink's
-    lead (12 ms at most) instead of played;
-  - `dlsym` on libaaudio answers NULL for a name that is not served, where the
-    first path hands out a stub that aborts when called;
-  - a census every 15 s (`[au] …` per source, `[aaudio] …` per stream) and one
-    line in the `[hb]` loop.
-  The choice is made by the first call that opens, looks up or plays something
-  and is logged once: `[au] audio path: the first sink` or `… the second sink`.
-  A guest with two streams of one backend that are both heard (Steam Link's
-  two AAudio outputs) therefore plays one of them; `KL_AUDIO_MIX_SOURCES=1`
-  is his way round it and has not been run here.
-  With the switch on these do nothing: `KL_AAUDIO_OLD_BURST`,
-  `KL_AUDIO_MIX_UNLOCK`, `KL_SL_SILENT_YIELD`, `KL_AAUDIO_TRACE`.
-- With `KL_AUDIO_SINK2=1` only, his knobs:
-  - `KL_AAUDIO_BURST=<frames>` — frames per callback (256); also read by the
-    first path.
-  - `KL_AUDIO_SOURCE=opensl|aaudio` — force the owner. `KL_AUDIO_MIX_SOURCES=1`
-    — no owner, every source writes into the one ring. `KL_AUDIO_STEAL_MS=<n>`
-    — how long the owner must be silent before another takes over (2000).
-  - `KL_AAUDIO_HOLE_DROP=<n>`, `KL_AAUDIO_SEAM_WAIT_MS=<ms>`,
-    `KL_AAUDIO_SEAM_LEAD_MS=<ms>` — the block-seam handling; `…_WAIT_MS=0`
-    drops an empty buffer and pulls again without waiting.
-  - `KL_AUDIO_REPORT_SECS=<n>` — the census interval (15; 0 turns it off).
-  - `KL_AUDIO_DUMP=<path>`, `KL_AAUDIO_DUMP=<path>`, `KL_AUDIO_DUMP_S=<n>` —
-    a WAV of what goes to the device and of what the guest's callback handed
-    over, `n` seconds each (20), closed by themselves.
-- Gates: `make audioswitch` (the switch, both ways) and `make sink2-audio` (his
-  format test) are in `make check`; `make sink2-aaudio` (his block-seam
-  harness) runs 20 s in real time against the output device and is not.
 
 ## The metrics panel (`KL_STATS_CARD`)
 
@@ -4162,17 +4143,18 @@ audio path that has shipped: both are linked in, and
 
 - `KLEPTON_TEST_ON=<name>[,<name>…]` — a BUILD-time variable, read by
   `visionos/gen_xcodeproj.py`: the Test switches (by the name of their
-  variable, e.g. `KL_XR_PREDICT,KL_AUDIO_SINK2`) that this installation has
+  variable, e.g. `KL_XR_PREDICT,KL_METALFX_UPSCALE`) that this installation has
   on from its first start. It lands in Info.plist as `KLTestOn`;
   `KleptonTestSwitches.isOn` takes a choice made in the game's window first and
   this list second, so a switch named here can still be turned off in the game
   (and stays off), and one that is put back follows the installation again.
   Anything that is not a `KL_…` name is dropped. Unset: every switch is off
-  until chosen, as before. AVP Play sets it from its setting "Experimental:
-  switch on the new pose and audio implementations when installing" and from
-  a game's own option *XR prediction* (`KL_XR_PREDICT`); the log line of such a
-  switch ends in `(on from the installation)`. `KL_OVRP_ONE_POSE` in the list
-  is no longer a switch of its own (it is on by default) and does nothing.
+  until chosen, as before. AVP Play sets it from a game's own option *XR
+  prediction* (`KL_XR_PREDICT`) and from its MetalFX setting
+  (`KL_METALFX_UPSCALE`); the log line of such a switch ends in `(on from the
+  installation)`. `KL_OVRP_ONE_POSE` and `KL_AUDIO_SINK2` in the list (set by
+  older AVP Play versions for "Experimental: the new pose and audio
+  implementations") are no longer switches and do nothing: both are always on.
   `KL_OVRP_EYE_MAX` in the list is no longer a switch either: it sets *Max
   resolution per eye* to 4608 at the first start, once (see `KL_OVRP_EYE_MAX`).
 - `KLEPTON_TEST_ON_EXTRA=<name>[,<name>…]` — more names for the same list,

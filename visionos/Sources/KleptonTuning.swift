@@ -660,8 +660,12 @@ enum KleptonTestSwitches {
         /// Only in a test build (KleptonTestBuild): listed and applied there,
         /// never in a player's build, even when KLTestOn names it.
         var testBuildOnly = false
+        /// Where the choice is stored, when that is not what `key` derives — a
+        /// switch that has lost its `also` keeps the key a player's choice
+        /// was stored under.
+        var storedKey: String? = nil
         var id: String { env + "=" + value }
-        var key: String { "klepton.test." + env + (also.isEmpty ? "" : "." + value) }
+        var key: String { storedKey ?? ("klepton.test." + env + (also.isEmpty ? "" : "." + value)) }
     }
 
     /// The switches this installation has on from the start: named by whoever
@@ -703,15 +707,17 @@ enum KleptonTestSwitches {
                              "Foveation: keine Zone unter halber Auflösung"),
                   note: klT("GL games with foveated rendering. The edge of the picture gets sharper textures and costs about 70% more fragments; watch the frame rate.",
                             "GL-Spiele mit Foveated Rendering. Der Bildrand bekommt schärfere Texturen und kostet etwa 70 % mehr Bildpunkte; auf die Bildrate achten.")),
-            // Off by default since 2026-10-15 on both paths: OpenXR (KL_XR_PREDICT) and Meta's own interface
-            // (KL_OVRP_ONE_POSE, one latched pose per frame, on by default). This switch brings back the
-            // behaviour before: the head predicted to the time the picture is shown, and a fresh pose for
-            // every query. AVP Play's per-game option "XR prediction" starts it on (KLEPTON_TEST_ON=KL_XR_PREDICT).
+            // Off by default since 2026-10-15 (KL_XR_PREDICT). This switch brings back the head predicted to
+            // the time the picture is shown, for games that come through OpenXR. Games on Meta's own
+            // interface always get one latched pose per frame (kl_ovrp.c, "ONE POSE PER GUEST FRAME"); the
+            // switch that took that away as well (KL_OVRP_ONE_POSE=0) is gone. The stored key is the one the
+            // switch had while it set both. AVP Play's per-game option "XR prediction" starts it on
+            // (KLEPTON_TEST_ON=KL_XR_PREDICT).
             Entry(env: "KL_XR_PREDICT", value: "1",
                   title: klT("XR prediction", "XR-Vorhersage"),
-                  note: klT("Every game. Off, the game gets the head pose as it is when the frame starts, one per frame. On, as before: games that come through OpenXR (Half-Life: Alyx, Steam Link, Doom 3, Walkabout, Beat Saber 1.45) get the head predicted to the moment the picture is shown, and games that talk to Meta's own interface (Moss, Tetris Effect) a newer pose each time they ask within a frame. Turn the head quickly in a level and compare: does the picture stay steadier, or does it lag?",
-                            "Jedes Spiel. Aus bekommt das Spiel die Kopfpose, wie sie zu Beginn des Frames ist, eine pro Frame. An wie bisher: Spiele, die über OpenXR kommen (Half-Life: Alyx, Steam Link, Doom 3, Walkabout, Beat Saber 1.45), bekommen den Kopf auf den Moment vorhergesagt, in dem das Bild gezeigt wird, und Spiele, die über Metas eigene Schnittstelle laufen (Moss, Tetris Effect), jedes Mal eine neuere Pose, wenn sie innerhalb eines Frames fragen. Im Level den Kopf schnell drehen und vergleichen: steht das Bild ruhiger, oder hängt es nach?"),
-                  also: [("KL_OVRP_ONE_POSE", "0")]),
+                  note: klT("Games that come through OpenXR (Half-Life: Alyx, Steam Link, Doom 3, Walkabout, Beat Saber 1.45). Off, the game gets the head pose as it is when the frame starts, one per frame. On, as before: the head is predicted to the moment the picture is shown. Games that talk to Meta's own interface (Moss, Tetris Effect) always get one pose per frame; this does not change them. Turn the head quickly in a level and compare: does the picture stay steadier, or does it lag?",
+                            "Spiele, die über OpenXR kommen (Half-Life: Alyx, Steam Link, Doom 3, Walkabout, Beat Saber 1.45). Aus bekommt das Spiel die Kopfpose, wie sie zu Beginn des Frames ist, eine pro Frame. An wie bisher: der Kopf wird auf den Moment vorhergesagt, in dem das Bild gezeigt wird. Spiele, die über Metas eigene Schnittstelle laufen (Moss, Tetris Effect), bekommen immer eine Pose pro Frame; daran ändert dieser Schalter nichts. Im Level den Kopf schnell drehen und vergleichen: steht das Bild ruhiger, oder hängt es nach?"),
+                  storedKey: "klepton.test.KL_XR_PREDICT.1"),
             Entry(env: "KL_OVRP_EYE_DESC_CAP", value: "1",
                   title: klT("Resolution: the game's own scale stays under the limit",
                              "Auflösung: der eigene Faktor des Spiels bleibt unter der Obergrenze"),
@@ -775,11 +781,6 @@ enum KleptonTestSwitches {
                              "Ton: dem Spiel wird ein Tonausgang gezeigt statt keinem"),
                   note: klT("For a game that stays silent: some sound engines pick their output from the list of devices and give up on an empty one.",
                             "Für ein Spiel, das stumm bleibt: manche Sound-Engines wählen ihren Ausgang aus der Geräteliste und geben bei einer leeren auf.")),
-            Entry(env: "KL_AUDIO_SINK2", value: "1",
-                  title: klT("Sound: the new audio path",
-                             "Ton: die neue Audio-Implementierung"),
-                  note: klT("Every game with sound. Everything between the game's sound interface and the output is a second implementation, from rebelancap's fork: every sample format is converted properly, one of the game's sound outputs owns the device (the first one that is heard, instead of two being mixed), and the pauses between a sound engine's blocks are waited out instead of played as gaps. Listen for crackle, dropouts, sound that lags behind the picture, and whether music, voices and effects are all there. The switch for the old buffer size does nothing with it. Steam Link plays through two outputs at once; with this on only one of them is heard at a time.",
-                            "Jedes Spiel mit Ton. Alles zwischen der Tonschnittstelle des Spiels und der Ausgabe ist eine zweite Implementierung aus rebelancaps Fork: jedes Sample-Format wird richtig umgewandelt, einer der Tonausgänge des Spiels besitzt das Gerät (der erste, der zu hören ist, statt dass zwei gemischt werden), und die Pausen zwischen den Blöcken einer Sound-Engine werden abgewartet statt als Lücken gespielt. Auf Knistern, Aussetzer, nachhängenden Ton achten und darauf, ob Musik, Stimmen und Effekte alle da sind. Der Schalter für die alte Puffergröße bewirkt damit nichts. Steam Link spielt über zwei Ausgänge zugleich; hiermit ist immer nur einer davon zu hören.")),
             Entry(env: "KL_EGL_CREATE_CONTEXT_EXT", value: "1",
                   title: klT("EGL: name EGL_KHR_create_context",
                              "EGL: EGL_KHR_create_context nennen"),

@@ -41,7 +41,7 @@
 // non-zero at all — silence never takes ownership of the sink, and without
 // ownership there is no lead to spend and nothing under test.
 //
-//   make sink2-aaudio
+//   make aaudio-seam
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -51,10 +51,8 @@
 #include <time.h>
 #include <unistd.h>
 
-// His names, as the second sink is linked here — past kl_audio_switch.c.
-#include "kl_sink2.h"
-#include "kl_sink2_aaudio.h"
-#include "kl_sink2_audio.h"
+#include "kl_aaudio.h"
+#include "kl_audio.h"
 
 // ---- the partial fill ----
 //

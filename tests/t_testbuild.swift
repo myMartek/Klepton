@@ -21,9 +21,9 @@ struct TestBuildCheck {
         expect(["KL_TEST_BUILD": "0"], false)
         expect(["KL_TEST_BUILD": ""], false)
         expect(["KL_TEST_BUILD": "yes"], false)
-        expect(["KLEPTON_TEST_ON": "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2"], false)
+        expect(["KLEPTON_TEST_ON": "KL_XR_PREDICT,KL_METALFX_UPSCALE"], false)
         expect(["KLEPTON_TEST_ON": "KL_TEST_BUILD"], false)
-        expect(["KLEPTON_TEST_ON": "KL_AUDIO_SINK2", "KL_TEST_BUILD": "1"], true)
+        expect(["KLEPTON_TEST_ON": "KL_XR_PREDICT", "KL_TEST_BUILD": "1"], true)
         if failed > 0 { print("testbuild: FAIL (\(failed))"); exit(1) }
         print("testbuild: PASS")
     }

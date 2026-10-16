@@ -1925,9 +1925,9 @@ static float g_eye_rot[2][4] = { { 0, 0, 0, 1 }, { 0, 0, 0, 1 } };
 
 // --- the eye transform, pinned for the guest's frame ------------------------
 //
-// Part of KL_OVRP_ONE_POSE (from rebelancap's fork, commit be18669; on by
-// default since 2026-10-15 — see the ONE POSE PER GUEST FRAME block further down). Nothing
-// below is valid, counted or read until that switch has frozen its first pose.
+// Part of one pose per guest frame (from rebelancap's fork, commit be18669 —
+// see the ONE POSE PER GUEST FRAME block further down). Nothing below is
+// valid, counted or read until that has frozen its first pose.
 //
 // The offsets and the cant together ARE device_from_view, and the frontend
 // pushes both once per compositor iteration — i.e. at panel rate, faster than
@@ -2039,9 +2039,9 @@ static void klovrp_eye_offset(int eye, float *ox, float *oy, float *oz) {
         *ox = (eye == 1 ? 0.5f : -0.5f) * forced; *oy = 0.0f; *oz = 0.0f;
         return;
     }
-    // KL_OVRP_ONE_POSE: the frame's promoted offsets where there are any, so
-    // both eyes and every query inside one guest frame see ONE
-    // device_from_view. Never taken with one-pose off.
+    // One pose per guest frame: the frame's promoted offsets where there are
+    // any, so both eyes and every query inside one guest frame see ONE
+    // device_from_view. Never taken for a guest that does not arm it.
     if ((unsigned)eye <= 1) {
         float o[3];
         if (klovrp_eye_frame_read(eye, o, NULL)) {
@@ -2736,12 +2736,12 @@ static klovrp_pose klovrp_head_published(void) {
     return h;
 }
 
-// One pose per guest frame (KL_OVRP_ONE_POSE, on by default) — the layer above
-// this one. Defined below, because it reports its divergence against
-// klovrp_head_published() and measures it with klovrp_quat_degrees; declared
-// here because klovrp_head() is the first thing that has to consult it. `who`
-// is the entry point, for the counters. Returns 0 at once when the switch is
-// off, and the caller takes the path it took before the switch existed.
+// One pose per guest frame — the layer above this one. Defined below, because
+// it reports its divergence against klovrp_head_published() and measures it
+// with klovrp_quat_degrees; declared here because klovrp_head() is the first
+// thing that has to consult it. `who` is the entry point, for the counters.
+// Returns 0 at once for a guest that does not delimit its frames through
+// OVRPlugin, and the caller takes the latch / step-ring path.
 enum { KLOP_UPDATE2, KLOP_STEP, KLOP_HEAD, KLOP_EYEVIEW, KLOP_N };
 static int klovrp_one_pose_get(klovrp_pose *out, int who);
 
@@ -2772,18 +2772,15 @@ static float klovrp_quat_degrees(const klovrp_pose *a, const klovrp_pose *b) {
     return 2.0f * acosf(d) * (180.0f / 3.14159265358979f);
 }
 
-// --- ONE POSE PER GUEST FRAME (KL_OVRP_ONE_POSE) ----------------------------
+// --- ONE POSE PER GUEST FRAME -----------------------------------------------
 //
-// Taken over from rebelancap's fork (commit be18669), where it is on by
-// default. **ON by default here too since 2026-10-15** — it is the OVRPlugin
-// half of "no XR prediction" (KL_XR_PREDICT is off by default on the OpenXR
-// side): one latched sample per frame, never a newer one. The owner tested
-// games with and without prediction on the headset and they ran fine either
-// way. KL_OVRP_ONE_POSE=0 (or `off`, `live`) — which the app's Advanced › Test
-// switch "XR prediction" sets, together with KL_XR_PREDICT=1 — turns it off,
-// and then every function below returns at its first line and every caller
-// takes exactly the path it took before the switch existed. It applies to a
-// guest that delimits its frames with ovrp_WaitToBeginFrame, and to no other
+// Taken over from rebelancap's fork (commit be18669), where it is always on.
+// It is the OVRPlugin half of "no XR prediction" (KL_XR_PREDICT is off by
+// default on the OpenXR side): one latched sample per frame, never a newer one.
+// The owner tested games with and without it on the headset; it was the
+// default from 2026-10-15 behind KL_OVRP_ONE_POSE, and since that switch was
+// removed there is no way back to a fresh pose per query. It applies to a guest
+// that delimits its frames with ovrp_WaitToBeginFrame, and to no other
 // (klovrp_one_pose_active): an OpenXR guest has its one pose per frame from
 // kl_ovrp_frame_latch already.
 //
@@ -2885,40 +2882,16 @@ static int         g_op_index_keyed;
 // freezes, and every later one in the same cycle reuses that pose whatever
 // index it carries.
 //
-// A guest that never calls WaitToBeginFrame never arms, and for it the switch
+// A guest that never calls WaitToBeginFrame never arms, and for it one-pose
 // does NOTHING — see klovrp_one_pose_active. g_op_arm_driven is the
 // discriminator.
 //
-// KL_OVRP_POSE_BOUNDARY=cycle (default) | index. Only read with one-pose on.
+// KL_OVRP_POSE_BOUNDARY=cycle (default) | index. Only read for a guest that arms.
 static int         g_op_armed;          // a frame cycle has opened and not yet frozen
 static int         g_op_arm_driven;     // this guest delimits its own cycles
 static uint64_t    g_op_freezes;        // opens that took a new pose
 static uint64_t    g_op_reuses;         // opens that correctly reused the frame's
 static uint64_t    g_op_arms;           // frame cycles seen
-
-static int klovrp_one_pose_enabled(void) {
-    static int on = -1;
-    if (on < 0) {
-        const char *m = kl_env_str("KL_OVRP_ONE_POSE", NULL);
-        // On unless switched off. "0", "off", "no", "false" and "live" (his
-        // name for the old behaviour) turn it off; unset, empty, "1", "index",
-        // "on" and anything else leave it on.
-        int set = m && m[0];
-        int v = !set || (strcmp(m, "0") && strcasecmp(m, "off") &&
-                         strcasecmp(m, "no") && strcasecmp(m, "false") &&
-                         strcasecmp(m, "live"));
-        if (v)
-            fprintf(stderr, "  [ovrp] one pose per guest frame ON (KL_OVRP_ONE_POSE"
-                            "=%s) — takes effect when the guest first calls "
-                            "ovrp_WaitToBeginFrame; a guest that never does is "
-                            "left exactly as it is.\n", set ? m : "unset, the default");
-        else
-            fprintf(stderr, "  [ovrp] one pose per guest frame OFF (KL_OVRP_ONE_POSE=%s):"
-                            " a fresh head sample per step, as before the switch\n", m);
-        on = v;
-    }
-    return on;
-}
 
 static int klovrp_pose_boundary_cycle(void) {
     static int on = -1;
@@ -2937,9 +2910,9 @@ static int klovrp_pose_boundary_cycle(void) {
     return on;
 }
 
-// Whether one-pose is in force for THIS guest: switched on, and the guest has
-// delimited a frame through OVRPlugin (ovrp_WaitToBeginFrame). Everything the
-// switch does asks this first, so for any other guest it changes nothing: no
+// Whether one-pose is in force for THIS guest: the guest has delimited a frame
+// through OVRPlugin (ovrp_WaitToBeginFrame). Everything one-pose does asks
+// this first, so for any other guest it changes nothing: no
 // freeze at kl_ovrp_frame_latch or at ovrp_Update2/3, klovrp_one_pose_get
 // answers no (latch and step ring as always), the eye transform stays live,
 // nothing is counted and no census is printed.
@@ -2949,15 +2922,13 @@ static int klovrp_pose_boundary_cycle(void) {
 // where the latch already gives it one pose per frame — with Meta's SDK calling
 // ovrp_Update2(step 0, frameIdx 0) in mid-frame. Index 0 is an unconditional
 // freeze, so each of those calls renewed the head the OpenXR queries read:
-// 0.30 -> 0.35 inside one frame in the harness, one pose with the switch off.
+// 0.30 -> 0.35 inside one frame in the harness, where the latch alone gives one.
 static int klovrp_one_pose_active(void) {
-    return klovrp_one_pose_enabled() &&
-           __atomic_load_n(&g_op_arm_driven, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&g_op_arm_driven, __ATOMIC_ACQUIRE);
 }
 
 // Called from the guest's own once-per-frame entry point. See above.
 static void klovrp_one_pose_arm(void) {
-    if (!klovrp_one_pose_enabled()) return;
     if (!__atomic_exchange_n(&g_op_arm_driven, 1, __ATOMIC_ACQ_REL))
         fprintf(stderr, "  [ovrp] one pose per guest frame IN FORCE: the guest "
                         "delimits its frames with ovrp_WaitToBeginFrame\n");
@@ -3262,7 +3233,7 @@ static void klovrp_headless_pose(void) {
 
 void kl_ovrp_frame_latch(void) {
     klovrp_headless_pose();
-    // KL_OVRP_ONE_POSE, before the latch's own enable check, and only for a
+    // One pose per guest frame, before the latch's own enable check, and only for a
     // guest that delimits its frames through OVRPlugin (for any other this is
     // skipped whole — klovrp_one_pose_active). There this call can be the first
     // thing in a cycle: ovrp_WaitToBeginFrame arms and, where a pacer is
@@ -3372,9 +3343,10 @@ void kl_ovrp_eye_view(int eye, float *px, float *py, float *pz,
                       float *qx, float *qy, float *qz, float *qw,
                       float tangents[4]) {
     if ((unsigned)eye > 1) eye = 0;
-    // KL_OVRP_ONE_POSE: the frame's frozen pose, attributed to this entry point
-    // rather than borrowed from klovrp_head(), so the counters say which paths
-    // the guest actually asks through. Off: klovrp_head(), as before.
+    // One pose per guest frame: the frame's frozen pose, attributed to this
+    // entry point rather than borrowed from klovrp_head(), so the counters say
+    // which paths the guest actually asks through. A guest that never arms:
+    // klovrp_head().
     klovrp_pose head;
     if (!klovrp_one_pose_get(&head, KLOP_EYEVIEW)) head = klovrp_head();
 
@@ -3587,8 +3559,8 @@ static uint64_t klovrp_Update2(int step, int frame_index, double prediction) {
     (void)prediction;
     int ix = klovrp_step_ix(step);
 
-    // KL_OVRP_ONE_POSE (on by default; with it off both calls return at once): THE
-    // FRAME BOUNDARY, for a guest that speaks OVRPlugin. Whichever step arrives
+    // One pose per guest frame (both calls return at once for a guest that
+    // never arms): THE FRAME BOUNDARY, for a guest that speaks OVRPlugin. Whichever step arrives
     // first in a new frame cycle (or with a new frame index, see
     // KL_OVRP_POSE_BOUNDARY) opens the frame and freezes its one pose; the
     // other step then re-uses it rather than taking a second sample of its own.
@@ -3710,7 +3682,7 @@ static uint64_t klovrp_Update3(int step, int frame_index, double prediction) {
 static klovrp_pose klovrp_step_head(int step) {
     int ix = klovrp_step_ix(step);
     if (ix == 0 && g_fs_read) return g_fs_read->head;
-    // KL_OVRP_ONE_POSE: one pose for the frame means one pose for BOTH steps —
+    // One pose for the frame means one pose for BOTH steps —
     // the Render and Physics samples are taken at different instants. AFTER the
     // by-index read above, not before it as in rebelancap's tree (which has no
     // such read): a read that NAMES a frame gets that frame's sample, which
@@ -5314,7 +5286,7 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
         // describes an eye that does not exist, and the guest renders the right
         // cone of directions pointing the wrong way.
         // Through klovrp_eye_rot: the cant frozen with the frame's head pose
-        // under KL_OVRP_ONE_POSE, the live push otherwise.
+        // by one pose per guest frame, the live push otherwise.
         float rq[4];
         eye = klovrp_eye_cant()
               ? klovrp_qmul(&head, klovrp_eye_rot(node, rq)) : head;
@@ -5466,7 +5438,7 @@ void kl_ovrp_set_frame_pacer(void (*wait)(void)) { g_frame_pacer = wait; }
 
 static uint64_t klovrp_WaitToBeginFrame(long frame_index) {
     ovrp_hit("ovrp_WaitToBeginFrame");
-    // KL_OVRP_ONE_POSE (a no-op when off): THE GUEST'S FRAME CYCLE, and the
+    // One pose per guest frame: THE GUEST'S FRAME CYCLE, and the
     // only boundary both of its threads agree on. Called once per frame, and
     // armed before the pacer, because a guest that blocks here must still have
     // opened its cycle. See klovrp_one_pose_arm.
@@ -5491,14 +5463,14 @@ static uint64_t klovrp_WaitToBeginFrame(long frame_index) {
     return OVRP_SUCCESS;
 }
 
-// --- The pose-boundary self-test (KL_OVRP_ONE_POSE) --------------------------
+// --- The pose-boundary self-test (one pose per guest frame) ------------------
 //
 // From rebelancap's fork (his kl_ovrp_pose_boundary_selftest; his commit
-// a0e966f puts it in `make check`), adapted to this file. There the feature is
-// always on and one call checks it. Here it is a switch, on by default and
-// read once into a static, so the caller names the case it has set the
-// environment up for and each case is a process of its own — see
-// tests/t_posebound.c and kl_ovrp.h.
+// a0e966f puts it in `make check`), adapted to this file. The boundary
+// (KL_OVRP_POSE_BOUNDARY) is read once into a static, and the feature's state
+// is per process, so the caller names the case it has set the environment up
+// for and each case is a process of its own — see tests/t_posebound.c and
+// kl_ovrp.h.
 //
 // The measurement is his: the GAMEPLAY pattern, the one index keying failed on
 // and the menu pattern passed. Unity's render thread trails its sim thread, so
@@ -5509,9 +5481,9 @@ static uint64_t klovrp_WaitToBeginFrame(long frame_index) {
 // what makes the index case worth running: the same lines that say "one pose"
 // under the cycle boundary say "split" there, so the gate is seen to fail.
 //
-// The last two cases are the other side of the switch: a guest that never calls
-// ovrp_WaitToBeginFrame (every OpenXR frame loop) must be given, with the
-// switch on, exactly what it is given with it off — klovrp_one_pose_active.
+// The last two cases are the other side of the feature: a guest that never
+// calls ovrp_WaitToBeginFrame (every OpenXR frame loop) must be given what the
+// latch alone gives it, untouched by one-pose — klovrp_one_pose_active.
 //
 // **Where this port differs from his, and what is therefore NOT asserted.** A
 // read that NAMES a frame index (ovrp_GetNodePoseState3) is answered from the
@@ -5670,9 +5642,9 @@ static int klovrp_pb_same_index(FILE *f) {
 
 // A guest that takes its frames through OpenXR (kl_openxr): kl_ovrp_frame_latch
 // at xrWaitFrame, then the head, the eye view and the record opened beside the
-// latch — with the frontend publishing in between. What it must be given is the
-// same with the switch on and off, because such a guest never calls
-// ovrp_WaitToBeginFrame and the switch is not in force for it
+// latch — with the frontend publishing in between. What it must be given is
+// what the latch alone gives, because such a guest never calls
+// ovrp_WaitToBeginFrame and one-pose is not in force for it
 // (klovrp_one_pose_active): the latch's pose, and the eye transform live.
 //
 // `update2` adds Walkabout's shape — Unity on OpenXR with Meta's SDK calling
@@ -5735,17 +5707,10 @@ int kl_ovrp_pose_boundary_selftest(FILE *f, int which) {
     int ok = 1;
     if (!f) f = stderr;
 
-    // The case must be the one the process was started for: the switch and the
-    // boundary are each read once, so a wrong environment would otherwise pass
-    // or fail for a reason that has nothing to do with the code.
-    int on = klovrp_one_pose_enabled();
-    int want_on = which != KL_OVRP_POSEBOUND_OFF && which != KL_OVRP_POSEBOUND_MIXED_OFF;
-    if (on != want_on) {
-        fprintf(f, "  FAIL: this case needs KL_OVRP_ONE_POSE %s, and it reads %s\n",
-                want_on ? "on" : "off", on ? "on" : "off");
-        return 0;
-    }
-    // The boundary is only read (and only matters) for a guest that arms.
+    // The case must be the one the process was started for: the boundary is
+    // read once, so a wrong environment would otherwise pass or fail for a
+    // reason that has nothing to do with the code. It is only read (and only
+    // matters) for a guest that arms.
     if (which == KL_OVRP_POSEBOUND_CYCLE || which == KL_OVRP_POSEBOUND_INDEX) {
         int cycle = klovrp_pose_boundary_cycle();
         if (cycle != (which != KL_OVRP_POSEBOUND_INDEX)) {
@@ -5794,33 +5759,17 @@ int kl_ovrp_pose_boundary_selftest(FILE *f, int which) {
         if (g_op_arms != (uint64_t)r.cycles || g_op_freezes != 2 * g_op_arms) ok = 0;
         break;
     }
-    case KL_OVRP_POSEBOUND_OFF: {
-        // (c) Switch unset: nothing frozen, nothing of the feature's state
-        // valid or counted, and the answers are the ones this file gave before
-        // it — each step its own sample (the Physics read stays the Physics
-        // sample after the Render step has sampled anew), the record the Render
-        // step's, the eye transform live.
-        klovrp_pb_trailing(f, &r);
-        if (r.split != r.cycles || r.first_open != r.cycles ||
-            r.render_mid != r.cycles || r.late_first != r.cycles ||
-            r.filed_render != r.cycles || r.eye_live != r.cycles) ok = 0;
-        if (klovrp_pb_external(f, 0)) ok = 0;
-        if (!klovrp_pb_untouched(f)) ok = 0;
-        break;
-    }
     case KL_OVRP_POSEBOUND_XR:
-        // (d) Switch on, a guest that never speaks OVRPlugin: nothing arms, so
-        // the switch is not in force — the very answers of case (c)'s second
-        // half (the same function, the same expectations), and nothing frozen.
+        // (c) A guest that never speaks OVRPlugin: nothing arms, so one-pose is
+        // not in force — the latch's pose and the live eye transform, and
+        // nothing frozen.
         if (klovrp_pb_external(f, 0)) ok = 0;
         if (!klovrp_pb_untouched(f)) ok = 0;
         break;
     case KL_OVRP_POSEBOUND_MIXED:
-    case KL_OVRP_POSEBOUND_MIXED_OFF:
-        // (e) Walkabout's shape, switch on — and the same frames with it unset
-        // as the reference. One function, one set of expectations for both: the
-        // ovrp_Update2 in mid-frame does not change the head the OpenXR side
-        // reads, and none of the feature's state moves.
+        // (d) Walkabout's shape: the ovrp_Update2 in mid-frame does not change
+        // the head the OpenXR side reads, it is the latch's pose throughout,
+        // and none of the feature's state moves.
         if (klovrp_pb_external(f, 1)) ok = 0;
         if (!klovrp_pb_untouched(f)) ok = 0;
         break;

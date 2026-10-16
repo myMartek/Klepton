@@ -73,8 +73,6 @@ RUNTIME_SHIP := $(LX_SRC) runtime/guest/kl_linuxproc.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_xashservers.c runtime/guest/kl_sdl2.c \
            runtime/guest/kl_gles3jni.c runtime/guest/kl_driver.c \
            runtime/media/kl_aaudio.c runtime/media/kl_mediaplayer.c \
-           runtime/media/kl_audio_switch.c runtime/media/kl_sink2_audio.c \
-           runtime/media/kl_sink2_opensl.c runtime/media/kl_sink2_aaudio.c \
            runtime/gfx/kl_glfb.c runtime/gfx/kl_cvmtl.m runtime/gfx/kl_fove.m runtime/gfx/kl_gl_trace.S runtime/gfx/kl_gl_lock.S \
            runtime/guest/kl_mono.c \
            runtime/guest/kl_il2cpp.c runtime/kl_fault.c runtime/guest/kl_guestpatch.c \
@@ -390,16 +388,15 @@ build/t_ovrplat: tests/t_ovrplat.c $(RUNTIME) $(RUNTIME_HDRS)
 ovrplat: build/t_ovrplat
 	./build/t_ovrplat
 
-# The pose-boundary gate for KL_OVRP_ONE_POSE (from rebelancap's fork) — one
-# head pose per guest frame cycle, and the anchor filed for reprojection equal
-# to it. Unity's render and sim threads number the same frame differently in
-# gameplay, so a boundary keyed on that number froze two head poses inside one
-# frame (his `poses/frame` 1.70 instead of 1.00). A process per case, because
-# the switch is read once: on; on with the index boundary, which must be SEEN
-# to split; off, where nothing may be frozen; and on for the two kinds of guest
-# that never call ovrp_WaitToBeginFrame (OpenXR frames, with and without an
-# ovrp_Update2 in mid-frame), where the switch must do nothing. Milliseconds;
-# in `make check`.
+# The pose-boundary gate for one pose per guest frame (from rebelancap's fork)
+# — one head pose per guest frame cycle, and the anchor filed for reprojection
+# equal to it. Unity's render and sim threads number the same frame differently
+# in gameplay, so a boundary keyed on that number froze two head poses inside
+# one frame (his `poses/frame` 1.70 instead of 1.00). A process per case,
+# because the boundary is read once: the default; the index boundary, which
+# must be SEEN to split; and the two kinds of guest that never call
+# ovrp_WaitToBeginFrame (OpenXR frames, with and without an ovrp_Update2 in
+# mid-frame), where one-pose must do nothing. Milliseconds; in `make check`.
 build/t_posebound: tests/t_posebound.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_posebound.c $(RUNTIME) $(LDLIBS)
@@ -407,43 +404,42 @@ build/t_posebound: tests/t_posebound.c $(RUNTIME) $(RUNTIME_HDRS)
 posebound: build/t_posebound
 	./build/t_posebound
 
-# The audio path's switch (runtime/media/kl_audio_switch.c): two whole audio
-# paths are linked in, and KL_AUDIO_SINK2 picks one for a run. The gate holds
-# that the choice is made by the first lookup and not before, and that every
-# public name then answers from the chosen path — run once each way.
-build/t_audioswitch: tests/t_audioswitch.c $(RUNTIME) $(RUNTIME_HDRS)
+# The audio sink's gates (rebelancap's tests/t_audio.c and tests/t_aaudio.c,
+# taken over with his sink). The first: a guest's sample format, per encoding,
+# and the OpenSL surface driven with PCM and PCM_EX sources — a float32 guest
+# played as int16 is half-speed static in one ear, and the [sl] line it
+# produced read the same as a correct player's. Milliseconds; in `make check`.
+build/t_audio: tests/t_audio.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_audioswitch.c $(RUNTIME) $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ tests/t_audio.c $(RUNTIME) $(LDLIBS)
 
-.PHONY: audioswitch
-audioswitch: build/t_audioswitch
-	./build/t_audioswitch 0 && ./build/t_audioswitch 1
-
-# The second sink's own gates, from rebelancap's fork with it (tests/t_audio.c
-# and tests/t_aaudio.c there). They call his code under its linked names, past
-# the switch. The first: a guest's sample format, per encoding, and the OpenSL
-# surface driven with PCM and PCM_EX sources — a float32 guest played as int16
-# is half-speed static in one ear, and the [sl] line it produced read the same
-# as a correct player's. Milliseconds; in `make check`.
-build/t_sink2_audio: tests/t_sink2_audio.c $(RUNTIME) $(RUNTIME_HDRS)
-	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_sink2_audio.c $(RUNTIME) $(LDLIBS)
-
-.PHONY: sink2-audio
-sink2-audio: build/t_sink2_audio
-	@./build/t_sink2_audio
+.PHONY: audio-formats
+audio-formats: build/t_audio
+	@./build/t_audio
 
 # The second: the block-seam harness. It models a guest's mixer — a copy
 # callback in front of an asynchronous producer — so the AAudio path can be
 # measured on the host. Real time (20 s by default) and it opens the real
 # output device, at +-1 LSB, so it is NOT in `check`.
-build/t_sink2_aaudio: tests/t_sink2_aaudio.c $(RUNTIME) $(RUNTIME_HDRS)
+build/t_aaudio: tests/t_aaudio.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_sink2_aaudio.c $(RUNTIME) $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ tests/t_aaudio.c $(RUNTIME) $(LDLIBS)
 
-.PHONY: sink2-aaudio
-sink2-aaudio: build/t_sink2_aaudio
-	@./build/t_sink2_aaudio
+.PHONY: aaudio-seam
+aaudio-seam: build/t_aaudio
+	@./build/t_aaudio
+
+# The third: two streams MIXED (KL_AUDIO_MIX_SOURCES, Steam Link's shape — a
+# float stream and an int16 stream at once). Each must deliver real time with
+# no resyncs, and what reaches the device must be both. Opens the real output
+# device for a few seconds, so it is NOT in `check` either.
+build/t_audiomix: tests/t_audiomix.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_audiomix.c $(RUNTIME) $(LDLIBS)
+
+.PHONY: audio-mix
+audio-mix: build/t_audiomix
+	@./build/t_audiomix
 
 # The OpenXR action-surface gate — the same argument as xrspace above,
 # one API family across. A binding decoded to the wrong bit, two hands combined
@@ -1022,7 +1018,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1049,10 +1045,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@head -1 build/ovrplat.log && tail -1 build/ovrplat.log
 	@./build/t_posebound > build/posebound.log 2>&1 || { cat build/posebound.log; exit 1; }
 	@head -1 build/posebound.log && grep -E '^(PASS|FAIL)' build/posebound.log
-	@{ ./build/t_audioswitch 0 && ./build/t_audioswitch 1; } > build/audioswitch.log 2>&1 || { cat build/audioswitch.log; exit 1; }
-	@grep -E '^(===|PASS|FAIL)' build/audioswitch.log
-	@./build/t_sink2_audio > build/sink2-audio.log 2>&1 || { cat build/sink2-audio.log; exit 1; }
-	@echo "=== second audio sink: sample formats, OpenSL sources ===" && tail -1 build/sink2-audio.log
+	@./build/t_audio > build/audio.log 2>&1 || { cat build/audio.log; exit 1; }
+	@echo "=== audio sink: sample formats, OpenSL sources ===" && tail -1 build/audio.log
 	@./build/t_xrinput > build/xrinput.log 2>&1 || { cat build/xrinput.log; exit 1; }
 	@grep -E '=== OpenXR actions' build/xrinput.log && tail -1 build/xrinput.log
 	@./build/t_softinput > build/softinput.log 2>&1 || { cat build/softinput.log; exit 1; }

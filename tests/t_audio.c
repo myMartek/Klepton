@@ -27,11 +27,8 @@
 #include <string.h>
 #include <unistd.h>
 
-// His names, as the second sink is linked here — past kl_audio_switch.c, so the
-// test drives his code whatever KL_AUDIO_SINK2 says.
-#include "media/kl_sink2.h"
-#include "media/kl_sink2_audio.h"
-#include "media/kl_sink2_opensl.h"
+#include "media/kl_audio.h"
+#include "media/kl_opensl.h"
 
 static int g_fail;
 #define CHECK(cond, ...) do { \

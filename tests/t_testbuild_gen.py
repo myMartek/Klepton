@@ -18,9 +18,9 @@ VARS = ("KLEPTON_BUNDLE_ID", "KLEPTON_TEST_ON", "KLEPTON_DISPLAY_SUFFIX",
 CASES = [
     ({}, False),
     # AVP Play sets a bundle id for every install, and KLEPTON_TEST_ON for a
-    # player who chose its experimental switches: neither makes a test build.
+    # player who chose its per-game switches: neither makes a test build.
     ({"KLEPTON_BUNDLE_ID": "abcd.dev.klepton.target.moss"}, False),
-    ({"KLEPTON_TEST_ON": "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2"}, False),
+    ({"KLEPTON_TEST_ON": "KL_XR_PREDICT,KL_METALFX_UPSCALE"}, False),
     ({"KLEPTON_BUNDLE_ID": "abcd.dev.klepton.target.mosstest"}, False),
     ({"KLEPTON_BUNDLE_ID": "abcd.dev.klepton.target.moss-tests"}, False),
     # Bundle id ending in -test or .test, in any case (regex [-.]test$).
@@ -30,7 +30,7 @@ CASES = [
     ({"KLEPTON_DISPLAY_SUFFIX": " (Test)"}, True),
     ({"KLEPTON_DISPLAY_SUFFIX": ""}, False),
     ({"KLEPTON_DISPLAY_OVERRIDE": "Moss X"}, True),
-    ({"KLEPTON_TEST_ON": "KL_AUDIO_SINK2,KL_TEST_BUILD"}, True),
+    ({"KLEPTON_TEST_ON": "KL_XR_PREDICT,KL_TEST_BUILD"}, True),
     ({"KLEPTON_TEST_BUILD": "1"}, True),
     ({"KLEPTON_TEST_BUILD": "0"}, False),
 ]
@@ -53,11 +53,11 @@ t0 = src.index("TEST_ON = ")
 t_block = src[t0:src.index("\n\n", t0)]
 ON_CASES = [
     ({}, ""),
-    ({"KLEPTON_TEST_ON": "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2"}, "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2"),
+    ({"KLEPTON_TEST_ON": "KL_XR_PREDICT,KL_METALFX_UPSCALE"}, "KL_XR_PREDICT,KL_METALFX_UPSCALE"),
     ({"KLEPTON_TEST_ON_EXTRA": "KL_FOVE_SUBPASS_HELPERS"}, "KL_FOVE_SUBPASS_HELPERS"),
-    ({"KLEPTON_TEST_ON": "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2", "KLEPTON_TEST_ON_EXTRA": "KL_FOVE_SUBPASS_HELPERS"},
-     "KL_OVRP_ONE_POSE,KL_AUDIO_SINK2,KL_FOVE_SUBPASS_HELPERS"),
-    ({"KLEPTON_TEST_ON": "KL_AUDIO_SINK2", "KLEPTON_TEST_ON_EXTRA": "KL_AUDIO_SINK2 rm -rf;x,KL_X"}, "KL_AUDIO_SINK2,KL_X"),
+    ({"KLEPTON_TEST_ON": "KL_XR_PREDICT,KL_METALFX_UPSCALE", "KLEPTON_TEST_ON_EXTRA": "KL_FOVE_SUBPASS_HELPERS"},
+     "KL_XR_PREDICT,KL_METALFX_UPSCALE,KL_FOVE_SUBPASS_HELPERS"),
+    ({"KLEPTON_TEST_ON": "KL_XR_PREDICT", "KLEPTON_TEST_ON_EXTRA": "KL_XR_PREDICT rm -rf;x,KL_X"}, "KL_XR_PREDICT,KL_X"),
 ]
 print("=== KLTestOn: KLEPTON_TEST_ON + KLEPTON_TEST_ON_EXTRA ===")
 for env, want in ON_CASES:
