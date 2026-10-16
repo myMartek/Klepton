@@ -151,6 +151,44 @@ int main(void) {
         CHECK(!b1 && pk == 1, "curves1: %d samples off the profile, %d peaks (want 1)", b1, pk);
         CHECK(!kl_fove_curves1(E, E, ecx, ecy, 914, 457, 0.0f, N, eh, N, ev), "curves1 floor 0 accepted");
     }
+    // The envelope (kl_fove_curves_env, the default for every eye image and
+    // map layer): eye 0's and eye 1's points placed in the same 2400x2400 eye.
+    // The curve is the same for either eye, symmetric about the middle, both
+    // points at full rate — where the single peak above leaves the eye's outer
+    // side at the floor (the left eye blurred over its left half: Alien: Rogue
+    // Incursion, toolchain 565).
+    {
+        enum { E = 2400, N = E / 16 + 1 };
+        float e0[N], e1[N], ev[N], s0[N], s1[N], sv[N];
+        const float a[2] = { fx0 * E, fx1 * E }, b[2] = { fx1 * E, fx0 * E }, cyy[2] = { fy0 * E, fy1 * E };
+        CHECK(kl_fove_curves_env(E, E, a, cyy, 914, 457, 0.125f, N, e0, N, ev), "curves_env refused good input");
+        CHECK(kl_fove_curves_env(E, E, b, cyy, 914, 457, 0.125f, N, e1, N, ev), "curves_env refused good input");
+        CHECK(kl_fove_curves1(E, E, fx0 * E, fy0 * E, 914, 457, 0.125f, N, s0, N, sv), "curves1 refused good input");
+        CHECK(kl_fove_curves1(E, E, fx1 * E, fy1 * E, 914, 457, 0.125f, N, s1, N, sv), "curves1 refused good input");
+        int same = 0, sym = 0, pts = 0;
+        double l0 = 0, r0 = 0, l1 = 0, r1 = 0, sl0 = 0, sr0 = 0, sl1 = 0, sr1 = 0;
+        for (int k = 0; k < N; k++) {
+            float x = (float)k * E / (N - 1);
+            same += fabsf(e0[k] - e1[k]) > 1e-6f;
+            sym += fabsf(e0[k] - e0[N - 1 - k]) > 0.02f;
+            if ((fabsf(x - a[0]) < 8 || fabsf(x - a[1]) < 8 || fabsf(x - E / 2) < 8) && e0[k] != 1.0f) pts++;
+            if (e0[k] < s0[k] - 1e-6f) pts++;   // never coarser than the single peak
+            if (x < E / 2) { l0 += e0[k]; l1 += e1[k]; sl0 += s0[k]; sl1 += s1[k]; }
+            else           { r0 += e0[k]; r1 += e1[k]; sr0 += s0[k]; sr1 += s1[k]; }
+        }
+        CHECK(!same, "curves_env: the two eyes' curves differ at %d samples", same);
+        CHECK(!sym, "curves_env: %d samples not mirror-symmetric", sym);
+        CHECK(!pts, "curves_env: %d samples coarser than they must be", pts);
+        CHECK(fabs(l0 - r0) < 0.02 * N && fabs(l1 - r1) < 0.02 * N, "curves_env: halves %.1f / %.1f, %.1f / %.1f",
+              l0, r0, l1, r1);
+        // The single peak: the outer half is the coarse one, mirrored between the eyes.
+        CHECK(sl0 < 0.8 * sr0 && sr1 < 0.8 * sl1, "curves1: left eye halves %.1f / %.1f, right eye %.1f / %.1f",
+              sl0, sr0, sl1, sr1);
+        CHECK(!kl_fove_curves_env(E, E, a, cyy, 914, 457, 0.0f, N, e0, N, ev), "curves_env floor 0 accepted");
+        printf("envelope, high, 2400x2400 eye: mean horizontal rate left/right half %.3f / %.3f for either eye; "
+               "one peak per eye: left eye %.3f / %.3f, right eye %.3f / %.3f\n",
+               2 * l0 / N, 2 * r0 / N, 2 * sl0 / N, 2 * sr0 / N, 2 * sl1 / N, 2 * sr1 / N);
+    }
     // The [[position]] patch passes the map LAYER — its own argument
     // added, a [[render_target_array_index]] argument reused, a stage_in member
     // reached through the stage_in argument, and a shader without [[position]]
@@ -405,9 +443,29 @@ int main(void) {
         if (g < 0) printf("re-centre GPU self-test SKIPPED: %s\n", why);
         else {
             CHECK(!g, "re-centre GPU self-test: %d failed checks", g);
-            if (!g) printf("re-centre GPU self-test: Deadpool's map built before the record (3226 / 1862) re-centred in "
-                           "place to 2544 / 2544 once the record arrived, not under a pending expand, not again for the "
-                           "same record, never for ITR's full-image record\n");
+            if (!g) printf("re-centre GPU self-test: Deadpool's map built before the record (3226 / 1862) re-centred to "
+                           "2544 / 2544 once the record arrived (into another slot while another buffer's expand was pending "
+                           "on the old map, which that buffer keeps), not again for the same record, never for ITR's "
+                           "full-image record\n");
+        }
+    }
+    {
+        char why[160] = "";
+        float r[2 * 2 * 8];
+        int g = kl_fove_layers_selftest(why, sizeof why, r, getenv("KL_FOVE_TEST_SHOTS"));
+        if (g < 0) printf("layered eye-pair GPU self-test SKIPPED: %s\n", why);
+        else {
+            CHECK(!g, "layered eye-pair GPU self-test: %d failed checks", g);
+            for (int m = 0; m < 2; m++)
+                for (int l = 0; l < 2; l++)
+                    printf("  drawn through the GPU, %-8s %-5s eye, rate by eighths of its picture: "
+                           "%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f\n", m ? "envelope" : "per-eye", l ? "right" : "left",
+                           r[(m * 2 + l) * 8 + 0], r[(m * 2 + l) * 8 + 1], r[(m * 2 + l) * 8 + 2], r[(m * 2 + l) * 8 + 3],
+                           r[(m * 2 + l) * 8 + 4], r[(m * 2 + l) * 8 + 5], r[(m * 2 + l) * 8 + 6], r[(m * 2 + l) * 8 + 7]);
+            if (!g) printf("layered eye-pair GPU self-test (Alien: Rogue Incursion's shape, Vision Pro cones): with one "
+                           "peak per eye the left eye is coarse on its left, the right eye on its right; with the "
+                           "envelope both eyes are drawn equally sharp, symmetric about the middle, both straight-ahead "
+                           "points at full rate; the map follows 20 dynamic-resolution steps\n");
         }
     }
     {

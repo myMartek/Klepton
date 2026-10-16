@@ -164,10 +164,28 @@ static int klf_map_for(id<MTLDevice> dev, NSUInteger w, NSUInteger h) {
     MTLRasterizationRateMapDescriptor *d = [[MTLRasterizationRateMapDescriptor alloc] init];
     d.screenSize = MTLSizeMake(w, h, 0);
     d.label = @"klepton vulkan foveation";
+    // Each eye's cone is wider outward than inward (60 / 45 degrees on the
+    // Vision Pro), so a curve counted from its own straight-ahead point leaves
+    // the outer side of each eye coarse and the two eyes disagree: the left
+    // one blurred on its left, the right one on its right (kl_fove.m's
+    // kf_map_for has the same reasoning; Alien: Rogue Incursion, toolchain
+    // 565). Both layers get the envelope of the two eyes' curves, i.e. the
+    // same map, symmetric for mirrored cones. KL_FOVE_PER_EYE=1: each eye's own.
+    static int per_eye = -1;
+    if (per_eye < 0) per_eye = kl_env_on("KL_FOVE_PER_EYE", 0);
     for (int e = 0; e < 2; e++) {
         float qx[KLF_ZONES], qy[KLF_ZONES];
         klf_axis(qx, tan[e][0], tan[e][1], widest, (float)vw / (float)w);     // left ... right
         klf_axis(qy, tan[e][2], tan[e][3], widest, (float)vh / (float)h);     // top ... bottom
+        if (!per_eye) {
+            float ox[KLF_ZONES], oy[KLF_ZONES];
+            klf_axis(ox, tan[e ^ 1][0], tan[e ^ 1][1], widest, (float)vw / (float)w);
+            klf_axis(oy, tan[e ^ 1][2], tan[e ^ 1][3], widest, (float)vh / (float)h);
+            for (int i = 0; i < KLF_ZONES; i++) {
+                if (ox[i] > qx[i]) qx[i] = ox[i];
+                if (oy[i] > qy[i]) qy[i] = oy[i];
+            }
+        }
         MTLRasterizationRateLayerDescriptor *l = [[MTLRasterizationRateLayerDescriptor alloc]
             initWithSampleCount:MTLSizeMake(KLF_ZONES, KLF_ZONES, 0) horizontal:qx vertical:qy];
         [d setLayer:l atIndex:(NSUInteger)e];

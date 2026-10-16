@@ -3202,12 +3202,40 @@ records are never written):
    into a ~4012-wide sub-rect of a 5088 texture, so the fovea sat 682 px off
    (a hard clear/blurry seam in both eyes). `kf_map_for` now recomputes an
    ARRAY map's centres on lookup and rebuilds it in place when one moves more
-   than **4 px** — never while a pending expand refers to it, at most 8 times
-   per run (old maps kept alive for frames in flight). Line: `[fove] map WxH
-   RE-CENTRED (#n): it was built at x,y / x,y — the frame record moved the
-   straight-ahead point …`; after the 8th, `… re-centres were already made —
-   kept`. Full-image records (Into the Radius, Batman: Arkham Shadow) give the same centre as no record
-   and never rebuild. No knob.
+   than **4 px**: in place when no pending expand refers to the map, else
+   into another map slot while the old one stays as it was for the expands
+   still pending on it (a command buffer that already drew with a map keeps
+   it for its remaining passes). Old maps are kept alive 2 s for frames in
+   flight, then released. Until toolchain 565 a map an expand referred to was
+   simply kept, and at most 8 re-centres were made a run; Alien: Rogue
+   Incursion, on dynamic resolution (`KL_OVRP_ADAPTIVE_RES`) and with an
+   expand always in flight, kept the 5th map while its viewport went from 79%
+   to 55% of the image (fovea ~800 px off, measured on the Mac). Line:
+   `[fove] map WxH RE-CENTRED (#n): it was built at x,y / x,y — the frame
+   record moved the straight-ahead point (rebuilt in place … | built into
+   slot n; slot m kept …)` (the first 8, then every 50th); with all 32
+   retirement slots younger than 2 s, `… kept for now` once and the
+   re-centre waits for a later lookup. `[fove] frame record (stage n) carries
+   [no usable] a render viewport …` (first 6 changes) shows a guest whose
+   records come with and without a rect.
+   Full-image records (Into the Radius, Batman: Arkham Shadow) give the same
+   centre as no record and never rebuild. No knob.
+- `KL_FOVE_PER_EYE=0|1` — default **0**: every eye image and every map layer
+  gets the ENVELOPE of both eyes' straight-ahead points placed in that eye's
+  rect (per axis the larger of the two profiles), so both eyes' maps are the
+  same relative to their pictures, symmetric about the middle, with each
+  eye's own point at full rate. `1` = one peak per eye at its own point only
+  (the shape through toolchain 565). On the Vision Pro's canted cones (60
+  degrees out, 45 in) that point is 63% across the left eye and 37% across
+  the right, so one peak left the outer side of each eye at the floor: in
+  Alien: Rogue Incursion the left eye blurred over its left half and the
+  right eye over its right half — the same complaint as Doom 3's through the
+  display's own per-eye curves (f9f514f, `KL_VRR_PER_EYE`, GL guests). The
+  envelope costs fragments: at `high` on Alien's shape 49% of the image
+  instead of 39% (`make check`'s t_fove prints both). Lines: `[fove] map WxH
+  layer l: the envelope of both eyes' points … full-rate middle x …`, or
+  `one peak per eye (KL_FOVE_PER_EYE=1)`. `KL_VK_FOVEATE` (kl_mtl_foveate.m)
+  honours the same switch for its two-layer map.
 
 - `KL_FOVEATION=off|low|medium|high` — default **off**. Profiles (box / floor,
   ramp 0.19 H): low 0.603 H / 0.333, medium 0.508 H / 0.22, high 0.381 H /
