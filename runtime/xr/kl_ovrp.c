@@ -11797,9 +11797,24 @@ static const char *const g_ovrp_absent[] = {
     "ovrp_GetControllerParametricStreamingTimingProperties",
 };
 
+// Answers in g_ovrp_impl that only one title has been seen to need. Every
+// other target resolves these names as before: the named stub, which aborts
+// with the name (or says UNSUPPORTED under KL_OVRP_UNANSWERED).
+//   ovrp_GetTrackingCalibratedOrigin — Onward (x2677344882310094), fix 50
+static int kl_ovrp_gated_out(const char *name) {
+    if (strcmp(name, "ovrp_GetTrackingCalibratedOrigin") == 0) {
+        const char *t = kl_driver_target_name();
+        return !t || strcmp(t, "x2677344882310094") != 0;
+    }
+    return 0;
+}
+
 static void *kl_ovrp_sym_inner(const char *name) {
     for (size_t i = 0; i < sizeof g_ovrp_impl / sizeof g_ovrp_impl[0]; i++)
-        if (strcmp(g_ovrp_impl[i].name, name) == 0) return g_ovrp_impl[i].fn;
+        if (strcmp(g_ovrp_impl[i].name, name) == 0) {
+            if (kl_ovrp_gated_out(name)) break;
+            return g_ovrp_impl[i].fn;
+        }
     for (size_t i = 0; i < sizeof g_ovrp_absent / sizeof g_ovrp_absent[0]; i++)
         if (strcmp(g_ovrp_absent[i], name) == 0) return NULL;
     void *shared = klovrp_shared(name);
