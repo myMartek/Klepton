@@ -2637,6 +2637,14 @@ reads no knobs).
 - `KL_AUDIO_TRACE=1` — one line every 200 writes: input/output frame counts,
   ring fill in frames and ms, underruns. What to turn on when the sound is
   present but wrong.
+- `KL_AUDIO_MIX_UNLOCK=0|1` — with two output streams mixing into the ring, let
+  a writer that waits for room nap *outside* the write lock, so the other
+  stream is not held up behind it. Default on for Pistol Whip
+  (x2104963472963790) and Steam Link (steamlink-vr), whose shell stream and VR
+  client stream together fell behind real time — dropouts every few seconds.
+  While two sources mix, the periodic `guest PCM so far` line is followed by
+  one line per source: its share of real time since it opened and how often it
+  fell behind the reader and was resynced.
 - `KL_SL_SILENT_YIELD=0` — (`runtime/media/kl_opensl.c`) keep feeding the
   device from an OpenSL player that has only ever produced silence while
   another same-rate player is audible. Default 1: such a player stops writing

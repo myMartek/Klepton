@@ -70,9 +70,17 @@ static _Atomic size_t   g_w, g_r;
 // source is the old behaviour exactly (add into a zeroed slot == a copy). A
 // small lock serialises the producers (never the reader): they run on feeder
 // threads that can afford to block, the reader cannot.
+static _Atomic uint64_t g_frames_played, g_frames_silent;
 #define KL_AU_MAX_SRC 4
 static const void      *g_src_key[KL_AU_MAX_SRC];
 static uint64_t         g_src_pos[KL_AU_MAX_SRC];   // next write frame, per source
+// For the periodic verdict while mixing: frames each source handed over and how
+// often it fell behind the reader and was resynced. Two sources that share the
+// device must each deliver real time; the total write count cannot say which
+// one does not.
+static uint64_t         g_src_frames[KL_AU_MAX_SRC];
+static uint64_t         g_src_since[KL_AU_MAX_SRC];  // g_frames_played when it came
+static unsigned long    g_src_resyncs[KL_AU_MAX_SRC];
 static int              g_src_n;
 static pthread_mutex_t  g_wlock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -81,7 +89,12 @@ static pthread_mutex_t  g_wlock = PTHREAD_MUTEX_INITIALIZER;
 static int src_slot(const void *key) {
     if (!key) return 0;
     for (int i = 0; i < g_src_n; i++) if (g_src_key[i] == key) return i;
-    if (g_src_n < KL_AU_MAX_SRC) { g_src_key[g_src_n] = key; g_src_pos[g_src_n] = 0; return g_src_n++; }
+    if (g_src_n < KL_AU_MAX_SRC) {
+        g_src_key[g_src_n] = key; g_src_pos[g_src_n] = 0;
+        g_src_frames[g_src_n] = 0; g_src_resyncs[g_src_n] = 0;
+        g_src_since[g_src_n] = atomic_load(&g_frames_played);
+        return g_src_n++;
+    }
     return 0;
 }
 
@@ -97,6 +110,9 @@ void kl_audio_src_release(const void *key) {
             for (int k = i + 1; k < g_src_n; k++) {
                 g_src_key[k - 1] = g_src_key[k];
                 g_src_pos[k - 1] = g_src_pos[k];
+                g_src_frames[k - 1] = g_src_frames[k];
+                g_src_resyncs[k - 1] = g_src_resyncs[k];
+                g_src_since[k - 1] = g_src_since[k];
             }
             g_src_n--;
             break;
@@ -117,7 +133,6 @@ static size_t g_scratch_frames;
 // Counters, for the report and for the watchdog.
 static _Atomic uint64_t g_last_render_ns;
 static _Atomic uint64_t g_last_render_frames;   // what that callback asked for
-static _Atomic uint64_t g_frames_played, g_frames_silent;
 static _Atomic uint32_t g_underruns;
 static unsigned long    g_writes, g_short_writes, g_restarts;
 static int              g_trace;
@@ -802,11 +817,16 @@ int kl_audio_peak(void) { return g_peak; }
 // real time — garbled, stuttering audio. Every ring write still happens under
 // the lock; only the nap is outside it. Per target until the other two-source
 // titles have been re-measured; KL_AUDIO_MIX_UNLOCK=1/0 forces it.
+// Steam Link is the second: its 2D shell's SDL3 stream (float, 960 frames)
+// stays open beside the VR client's own (int16, 256), and with the nap under
+// the lock the pair managed ~200 writes a second where real time is ~237 — the
+// sound cutting out every few seconds (owner, 2026-10-16).
 static int mix_unlock(void) {
     static int v = -1;
     if (v < 0) {
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_AUDIO_MIX_UNLOCK", t && strcmp(t, "x2104963472963790") == 0);
+        v = kl_env_on("KL_AUDIO_MIX_UNLOCK", t && (strcmp(t, "x2104963472963790") == 0 ||
+                                                   strcmp(t, "steamlink-vr") == 0));
     }
     return v;
 }
@@ -909,6 +929,7 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
         // (already played as silence) nor so far ahead the ring wraps under it.
         if (pos < r0 || pos > r0 + g_cap) {
             uint64_t back = g_target > frames ? g_target - frames : 0;
+            if (pos) g_src_resyncs[slot]++;           // 0 is a new source, not a fall
             pos = r0 + back;
         }
     }
@@ -977,6 +998,7 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
     // unlocked wait: find ours again by key.
     if (unlocked_wait) slot = src_slot(src);
     g_src_pos[slot] = pos + written < r0 ? r0 : pos + written;
+    g_src_frames[slot] += written;
     // A source that appears LATE must not inherit a cursor from the
     // single-source era: the moment a second one registers, both are resynced
     // against the reader on their next write by the ladder above.
@@ -1006,6 +1028,15 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
                 g_peak ? "producing audio" : "ONLY SILENCE so far",
                 g_out_rate > 0 ? 1000.0 * (double)fill / g_out_rate : 0.0,
                 atomic_load(&g_underruns), g_short_writes, g_restarts);
+        if (g_src_n > 1) {
+            uint64_t played = atomic_load(&g_frames_played);
+            for (int i = 0; i < g_src_n; i++) {
+                uint64_t span = played - g_src_since[i];
+                fprintf(stderr, "  [au]   src%d: %.0f%% of real time since it came, %lu resync(s)\n",
+                        i, span ? 100.0 * (double)g_src_frames[i] / (double)span : 0.0,
+                        g_src_resyncs[i]);
+            }
+        }
     }
     pthread_mutex_unlock(&g_wlock);
     return written == frames ? bytes : written * in_frame;
