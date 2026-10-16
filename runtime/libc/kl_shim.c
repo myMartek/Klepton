@@ -1414,22 +1414,6 @@ static void kl_sendmsg_fanout(int fd, struct msghdr *h, int dflags) {
                         "%u unicast of %u\n", ntohs(port), ok, ntgt);
 }
 
-// A failed send/recv hands the guest THIS call's errno, through kl_errno_set
-// rather than Darwin's errno alone. klb_errno resolves "Darwin's errno did not
-// move" as a guest write, and a non-blocking socket read in a loop is exactly
-// that case: the TLS layer clears errno, recv fails EAGAIN again, Darwin's
-// errno is still the EAGAIN of the previous call — and the guest reads its own
-// 0. To curl that is a socket error, not "no data yet": it resets the stream
-// and reports "Failed to receive data". Flight Unlimited lost its Cesium
-// imagery metadata and most terrain tiles this way, at random, whenever the
-// server was a moment slower than the second read (headset 2026-10-16).
-static ssize_t kl_net_errno(ssize_t r) {
-    if (r < 0) {
-        extern void kl_errno_set(int);
-        kl_errno_set(errno);
-    }
-    return r;
-}
 static ssize_t kl_sendto(int fd, const void *buf, size_t n, int flags,
                          const struct sockaddr *sa, socklen_t len) {
     struct sockaddr_storage hs;
@@ -1474,13 +1458,11 @@ static ssize_t kl_send(int fd, const void *buf, size_t n, int flags) {
     int nosig = 0, dflags = kl_msg_flags(flags, &nosig);
     if (nosig) kl_no_sigpipe(fd);
     ssize_t r = send(fd, buf, n, dflags);
-    int e = errno;
     if (kl_net_trace())
         fprintf(stderr, "  [net] send(fd=%d, %zu B, flags=0x%x->0x%x) -> %zd%s\n",
-                fd, n, flags, dflags, r, r < 0 ? strerror(e) : "");
+                fd, n, flags, dflags, r, r < 0 ? strerror(errno) : "");
     kl_hexdump("->", buf, r);
-    errno = e;
-    return kl_net_errno(r);
+    return r;
 }
 // ---------- KL_NET_RATE=<seconds>: what is actually arriving ----------
 // A streaming client cannot tell you from inside itself whether the picture is
@@ -1580,15 +1562,13 @@ static void kl_net_rx_boost(ssize_t r) {
 static ssize_t kl_recv(int fd, void *buf, size_t n, int flags) {
     int dflags = kl_msg_flags(flags, NULL);
     ssize_t r = recv(fd, buf, n, dflags);
-    int e = errno;
     kl_net_rate_note(fd, r);
     kl_net_rx_boost(r);
     if (kl_net_trace())
         fprintf(stderr, "  [net] recv(fd=%d, %zu B, flags=0x%x->0x%x) -> %zd%s\n",
-                fd, n, flags, dflags, r, r < 0 ? strerror(e) : "");
+                fd, n, flags, dflags, r, r < 0 ? strerror(errno) : "");
     kl_hexdump("<-", buf, r);
-    errno = e;
-    return kl_net_errno(r);
+    return r;
 }
 static int kl_accept(int fd, struct sockaddr *sa, socklen_t *len) {
     int r = accept(fd, sa, len);
