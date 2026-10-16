@@ -2,7 +2,9 @@
 // sent in by a user, 2026-10-13). The Android services Vivox sets up are not
 // here; its init says so to managed code instead of the process stopping on
 // the name. No voice session, and none pretended. For that one title
-// (x9386827918099701), and for this one call.
+// (x9386827918099701), and for this one call. Onward (x2677344882310094) makes
+// the same call, with the same dotted signature, right after its first scene
+// loads, behind the start logo.
 #include <string.h>
 #include "guest/kl_driver.h"
 #include "kl_jni_int.h"
@@ -24,7 +26,7 @@ const klj_binding *klj_vivox_binding(const char *cls, const char *name, const ch
         "com/vivox/vivoxnative/VivoxNative", "init", "(Landroid/content/Context;)V", init_unavailable
     };
     const char *target = kl_driver_target_name();
-    if (!target || strcmp(target, "x9386827918099701") ||
+    if (!target || (strcmp(target, "x9386827918099701") && strcmp(target, "x2677344882310094")) ||
         strcmp(cls, binding.cls) || strcmp(name, binding.name)) return NULL;
     // Unity's reflected call in this guest uses Context's dotted class name.
     // Accept just that observed spelling and the canonical JNI signature.

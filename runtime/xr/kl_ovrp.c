@@ -10340,6 +10340,7 @@ void klovrp_GetNodePoseState_entry(void);
 void klovrp_GetControllerState2_entry(void);
 void klovrp_GetControllerHapticsDesc_entry(void);
 void klovrp_GetControllerState_entry(void);
+void klovrp_GetTrackingCalibratedOrigin_entry(void);
 
 int kl_ovrp_claims(const char *soname) {
     if (!soname) return 0;
@@ -10531,6 +10532,15 @@ static uint64_t klovrp_GetTrackingTransformRawPose(float *out) {
 static uint64_t klovrp_GetTrackingCalibratedOrigin2(float *out) {
     ovrp_hit("ovrp_GetTrackingCalibratedOrigin2");
     return klovrp_pose_out_y(out, 0.0f);
+}
+
+// The 1.0 form, which Onward's OVRPlugin.cs still calls: the 28-byte ovrpPosef
+// returned BY VALUE, so the destination arrives in x8 (kl_ovrp_sret.S). The
+// real plugin (0x1595a8 in Onward's copy) is a wrapper round the 2-form that
+// stores the identity pose when that one fails; ours never does.
+void klovrp_GetTrackingCalibratedOrigin_impl(float *out) {
+    ovrp_hit("ovrp_GetTrackingCalibratedOrigin");
+    klovrp_pose_out_y(out, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -10999,6 +11009,7 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetTiledMultiResDynamic", (void *)klovrp_GetTiledMultiResDynamic},
     {"ovrp_GetTimeInSeconds", (void *)klovrp_GetTimeInSeconds},
     {"ovrp_GetTrackingCalibratedOrigin2", (void *)klovrp_GetTrackingCalibratedOrigin2},
+    {"ovrp_GetTrackingCalibratedOrigin", (void *)klovrp_GetTrackingCalibratedOrigin_entry},
     {"ovrp_GetTrackingIPDEnabled2", (void *)klovrp_GetTrackingIPDEnabled2},
     {"ovrp_GetTrackingOrientationEnabled2", (void *)klovrp_GetTrackingOrientationEnabled2},
     {"ovrp_GetTrackingOrientationSupported2", (void *)klovrp_GetTrackingOrientationSupported2},
