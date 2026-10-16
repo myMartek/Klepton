@@ -1546,8 +1546,12 @@ puts the camera on the ground with its hands underneath it.
   alone on its splash and level-loading screens, and what showed behind them
   was undrawn eye storage, a magenta flicker; Asgard's Wrath 2 does the same
   while a level loads, with three stale eye pictures shown in turn and not the
-  same one for both eyes. Default 1 for `x5767635983306831` and `wrath2`,
-  else 0. While the eye pass is off this way the compositor draws black behind
+  same one for both eyes. Alien: Rogue Incursion (`x24882487241367228`,
+  Vulkan) submits one loading quad alone while a level loads, and its eyes
+  differed there: no stage is observed on Vulkan, so the stages went round by
+  frame counter under the last eye viewport, at the different sizes its
+  dynamic resolution had left them. Default 1 for `x5767635983306831`,
+  `wrath2` and `x24882487241367228`, else 0. While the eye pass is off this way the compositor draws black behind
   the frame's quads (a mixed space shows the room wherever no depth was
   written).
 - `KL_OVRP_GL_EYE_FENCE=0|1` — a GL guest's `ovrp_EndFrame4` with an eye layer

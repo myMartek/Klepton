@@ -4433,14 +4433,23 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // eyes ("the pictures sent to the eye are broken and the left eye sees
     // something else than the right", 2026-10-11; the log has `layers=1` with
     // layer 2, a 350x175 m quad at 200 m, from the first frame on).
-    //   default 1 for x5767635983306831 and wrath2, else 0 (every other
-    //   OVRPlugin guest is left with the eye pass always on, as before)
+    // Alien: Rogue Incursion (UE5, Vulkan) again: after START GAME its frames
+    // are one 7x5.25 m loading quad 10 m out and nothing else
+    // (KL_OVRP_LAYERS, 2026-10-16: "submit 1/1: layer 4 (Quad)"), and the eyes
+    // differed while a level loaded. On Vulkan no stage is ever observed, so
+    // behind that quad the stages went round by frame counter, under the last
+    // eye viewport — and its dynamic resolution had left the three stages at
+    // different sizes (2271x2400 in one, 1589x1680 in the others).
+    //   default 1 for x5767635983306831, wrath2 and x24882487241367228, else 0
+    //   (every other OVRPlugin guest is left with the eye pass always on, as
+    //   before)
     static int eyeless = -1;
     if (eyeless < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
         eyeless = kl_env_on("KL_OVRP_EYELESS_FRAMES",
-                            t && (!strcmp(t, "x5767635983306831") || !strcmp(t, "wrath2")));
+                            t && (!strcmp(t, "x5767635983306831") || !strcmp(t, "wrath2") ||
+                                  !strcmp(t, "x24882487241367228")));
     }
     if (eyeless && layer_submits && layer_submit_count > 0) {
         kl_ovrp_eye_layer_external(named >= 0);
