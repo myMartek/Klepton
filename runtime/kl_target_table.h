@@ -36,6 +36,7 @@ KL_TARGET_ROW("vicecity", "vicecity", "vicecity.apk", "vicecity/assets", "viceci
 KL_TARGET_ROW("vrchat", "vrchat", "vrchat.apk", "vrchat/assets", "vrchat/lib/arm64-v8a", "libmain", "vrchat", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("walkabout", "walkabout", "walkabout.apk", "walkabout/assets", "walkabout/lib/arm64-v8a", "libmain", "walkabout", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("wrath2", "wrath2", "wrath2.apk", "wrath2/assets", "wrath2/lib/arm64-v8a", "libUE4", "wrath2", "Android/obb/com.Sanzaru.Wrath2", KL_GUEST_UE4)
+KL_TARGET_ROW("x10048506838538799", "x10048506838538799", "x10048506838538799.apk", "x10048506838538799/assets", "x10048506838538799/lib/arm64-v8a", "libmain", "x10048506838538799", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("x2637179839719680", "x2637179839719680", "x2637179839719680.apk", "x2637179839719680/assets", "x2637179839719680/lib/arm64-v8a", "libUE4", "x2637179839719680", "Android/obb/com.Armature.VR4", KL_GUEST_UE4)
 KL_TARGET_ROW("x7527722310622065", "x7527722310622065", "x7527722310622065.apk", "x7527722310622065/assets", "x7527722310622065/lib/arm64-v8a", "libmain", "x7527722310622065", "Android/obb/com.rrrgames.CaveCrave", KL_GUEST_UNITY)
 KL_TARGET_ROW("zix", "zix", "zix.apk", "zix/assets", "zix/lib/arm64-v8a", "libmain", "zix", "obb", KL_GUEST_UNITY)

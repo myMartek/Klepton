@@ -3206,6 +3206,11 @@ static float klxr_local_height(void) {
         // where the game expects it, and the whole scene lay far below and away ("viel zu weit weg von der
         // Welt", headset 2026-10-14: `xrLocateSpace: VIEW in LOCAL: (-0.06 1.43 -0.06)`).
         if (klxr_moss_from_steam()) on = 1;
+        // Flight Unlimited (store 10048506838538799) is seated too: it puts its cockpit and menus at
+        // LOCAL's origin and locates head and hands only in LOCAL. With LOCAL on the floor the eye sat
+        // ~1.3 m above the seat and cockpit and menus lay deep in the floor (headset 2026-10-16:
+        // `xrLocateViews in LOCAL: eye 0 at (-0.027 1.279 -0.036)`).
+        if (t && strcmp(t, "x10048506838538799") == 0) on = 1;
     }
     if (!on) return kl_ovrp_eye_height();
     if (latched < 0.0f) {
