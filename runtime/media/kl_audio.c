@@ -43,6 +43,29 @@ static unsigned     g_interrupt_max_ms = 1500;
 // it used to be part of; kl_audio_open and kl_audio_interrupted are above it.
 static unsigned     g_wd_streak;      // consecutive restarts, for the backoff
 static void         watchdog_start(void);
+// ---- the locks, and the ONE order they are taken in ----
+//
+//   g_prod  ->  g_lock  ->  g_wlock          (g_write: only ever TRY-locked)
+//
+//   g_prod   the source table and the arbitration (below). Held while the
+//            arbitration opens the device for a new owner (sink_claim ->
+//            sink_open), so it comes first.
+//   g_lock   the unit's lifecycle: create/start/stop/destroy.
+//   g_wlock  everything a writer touches: the ring (g_ring, g_cap, g_target,
+//            the write cursor), the owner's resampler and scratch (g_pos,
+//            g_prev, g_scratch, g_inbuf) and the per-source slot table. So
+//            every place that frees, replaces or resets those — sink_open,
+//            kl_audio_close, kl_audio_flush, kl_audio_restart — takes g_wlock
+//            too, inside g_lock.
+//   g_write  the single-producer body; try-locked by a writer holding no other
+//            lock, and g_wlock is taken inside it. Never held while taking
+//            g_prod or g_lock.
+//
+// Nothing takes g_lock while holding g_wlock. That is why a writer that finds
+// the render callback dead does not call the watchdog from inside its wait (the
+// watchdog's restart takes g_lock): it breaks out, drops its locks, and THEN
+// runs it. The render callback takes none of them; the ring is only freed or
+// replaced after unit_destroy, which waits for the callback to return.
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;   // unit lifecycle only
 
 static unsigned g_in_rate, g_in_ch, g_in_bits;   // the guest's format
@@ -92,6 +115,10 @@ static double           g_src_rpos[KL_AU_MAX_SRC];   // resampler position, mixe
 static float            g_src_prev[KL_AU_MAX_SRC][KL_AUDIO_MAX_CH];
 static int              g_src_n;
 static pthread_mutex_t  g_wlock = PTHREAD_MUTEX_INITIALIZER;
+// Bumped (under g_wlock) whenever the ring is freed or replaced, so a writer
+// that let go of g_wlock for a wait (KL_AUDIO_MIX_UNLOCK) can tell that what it
+// was writing into is gone.
+static uint64_t         g_ring_gen;
 
 // Slot for a producer key (NULL = the single-source/OpenSL path -> slot 0).
 // Caller holds g_wlock. Overflow folds into slot 0 rather than dropping audio.
@@ -142,7 +169,7 @@ void kl_audio_set_latency_ms(unsigned ms) { g_latency_override_ms = ms; }
 static double g_pos;                     // position in the input stream
 static float  g_prev[KL_AUDIO_MAX_CH];   // last input frame of the last chunk
 static float *g_scratch;                 // converted+resampled staging
-static size_t g_scratch_frames;
+static size_t g_scratch_frames;          // ...its size in samples (see resample)
 
 // Counters, for the report and for the watchdog.
 static _Atomic uint64_t g_last_render_ns;
@@ -657,6 +684,10 @@ static int sink_open(unsigned rate, unsigned channels, kl_audio_fmt fmt) {
         pthread_mutex_unlock(&g_lock);
         return 0;
     }
+    // Everything below replaces what a writer reads. A writer waiting for room
+    // holds g_wlock until its buffer is in, which the still-running unit lets
+    // it finish; destroying the unit first would leave it to time out.
+    pthread_mutex_lock(&g_wlock);
     if (g_open) unit_destroy();
     g_open = 0;
 
@@ -664,7 +695,11 @@ static int sink_open(unsigned rate, unsigned channels, kl_audio_fmt fmt) {
     g_out_ch = channels == 1 ? 1 : 2;
     g_trace = kl_env_on("KL_AUDIO_TRACE", 0);
 
-    if (unit_create() != 0) { pthread_mutex_unlock(&g_lock); return -1; }
+    if (unit_create() != 0) {
+        pthread_mutex_unlock(&g_wlock);
+        pthread_mutex_unlock(&g_lock);
+        return -1;
+    }
 
     // The ring holds a full second so a scheduling hiccup on either side cannot
     // wrap it; the *fill target* is what sets latency, and it is much smaller.
@@ -690,7 +725,16 @@ static int sink_open(unsigned rate, unsigned channels, kl_audio_fmt fmt) {
     free(g_inbuf);
     g_inbuf = NULL;
     g_inbuf_samples = 0;
-    if (!g_ring) { unit_destroy(); pthread_mutex_unlock(&g_lock); return -1; }
+    g_ring_gen++;
+    // A different format is a different ring: every source cursor described
+    // the old one.
+    g_src_n = 0;
+    if (!g_ring) {
+        unit_destroy();
+        pthread_mutex_unlock(&g_wlock);
+        pthread_mutex_unlock(&g_lock);
+        return -1;
+    }
 
     g_target = (size_t)(g_out_rate * lat_ms / 1000.0);
     atomic_store(&g_w, 0); atomic_store(&g_r, 0);
@@ -719,14 +763,9 @@ static int sink_open(unsigned rate, unsigned channels, kl_audio_fmt fmt) {
     // one the OS is free to tear down harder than a running silent one, and the
     // render callback's timestamp is the watchdog's only heartbeat.
     unit_start();
+    pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&g_lock);
     watchdog_start();
-    // A different format is a different ring: every source cursor described
-    // the old one. Taken after g_lock, never inside it — a writer holds g_wlock
-    // while it waits, and the watchdog it calls from there takes g_lock.
-    pthread_mutex_lock(&g_wlock);
-    g_src_n = 0;
-    pthread_mutex_unlock(&g_wlock);
 
     fprintf(stderr, "  [au] CoreAudio out: guest %u Hz/%u ch/%s -> device %.0f Hz/%u ch, "
                     "%u ms target%s\n",
@@ -989,8 +1028,12 @@ void kl_audio_pause_src(const void *tag) {
     if (go) kl_audio_pause();
 }
 
-// ...nor drop what the other one has queued: only this stream's own cursor and
-// resampler start again.
+// Flushing drops what is queued and not yet played. Without a mix (one owner)
+// the owner's flush is the device's, as it always was. While mixing, the ring
+// holds every playing stream's audio summed together, so a flush from one of
+// them may only drop the ring when no OTHER stream is playing; otherwise the
+// ring is left alone and only this stream's own slot — its write cursor and
+// resampler state — is released, so its next write starts again at the reader.
 void kl_audio_flush_src(const void *tag) {
     pthread_mutex_lock(&g_prod);
     int mixed_alone = g_mix_all && !other_playing(tag);
@@ -1001,8 +1044,11 @@ void kl_audio_flush_src(const void *tag) {
 }
 
 void kl_audio_close(void) {
-    pthread_mutex_lock(&g_lock);
+    // Before the locks: a writer waiting for room holds g_wlock, and a stopped
+    // device is what lets it out (see ring_put).
     g_playing = 0;
+    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_wlock);
     unit_destroy();
     // NOT dump_close(): FMOD destroys and re-creates the player during startup,
     // so closing here ended the capture 0.12 s into a 12.8 s run. The capture is
@@ -1012,6 +1058,8 @@ void kl_audio_close(void) {
     free(g_scratch); g_scratch = NULL; g_scratch_frames = 0;
     free(g_inbuf);   g_inbuf = NULL;   g_inbuf_samples = 0;
     atomic_store(&g_w, 0); atomic_store(&g_r, 0);
+    g_ring_gen++;
+    pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -1036,12 +1084,14 @@ void kl_audio_flush(void) {
     // exclusive ownership of that cursor. Flushes happen on a play-state change,
     // so the cost is not on any hot path.
     pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_wlock);           // the resampler state is a writer's
     int was = g_running;
     if (was && g_unit) { AudioOutputUnitStop(g_unit); g_running = 0; }
     atomic_store(&g_r, atomic_load(&g_w));
     g_pos = 0.0;
     memset(g_prev, 0, sizeof g_prev);
     if (was) unit_start();
+    pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -1080,6 +1130,8 @@ void kl_audio_set_silenced(int silenced) {
 int kl_audio_restart(void) {
     if (!g_open) return -1;
     pthread_mutex_lock(&g_lock);
+    if (!g_open) { pthread_mutex_unlock(&g_lock); return -1; }   // closed meanwhile
+    pthread_mutex_lock(&g_wlock);           // the ring may be replaced below
     unit_destroy();
     int rc = unit_create();
     if (rc == 0) {
@@ -1092,6 +1144,7 @@ int kl_audio_restart(void) {
                 free(g_ring); g_ring = nr;
                 g_target = (size_t)((double)g_target * g_out_rate / (double)(g_cap - 1));
                 g_cap = frames;
+                g_ring_gen++;
             }
         }
         atomic_store(&g_r, atomic_load(&g_w));
@@ -1099,6 +1152,7 @@ int kl_audio_restart(void) {
         memset(g_prev, 0, sizeof g_prev);
         unit_start();
     }
+    pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&g_lock);
     g_restarts++;
     // Rate-limited for the same reason the watchdog's line is, and with the
@@ -1134,16 +1188,21 @@ void kl_audio_session_ready(double sample_rate) {
 // input stream is v[-1] = the last frame of the previous chunk, v[0..n-1] =
 // this one, so g_pos carries fractional position between calls and a rate ratio
 // of exactly 1.0 degenerates to a straight copy.
+//
+// `*buf_samples` is the buffer's size in SAMPLES, not frames: a buffer that
+// outlives a reopen (a mixed source's, kept per thread) was sized for the old
+// channel count, and a mono device reopened as stereo needs twice the floats
+// for the same number of frames.
 static size_t resample(const float *src, size_t n, unsigned in_rate, unsigned ich,
-                       double *posp, float *prev, float **buf, size_t *buf_frames,
+                       double *posp, float *prev, float **buf, size_t *buf_samples,
                        float **out) {
     double ratio = (double)in_rate / g_out_rate;
     size_t max_out = (size_t)((double)(n + 2) / ratio) + 2;
-    if (max_out > *buf_frames) {
+    if (max_out * g_out_ch > *buf_samples) {
         float *p = realloc(*buf, max_out * g_out_ch * sizeof(float));
         if (!p) return 0;
         *buf = p;
-        *buf_frames = max_out;
+        *buf_samples = max_out * g_out_ch;
     }
     float *dst = *buf;
     unsigned och = g_out_ch;
@@ -1402,13 +1461,30 @@ static uint64_t pacing_reader(uint64_t r) {
     return r + (adv < n ? adv : n);
 }
 
+// Whether the render callback has stopped arriving while the guest wants sound
+// — the condition watchdog() restarts on, read without acting on it.
+static int render_stalled(void) {
+    if (!g_open || g_interrupted || !g_playing) return 0;
+    uint64_t idle = now_ns() - atomic_load_explicit(&g_last_render_ns, memory_order_relaxed);
+    uint64_t limit = (g_wd_streak > 3 ? 3000ull : 500ull) * 1000000ull;
+    return idle > limit;
+}
+
 // Put `frames` converted frames into the ring for `src`, blocking until there
 // is room — THIS is the clock. Caller holds g_wlock. With `unlocked` the 2 ms
 // wait for room happens outside g_wlock (KL_AUDIO_MIX_UNLOCK), so `conv` must
 // be the caller's own memory, and `*slot` is found again afterwards because a
-// release can shift the table meanwhile.
+// release can shift the table meanwhile; if the ring was freed or replaced
+// during the wait (g_ring_gen), the write ends there.
+//
+// A dead render callback ends the wait too, with *stalled set: the caller runs
+// watchdog() once it has dropped its locks. Calling it from here would take
+// g_lock under g_wlock, the reverse of the order (see the lock comment at the
+// top), and a close or reopen waiting for g_wlock would deadlock against it.
 static size_t ring_put(const void *src, int *slot, const float *conv, size_t frames,
-                       int unlocked) {
+                       int unlocked, int *stalled) {
+    *stalled = 0;
+    const uint64_t gen = g_ring_gen;
     // The target has to be able to hold at least two of these, or the wait
     // below can never be satisfied and every write times out.
     if (g_target < frames * 2) {
@@ -1445,8 +1521,9 @@ static size_t ring_put(const void *src, int *slot, const float *conv, size_t fra
 
     uint64_t deadline = now_ns() + 2000ull * 1000000ull;
     size_t written = 0;
+    int gone = 0;
     while (written < frames) {
-        if (!g_ring) break;                           // closed during an unlocked wait
+        if (g_ring_gen != gen || !g_ring) { gone = 1; break; }   // freed or replaced during a wait
         uint64_t r = atomic_load_explicit(&g_r, memory_order_acquire);
         uint64_t here = pos + written;
         if (here < r) here = r;                       // never write in the past
@@ -1491,7 +1568,7 @@ static size_t ring_put(const void *src, int *slot, const float *conv, size_t fra
         // Full. A stop / interruption / lost device must break the loop, or the
         // feeder wedges holding nothing and the guest's mixer stalls behind it.
         if (!g_playing || g_interrupted) break;
-        watchdog();
+        if (render_stalled()) { *stalled = 1; break; }
         if (now_ns() > deadline) { g_short_writes++; break; }
         if (unlocked) {
             pthread_mutex_unlock(&g_wlock);
@@ -1502,6 +1579,11 @@ static size_t ring_put(const void *src, int *slot, const float *conv, size_t fra
         }
     }
     if (unlocked) *slot = src_slot(src);
+    if (gone) {
+        // Cursors of a ring that no longer exists: start again at the reader.
+        g_src_pos[*slot] = 0;
+        return written;
+    }
     g_src_pos[*slot] = pos + written < r0 ? r0 : pos + written;
     g_src_frames[*slot] += written;
     // A source that appears LATE must not inherit a cursor from the
@@ -1569,18 +1651,43 @@ static void after_write(int slot, size_t n, size_t frames, const float *conv,
 // second writer away, which is right for a non-owner and wrong for a mix.
 // Conversion output is this thread's own, so the wait for room may happen
 // outside g_wlock.
+//
+// "This thread's own" is a per-thread pair of buffers behind a pthread key, so
+// they are freed when the thread ends: a guest that starts a feeder thread per
+// stream and opens streams over and over would otherwise leak a pair each time.
+typedef struct { float *in, *out; size_t in_n, out_n; } mix_bufs;   // sizes in samples
+static pthread_key_t  g_mix_key;
+static pthread_once_t g_mix_once = PTHREAD_ONCE_INIT;
+static void mix_bufs_free(void *p) {
+    mix_bufs *b = p;
+    if (!b) return;
+    free(b->in);
+    free(b->out);
+    free(b);
+}
+static void mix_key_make(void) { pthread_key_create(&g_mix_key, mix_bufs_free); }
+static mix_bufs *mix_bufs_get(void) {
+    pthread_once(&g_mix_once, mix_key_make);
+    mix_bufs *b = pthread_getspecific(g_mix_key);
+    if (!b) {
+        b = calloc(1, sizeof *b);
+        if (b && pthread_setspecific(g_mix_key, b) != 0) { free(b); b = NULL; }
+    }
+    return b;
+}
+
 static size_t mix_write(const void *src, const void *pcm, size_t bytes, size_t sn,
                         unsigned sch, unsigned srate, kl_audio_fmt sfmt, int peak) {
-    static __thread float *t_in, *t_out;
-    static __thread size_t t_in_n, t_out_frames;
+    mix_bufs *t = mix_bufs_get();
+    if (!t) return 0;
     size_t samples = sn * sch;
-    if (samples > t_in_n) {
-        float *fp = realloc(t_in, samples * sizeof(float));
+    if (samples > t->in_n) {
+        float *fp = realloc(t->in, samples * sizeof(float));
         if (!fp) return 0;
-        t_in = fp;
-        t_in_n = samples;
+        t->in = fp;
+        t->in_n = samples;
     }
-    kl_audio_to_float(sfmt, pcm, t_in, samples);
+    kl_audio_to_float(sfmt, pcm, t->in, samples);
 
     pthread_mutex_lock(&g_wlock);
     if (!g_open || !g_ring || !(g_out_rate > 0.0)) { pthread_mutex_unlock(&g_wlock); return 0; }
@@ -1589,15 +1696,17 @@ static size_t mix_write(const void *src, const void *pcm, size_t bytes, size_t s
 
     int slot = src_slot(src);
     float *conv = NULL;
-    size_t frames = resample(t_in, sn, srate ? srate : g_in_rate, sch,
+    size_t frames = resample(t->in, sn, srate ? srate : g_in_rate, sch,
                              &g_src_rpos[slot], g_src_prev[slot],
-                             &t_out, &t_out_frames, &conv);
+                             &t->out, &t->out_n, &conv);
     if (!frames) { pthread_mutex_unlock(&g_wlock); return 0; }
     g_writes++;
 
-    size_t written = ring_put(src, &slot, conv, frames, g_mix_unlock);
+    int stalled;
+    size_t written = ring_put(src, &slot, conv, frames, g_mix_unlock, &stalled);
     after_write(slot, sn, frames, conv, written, peak);
     pthread_mutex_unlock(&g_wlock);
+    if (stalled) watchdog();                // with no lock held: it takes g_lock
     if (written == frames) return bytes;
     size_t in_frames = (size_t)((double)sn * (double)written / (double)frames);
     return in_frames * sch * kl_audio_fmt_bytes(sfmt);
@@ -1663,16 +1772,26 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
     // design, so a second thread arriving here must be turned away rather than
     // queued behind it. Turning it away is exactly what a non-owner gets.
     if (pthread_mutex_trylock(&g_write) != 0) { pace(sn, srate); return bytes; }
+
+    // The convert()/scratch state and the mix cursors are shared, so the whole
+    // body is serialised. The reader never takes this lock. The device's
+    // format is read under it: a reopen changes it under g_wlock too.
+    pthread_mutex_lock(&g_wlock);
+    if (!g_open || !g_ring || !g_in_ch) {
+        pthread_mutex_unlock(&g_wlock);
+        pthread_mutex_unlock(&g_write);
+        return 0;
+    }
     unsigned in_frame = g_in_ch * kl_audio_fmt_bytes(g_in_fmt);
     size_t n = bytes / in_frame;
-    if (!n || !g_open) { pthread_mutex_unlock(&g_write); return 0; }
+    if (!n) {
+        pthread_mutex_unlock(&g_wlock);
+        pthread_mutex_unlock(&g_write);
+        return 0;
+    }
 
     if (peak > g_peak) g_peak = peak;
     if (!peak) g_silent_buffers++;
-
-    // The convert()/scratch state and the mix cursors are shared, so the whole
-    // body is serialised. The reader never takes this lock.
-    pthread_mutex_lock(&g_wlock);
 
     // Widen the guest's encoding to float before the resampler touches it. The
     // whole of "static in one ear, half-speed voices in the other" on Batman:
@@ -1698,11 +1817,12 @@ size_t kl_audio_write_src(const void *src, const void *pcm, size_t bytes) {
     g_writes++;
 
     // conv is the shared scratch, so never an unlocked wait here.
-    int slot = src_slot(src);
-    size_t written = ring_put(src, &slot, conv, frames, 0);
+    int slot = src_slot(src), stalled;
+    size_t written = ring_put(src, &slot, conv, frames, 0, &stalled);
     after_write(slot, n, frames, conv, written, peak);
     pthread_mutex_unlock(&g_wlock);
     pthread_mutex_unlock(&g_write);
+    if (stalled) watchdog();                // with no lock held: it takes g_lock
     return written == frames ? bytes : written * in_frame;
 }
 

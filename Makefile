@@ -429,6 +429,27 @@ build/t_aaudio: tests/t_aaudio.c $(RUNTIME) $(RUNTIME_HDRS)
 aaudio-seam: build/t_aaudio
 	@./build/t_aaudio
 
+# Writers against a device that is reopened at changing formats, closed,
+# flushed and restarted under them, mixed and with one owner: no crash and no
+# deadlock (a deadline per case). The lock order it holds to is described at
+# the top of runtime/media/kl_audio.c. Opens the real output device for a few
+# seconds (SKIPs without one); in `make check`. audio-race-asan is the same
+# under AddressSanitizer.
+build/t_audiorace: tests/t_audiorace.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_audiorace.c $(RUNTIME) $(LDLIBS)
+
+.PHONY: audio-race audio-race-asan
+audio-race: build/t_audiorace
+	@./build/t_audiorace
+
+build/t_audiorace_asan: tests/t_audiorace.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fsanitize=address -fno-omit-frame-pointer -o $@ tests/t_audiorace.c $(RUNTIME) $(LDLIBS)
+
+audio-race-asan: build/t_audiorace_asan
+	@./build/t_audiorace_asan
+
 # The third: two streams MIXED (KL_AUDIO_MIX_SOURCES, Steam Link's shape — a
 # float stream and an int16 stream at once). Each must deliver real time with
 # no resyncs, and what reaches the device must be both. Opens the real output
@@ -1018,7 +1039,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1047,6 +1068,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@head -1 build/posebound.log && grep -E '^(PASS|FAIL)' build/posebound.log
 	@./build/t_audio > build/audio.log 2>&1 || { cat build/audio.log; exit 1; }
 	@echo "=== audio sink: sample formats, OpenSL sources ===" && tail -1 build/audio.log
+	@./build/t_audiorace > build/audiorace.log 2>&1 || { cat build/audiorace.log; exit 1; }
+	@head -1 build/audiorace.log && tail -1 build/audiorace.log
 	@./build/t_xrinput > build/xrinput.log 2>&1 || { cat build/xrinput.log; exit 1; }
 	@grep -E '=== OpenXR actions' build/xrinput.log && tail -1 build/xrinput.log
 	@./build/t_softinput > build/softinput.log 2>&1 || { cat build/softinput.log; exit 1; }
