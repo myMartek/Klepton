@@ -4046,6 +4046,14 @@ audio path that has shipped: both are linked in, and
   is then only what `KL_STATS_CARD` makes it. `applyPanelChord`,
   KleptonControllers.swift.
 
+  The panel is drawn **over every quad of the game's**, whatever its distance
+  (`KleptonOverlayDepth.statsCard`: no depth test, its own depth written). Through
+  toolchain 563 (`fd7f273`) it was depth-tested at its 1.2 m, and a quad nearer than that
+  hid it over the quad's whole rectangle, transparent parts included: in Alien:
+  Rogue Incursion it showed in the menu and was gone once a level began (a panel
+  held in the hand, interaction labels). `make statscard` runs the pass on the
+  Mac and writes `{menu,level}-{before,after}.png`.
+
   **A short tap of Create + Options together** (both up again within the
   second) while the panel is shown switches **MetalFX upscaling** from the next
   frame, in every build — where MetalFX can upscale: the device has Apple's

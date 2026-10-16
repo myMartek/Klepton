@@ -225,6 +225,8 @@ final class KleptonCompositor {
     /// The guest's quad layers in the order it submitted them: no test, and
     /// depth still written. See `overlaysInSubmitOrder`.
     private var overlayOrderState: MTLDepthStencilState?
+    /// The metrics panel's: over everything. See KleptonOverlayDepth.statsCard.
+    private var statsCardState: MTLDepthStencilState?
     /// Always-pass, no write — for coplanar draws after the first. See where
     /// `depthState` is built for why the two cannot be one.
     private var depthPassState: MTLDepthStencilState?
@@ -1002,10 +1004,7 @@ final class KleptonCompositor {
             // Measured on device: a fullscreen quad at reverse-Z 0 with writes
             // off is invisible; the same quad at 0.05 (2 m) with writes on
             // appears. .greater matches the reverse-Z clear of 0.
-            let dsd = MTLDepthStencilDescriptor()
-            dsd.depthCompareFunction = .greater
-            dsd.isDepthWriteEnabled = true
-            depthState = device.makeDepthStencilState(descriptor: dsd)
+            depthState = device.makeDepthStencilState(descriptor: KleptonOverlayDepth.nearerWins())
 
             // ...and the state for everything drawn AFTER the first thing at a
             // given distance. `.greater` against a depth already written is
@@ -1022,10 +1021,8 @@ final class KleptonCompositor {
             dsdAlways.isDepthWriteEnabled = false
             depthPassState = device.makeDepthStencilState(descriptor: dsdAlways)
 
-            let dsdOrder = MTLDepthStencilDescriptor()
-            dsdOrder.depthCompareFunction = .always
-            dsdOrder.isDepthWriteEnabled = true
-            overlayOrderState = device.makeDepthStencilState(descriptor: dsdOrder)
+            overlayOrderState = device.makeDepthStencilState(descriptor: KleptonOverlayDepth.inOrder())
+            statsCardState = device.makeDepthStencilState(descriptor: KleptonOverlayDepth.statsCard())
 
             // The overlay pass — the guest's non-eye layers, which are the whole
             // of an Unreal title's UI. See encodeOverlays.
@@ -4015,7 +4012,9 @@ final class KleptonCompositor {
                                              drawable.computeProjection(viewIndex: vi)))
         }
         guard uniforms.contains(where: { $0.visible != 0 }) else { return 0 }
-        if let depthState { enc.setDepthStencilState(depthState) }
+        // Over the guest's quads whatever their distance: a hand-held panel or a label nearer than 1.2 m
+        // writes its depth over its whole rectangle and would hide the panel (KleptonOverlayDepth).
+        if let s = statsCardState ?? depthState { enc.setDepthStencilState(s) }
         enc.setRenderPipelineState(pipe)
         enc.setFragmentTexture(tex, index: 0)
         enc.setFragmentSamplerState(statsSampler ?? sampler, index: 0)

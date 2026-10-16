@@ -931,6 +931,23 @@ build/t_mfxalpha: tests/t_mfxalpha.swift visionos/Sources/KleptonMetalFXAlpha.sw
 mfxalpha: build/t_mfxalpha
 	./build/t_mfxalpha
 
+# The metrics panel over the guest's quad layers (KleptonOverlayDepth.swift): the composite's quad pass
+# on the Mac's GPU with the real overlay shader and panel — a quad nearer than the panel (Alien's levels)
+# must not hide it. Writes {menu,level}-{before,after}.png to $$T_STATSCARD_SHOTS or build/.
+build/t_statscard: tests/t_statscard.swift tests/t_statscard.h visionos/Sources/KleptonOverlayDepth.swift \
+                   visionos/Sources/KleptonMetrics.swift runtime/gfx/kl_reproject.c runtime/gfx/kl_reproject.h \
+                   runtime/kl_env.c runtime/xr/kl_ovrp.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -c -o build/t_statscard_reproject.o runtime/gfx/kl_reproject.c
+	$(CC) $(CFLAGS) -c -o build/t_statscard_env.o runtime/kl_env.c
+	swiftc -o $@ -import-objc-header tests/t_statscard.h $(RUNTIME_INC) \
+	  visionos/Sources/KleptonOverlayDepth.swift visionos/Sources/KleptonMetrics.swift tests/t_statscard.swift \
+	  build/t_statscard_reproject.o build/t_statscard_env.o
+
+.PHONY: statscard
+statscard: build/t_statscard
+	./build/t_statscard
+
 # "Max resolution per eye" in the start window (KleptonEyeMax.swift): the
 # options, the stored choice per game, and the old Test switch taken over once.
 build/t_maxeye_swift: tests/t_maxeye.swift visionos/Sources/KleptonEyeMax.swift
@@ -983,7 +1000,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_maxeye_swift build/t_x18pool build/t_ue421
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_audioswitch build/t_sink2_audio build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1062,6 +1079,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@echo "=== MetalFX switch: resolution preset ===" && tail -1 build/mfxpreset.log
 	@./build/t_mfxalpha > build/mfxalpha.log 2>&1 || { cat build/mfxalpha.log; exit 1; }
 	@head -1 build/mfxalpha.log && tail -1 build/mfxalpha.log
+	@./build/t_statscard > build/statscard.log 2>&1 || { cat build/statscard.log; exit 1; }
+	@head -1 build/statscard.log && tail -1 build/statscard.log
 	@./build/t_maxeye_swift > build/maxeye-swift.log 2>&1 || { cat build/maxeye-swift.log; exit 1; }
 	@head -1 build/maxeye-swift.log && tail -1 build/maxeye-swift.log
 	@$(MAKE) -s ovrpabi
