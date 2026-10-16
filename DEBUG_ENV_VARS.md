@@ -2508,6 +2508,27 @@ The composite/timewarp pass — one file, compiled by both compositors
   Controls: mouse-look aims, **mouse-L = right index trigger** (the menu
   click), mouse-R = grip, `Z`/`X` = A/B, `C`/`V` = X/Y, `G`/`H` = left
   trigger/grip, arrows = right thumbstick, WASD/`R`/`F` move.
+- `KL_VIEW_SCRIPT="<secs>:<yaw>,<pitch>[,c];..."` — what a person would do with
+  the mouse, timed from the window opening: at `<secs>` turn the head to `<yaw>` /
+  `<pitch>` degrees (the hands turn with it, as with mouse-look; yaw > 0 turns left,
+  pitch > 0 looks up) and, with `,c`, click the right trigger for 0.3 s. Up to 24
+  steps, each logged as `[view] KL_VIEW_SCRIPT at …`. So a run finds its own way
+  through a game's menus with no one at the window. Alien: Rogue Incursion from a
+  fresh userdata into its first level (2026-10-16, warm shader cache):
+  `88:0,14,c;91:0,14,c;94:0,14,c;98:25,24;101:25,24,c;106:-19,18;108:-19,18,c;112:-16,10;114:-16,10,c;118:-8,10;120:-8,10,c;124:0,0`
+  (play options OK, NEW GAME, slot 3, NEXT, START GAME) — once its first-run
+  "Initial options" and calibration screens are behind it (OK at pitch 10).
+- `KL_STATS_CARD=1` with `--view` — the metrics panel in the window, drawn by
+  KleptonMetrics.swift from `build/libklvm_panel.dylib` (`make viewer-panel`;
+  `KL_VIEW_PANEL_LIB` names another path), composited with the headset's depth:
+  a depth buffer, the eye picture nearer-wins, the guest's quads as
+  KleptonCompositor draws them (`KL_OVERLAY_SUBMIT_ORDER` and its per-title
+  default), the panel over everything (`KleptonOverlayDepth.statsCard`). Without
+  the dylib the panel is not shown and the viewer says so once; without
+  `KL_STATS_CARD` nothing about the composite changes.
+  `KL_VIEW_CARD_DEPTH=nearer` draws the panel nearer-wins instead — the headset
+  through toolchain 563, where a quad of the game's nearer than 1.2 m hid it
+  (Alien's first level: a 0.94 x 0.79 m quad 0.83 m ahead).
 - `KL_VIEW_AIM_AT_EYE=1` — put both hands at the head position. Beat Saber's
   menu pointer (`VRUIControls.VRGraphicRaycaster`) casts from the controller
   transform, and the default head-relative hands sit 0.25 m below your gaze,

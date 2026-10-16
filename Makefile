@@ -880,6 +880,17 @@ build/t_metrics: tests/t_metrics.c runtime/diag/kl_metrics.c runtime/diag/kl_met
 	@mkdir -p build
 	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_metrics.c runtime/diag/kl_metrics.c runtime/gfx/kl_mtl_busy.m -framework Metal -framework Foundation
 
+# The metrics panel for the macOS viewer (KL_STATS_CARD with --view): the same drawing as a dylib that
+# kl_view_mtl.m loads from beside m_boot only when the panel is asked for. Not in `check`; m_boot does
+# not depend on it.
+build/libklvm_panel.dylib: tools/viewer_panel/panel.swift visionos/Sources/KleptonMetrics.swift runtime/diag/kl_metrics.h
+	@mkdir -p build
+	swiftc -O -emit-library -o $@ -import-objc-header runtime/diag/kl_metrics.h \
+	  visionos/Sources/KleptonMetrics.swift tools/viewer_panel/panel.swift
+
+.PHONY: viewer-panel
+viewer-panel: build/libklvm_panel.dylib
+
 # The panel itself as a picture, from a made-up minute: the drawing runs on the
 # Mac, so its layout can be looked at without a headset.
 build/metrics_preview: tools/metrics_preview/main.swift visionos/Sources/KleptonMetrics.swift
