@@ -661,6 +661,11 @@ TARGETS = {
         # controller, wrong for a pad. So on a pad, and only there: Square is B
         # and Circle takes Square's X. Touch and Sense controllers are untouched.
         "gamepad_map": "square=b,circle=x",
+        # On from the start, as the owner tested it (2026-10-17): shaders
+        # compiled behind the picture. The first session of a fresh copy
+        # compiled 392 pipelines, 46 s in the compiler, with no freeze left
+        # but one of 170 ms at the start.
+        "test_on": "KL_VK_ASYNC_PIPES",
     },
     # ---- JKXR: ONE APK, TWO GAMES, TWO ROWS ----
     #
