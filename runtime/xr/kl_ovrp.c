@@ -2163,7 +2163,25 @@ static int klovrp_eye_cant(void) {
 // KL_OVRP_IPD=<metres>: force a symmetric separation, ignoring whatever the
 // frontend pushed. The A/B for "is the compositor's number the wrong one" —
 // and, with no frontend at all, the only way to get stereo out of a host run.
+static void klovrp_eye_offset_raw(int eye, float *ox, float *oy, float *oz);
+// The eyes as a Quest has them: side by side, nothing in front of or above the
+// other. Vision Pro's measured offsets carry about 0.8 mm forward/back and
+// 0.2 mm up/down per eye (device log: L (-0.0317, 0.0002, 0.0008) R (0.0317,
+// -0.0002, -0.0008)). Invisible in a world at human scale - but LEGO
+// Bricktales scales its world about 2500x, the 1.6 mm became 4 units, and its
+// fade canvas, placed 2 units past the near plane in front of the camera, sat
+// in front of the near plane for the right eye: the fade showed in the left
+// eye only (GPU trace, draw 329, ndc z 0.980 left / 1.018 right; 2026-10-18).
+// The separation stays the measured one (x); y and z are dropped. The
+// composite uses these same told offsets, so it stays consistent.
+// KL_OVRP_EYE_FLAT=0 hands the measured offsets on unchanged.
 static void klovrp_eye_offset(int eye, float *ox, float *oy, float *oz) {
+    klovrp_eye_offset_raw(eye, ox, oy, oz);
+    static int flat = -1;
+    if (flat < 0) flat = kl_env_on("KL_OVRP_EYE_FLAT", 1);
+    if (flat) { *oy = 0.0f; *oz = 0.0f; }
+}
+static void klovrp_eye_offset_raw(int eye, float *ox, float *oy, float *oz) {
     static float forced = -1.0f;
     if (forced < 0.0f) {
         float v = kl_env_float("KL_OVRP_IPD", 0.0f);
