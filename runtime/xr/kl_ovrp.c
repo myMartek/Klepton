@@ -1619,6 +1619,13 @@ static int klovrp_title_cap(const char *t) {
         // the one lever. 4000 as for the other Unity GL titles above; the setting
         // (or KL_OVRP_EYE_MAX) takes it back down if a busy scene stutters.
         if (t && strcmp(t, "x2285803881494677") == 0) cap_dflt = 4000;
+        // Catan VR (Unity 2018.4 on GL) and LEGO Bricktales (Unity 6000.2 on
+        // Vulkan): their owner asked for 4000 as the default, 2026-10-18. LEGO
+        // scales its eye by 1.41 itself and is widened for symmetric
+        // projection on top, so its eye grows well past 4000; the start
+        // window's "Resolution" takes it back down if memory runs short.
+        if (t && (strcmp(t, "x3882524545155280") == 0 || strcmp(t, "x6521909757843713") == 0))
+            cap_dflt = 4000;
         // Batman: Arkham Shadow: 4608, the eye size rebelancap runs it at with
         // foveation "high" (kl_fove) — see the note on its row in
         // visionos/targets.py. Unfoveated he measured 4032 as its rung and 5120
