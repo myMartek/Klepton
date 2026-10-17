@@ -201,6 +201,7 @@ static PFN_vkGetDeviceProcAddr   real_gdpa;
 #include "kl_vk_eyefix.h"
 static const klvk_pipe_hooks *g_pipe_hooks;
 static __thread int t_pipe_replay;   // this thread belongs to the replayer
+static __thread int t_ap_worker;     // ...to the compiles behind the frame (KL_VK_ASYNC_PIPES)
 void klvk_set_pipe_hooks(const klvk_pipe_hooks *h) { g_pipe_hooks = h; }
 void klvk_set_replay_thread(int on) { t_pipe_replay = on; }
 #define PIPE_HOOK(fn, ...) do { if (g_pipe_hooks && g_pipe_hooks->fn && !t_pipe_replay) g_pipe_hooks->fn(__VA_ARGS__); } while (0)
@@ -5165,7 +5166,7 @@ static VkResult VKAPI_CALL klvk_CreateGraphicsPipelines0(VkDevice dev,
             "geometry)\n", fixed); } }
     if (!t_pipe_replay) {
         g_pipe_gfx += n;
-        kl_pipe_report("gfx", n, kl_pipe_ms() - t0);
+        kl_pipe_report(t_ap_worker ? "background gfx" : "gfx", n, kl_pipe_ms() - t0);
     }
     return r;
 }
@@ -5420,6 +5421,12 @@ static int klvk_ap_clone(klvk_ap_arena *a, const VkGraphicsPipelineCreateInfo *c
             *tail = r; tail = &r->pNext;
         } else if (x->sType == VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO) {
             // Answered into the guest's memory, at a time it no longer expects it: left out.
+        } else if (x->sType == VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR) {
+            // Plain values; Unity's Vulkan device chains it where the device names the extension.
+            VkPipelineFragmentShadingRateStateCreateInfoKHR *f = klvk_ap_dup(a, x, sizeof *f);
+            if (!f) return 0;
+            f->pNext = NULL;
+            *tail = f; tail = &f->pNext;
         } else { klvk_ap_unknown("pipeline", x); return 0; }
     }
     unsigned stages = 0;
@@ -5501,6 +5508,7 @@ static int klvk_ap_clone(klvk_ap_arena *a, const VkGraphicsPipelineCreateInfo *c
 static void *klvk_ap_worker(void *arg) {
     (void)arg;
     pthread_setname_np("kl-pipeline-compile");
+    t_ap_worker = 1;
     unsigned delay = kl_env_uint("KL_VK_ASYNC_DELAY_MS", 0);
     for (;;) {
         pthread_mutex_lock(&g_ap_mu);
@@ -5538,12 +5546,76 @@ static int klvk_ap_mode(void) {
     if (mode < 0) mode = (int)kl_env_uint("KL_VK_ASYNC_PIPES", 0);
     return mode;
 }
+// KL_VK_ASYNC_RP — the same for pipelines made for a VkRenderPass, which is
+// how Unity 2022 makes all of its own (Arkham Shadow: 400 pipelines in twelve
+// minutes of play, up to 1.1 s each on the headset, every one a frozen
+// picture). Off unless set: Source 2 makes its pipelines with dynamic
+// rendering, and what it was measured with stays as it was.
+//
+// Mode 1's test — does the pipeline draw with a depth buffer — is in the pass
+// for these: which of its subpasses have a depth/stencil attachment, noted
+// when the pass is made (one bit per subpass; a pass of more than 32 is not
+// noted, and its pipelines are compiled in place). A pass the guest destroys
+// first waits for the compiles under way, which may be reading it.
+static int klvk_ap_rp_on(void) {
+    static int on = -1;
+    if (on < 0) on = klvk_ap_mode() && kl_env_on("KL_VK_ASYNC_RP", 0);
+    return on;
+}
+#define KLVK_RP_SLOTS 8192u
+typedef struct { uint64_t rp; uint32_t depth; int known; } klvk_rp_ent;
+static klvk_rp_ent g_rp_tab[KLVK_RP_SLOTS];
+static pthread_mutex_t g_rp_mu = PTHREAD_MUTEX_INITIALIZER;
+// Under g_rp_mu. A slot keeps its handle once given one: MoltenVK hands the
+// address of a destroyed pass out again, and that finds its old slot.
+static klvk_rp_ent *klvk_rp_slot(uint64_t rp, int add) {
+    uint32_t i = (uint32_t)((rp >> 4) * 2654435761u) % KLVK_RP_SLOTS;
+    for (uint32_t k = 0; k < KLVK_RP_SLOTS; k++, i = (i + 1) % KLVK_RP_SLOTS) {
+        if (g_rp_tab[i].rp == rp) return &g_rp_tab[i];
+        if (!g_rp_tab[i].rp) {
+            if (!add) return NULL;
+            g_rp_tab[i].rp = rp;
+            return &g_rp_tab[i];
+        }
+    }
+    return NULL;
+}
+static void klvk_rp_note(uint64_t rp, uint32_t subpasses, uint32_t depth) {
+    if (!rp || !klvk_ap_rp_on()) return;
+    pthread_mutex_lock(&g_rp_mu);
+    klvk_rp_ent *e = klvk_rp_slot(rp, 1);
+    if (e) { e->depth = depth; e->known = subpasses <= 32; }
+    pthread_mutex_unlock(&g_rp_mu);
+    static int said;
+    if (!e && !said++) VKI("async pipelines: the render-pass table is full — pipelines for passes made "
+                           "from now on are compiled in place\n");
+}
+static int klvk_rp_depth(uint64_t rp, uint32_t subpass) {
+    pthread_mutex_lock(&g_rp_mu);
+    klvk_rp_ent *e = klvk_rp_slot(rp, 0);
+    int d = e && e->known && subpass < 32 && ((e->depth >> subpass) & 1u);
+    pthread_mutex_unlock(&g_rp_mu);
+    return d;
+}
+// 1 if the pass was noted: compiles that may read it are possible.
+static int klvk_rp_forget(uint64_t rp) {
+    if (!rp || !klvk_ap_rp_on()) return 0;
+    pthread_mutex_lock(&g_rp_mu);
+    klvk_rp_ent *e = klvk_rp_slot(rp, 0);
+    if (e) e->known = 0;
+    pthread_mutex_unlock(&g_rp_mu);
+    return e != NULL;
+}
 static VkResult klvk_ap_create(VkDevice dev, VkPipelineCache cache, uint32_t n,
         const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *alloc, VkPipeline *out) {
     int mode = klvk_ap_mode();
-    if (!mode || n != 1 || !ci || !out || ci->renderPass)
+    if (!mode || n != 1 || !ci || !out)
         return klvk_CreateGraphicsPipelines0(dev, cache, n, ci, alloc, out);
-    if (mode == 1) {
+    if (ci->renderPass) {
+        if (!klvk_ap_rp_on() ||
+            (mode == 1 && !klvk_rp_depth((uint64_t)(uintptr_t)ci->renderPass, ci->subpass)))
+            return klvk_CreateGraphicsPipelines0(dev, cache, n, ci, alloc, out);
+    } else if (mode == 1) {
         const VkPipelineRenderingCreateInfo *ri = NULL;
         for (const VkBaseInStructure *x = ci->pNext; x; x = x->pNext)
             if (x->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO) ri = (const void *)x;
@@ -6127,6 +6199,14 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
                     k, d->pInputAttachments[k].attachment, (int)d->pInputAttachments[k].layout);
         }
     }
+    if (r == VK_SUCCESS && out && ci) {                     // KL_VK_ASYNC_RP: which subpasses have depth
+        uint32_t depth = 0;
+        for (uint32_t sp = 0; sp < ci->subpassCount && sp < 32; sp++)
+            if (ci->pSubpasses[sp].pDepthStencilAttachment &&
+                ci->pSubpasses[sp].pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED)
+                depth |= 1u << sp;
+        klvk_rp_note((uint64_t)(uintptr_t)*out, ci->subpassCount, depth);
+    }
     free(raised);
     if (r == VK_SUCCESS && out) fove_rp_note1(ci, *out);   // foveation: the eye-pass check reads it
     return r;
@@ -6241,9 +6321,24 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
                         d->pResolveAttachments[k].attachment);
         }
     }
+    if (r == VK_SUCCESS && out && ci) {                     // KL_VK_ASYNC_RP: which subpasses have depth
+        uint32_t depth = 0;
+        for (uint32_t sp = 0; sp < ci->subpassCount && sp < 32; sp++)
+            if (ci->pSubpasses[sp].pDepthStencilAttachment &&
+                ci->pSubpasses[sp].pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED)
+                depth |= 1u << sp;
+        klvk_rp_note((uint64_t)(uintptr_t)*out, ci->subpassCount, depth);
+    }
     if (r == VK_SUCCESS && out) fove_rp_note2(guest_ci, *out);
     free(atts);
     return r;
+}
+static void VKAPI_CALL klvk_DestroyRenderPass(VkDevice dev, uint64_t rp, const VkAllocationCallbacks *alloc) {
+    static void (*real)(VkDevice, uint64_t, const VkAllocationCallbacks *);
+    if (!real && real_gdpa) real = (void (*)(VkDevice, uint64_t, const VkAllocationCallbacks *))
+        real_gdpa(dev, "vkDestroyRenderPass");
+    if (klvk_rp_forget(rp)) klvk_ap_drain();   // a compile behind the frame may be reading it
+    if (real) real(dev, rp, alloc);
 }
 // KL_TRACE: dynamic-rendering census (vkCmdBeginRendering). If the guest renders
 // its eye/menu with VK_KHR_dynamic_rendering there is NO framebuffer and NO
@@ -10695,7 +10790,7 @@ static const entry g_ours[] = {
     E(CreateFramebuffer), E(CmdBeginRenderPass),
     E(CmdBeginRenderPass2),
     { "vkCmdBeginRenderPass2KHR", (PFN_vkVoidFunction)klvk_CmdBeginRenderPass2 },
-    R(CreateRenderPass), R(CreateRenderPass2),
+    R(CreateRenderPass), R(CreateRenderPass2), E(DestroyRenderPass),
     { "vkCreateRenderPass2KHR", (PFN_vkVoidFunction)klvkrec_CreateRenderPass2 },
     { "vkCreateRenderPassKHR",  (PFN_vkVoidFunction)klvkrec_CreateRenderPass },
     E(CmdBeginRendering), E(CmdEndRendering),

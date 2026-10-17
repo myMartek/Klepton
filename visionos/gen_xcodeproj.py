@@ -218,11 +218,14 @@ import os as _os
 # project file and in Info.plist cannot be anything but a list of names.
 # KLEPTON_TEST_ON_EXTRA adds a tester's own names to the installer's: AVP Play
 # sets KLEPTON_TEST_ON itself and drops one from the shell, so a test copy that
-# needs one more switch (e.g. KL_FOVE_SUBPASS_HELPERS) names it here. Unset:
-# the same list as before, byte for byte.
+# needs one more switch (e.g. KL_FOVE_SUBPASS_HELPERS) names it here. The
+# target's own "test_on" (targets.py) comes last: the switches a game starts
+# with for every player. Unset and empty: the same list as before, byte for
+# byte.
 TEST_ON = ",".join(dict.fromkeys(
     n for n in re.split(r"[,\s]+", os.environ.get("KLEPTON_TEST_ON", "") + ","
-                        + os.environ.get("KLEPTON_TEST_ON_EXTRA", ""))
+                        + os.environ.get("KLEPTON_TEST_ON_EXTRA", "") + ","
+                        + KLT.get("test_on", ""))
     if re.fullmatch(r"KL_[A-Z0-9_]{1,60}", n)))
 
 # Typed wire values only: never interpolate arbitrary installer input into a project.

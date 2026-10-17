@@ -267,6 +267,11 @@ TARGETS = {
         # OBB, and the game opens each by name. Stage the directory wholesale
         # (stage_assets.sh, KLT_OBB_RAW) or the device gets one file of 84.
         "obb_raw": 1,
+        # On from the start, as the owner plays it (2026-10-17): every second
+        # refresh (an even 50 of 100 rather than 50-70 unevenly), and shaders
+        # compiled behind the picture — which took the half-second freezes of
+        # first-seen places out of his session.
+        "test_on": "KL_GUEST_PACE_DIV,KL_VK_ASYNC_PIPES",
     },
     "bonelab": {
         # BONELAB — Unity 2021.3.16f1 + IL2CPP, and the same front door again
@@ -1338,6 +1343,11 @@ def resolve(name):
     # its default changes and the players it already has should get the new
     # one. 0: a stored choice is never touched.
     t.setdefault("foveation_reset", 0)
+    # Test switches (KleptonTuning.swift, Advanced > Test) this game starts
+    # with: comma-separated variable names, added to the installer's list
+    # (KLEPTON_TEST_ON -> KLTestOn). A player still turns each off in the
+    # start window, and that choice stays. "" for every game not named here.
+    t.setdefault("test_on", "")
     # Edge smoothing for a Vulkan guest that multisamples by itself with fewer
     # samples (KL_VK_FORCE_SAMPLES): 0 leaves the game's own count, 4 raises it.
     # 0 unless a game is named below, and it is named once it has been played

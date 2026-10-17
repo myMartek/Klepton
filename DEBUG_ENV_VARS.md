@@ -1676,12 +1676,12 @@ puts the camera on the ground with its hands underneath it.
   gap lasts and, when frames resume, the gap's length and the stacks of the
   threads that were not waiting are printed. Off unless set; 250 for `alyx`.
   An OVRPlugin guest's frame is stamped as well (`ovrp_EndFrame`); 100 for
-  `walkabout` while its stutter is being looked into.
+  `walkabout`, Demeo and `batman` while their stutter is being looked into.
 - `KL_GUEST_FRAME_STATS=<seconds>` — (`visionos/Sources/kl_app.c`) every so
   many seconds one line about the Unity frame loop: how long the guest's frames
   took against the display's period, how many took more than one and more than
   two periods, and how old the offered pose was when a frame started. Off (0)
-  unless set; 10 for `walkabout`.
+  unless set; 10 for `walkabout`, Demeo and `batman`.
 - `KL_GLFB_SLOW_MS=<ms>` — (`runtime/gfx/kl_glfb.c`, GLES guests) name every
   shader compile, program link and draw that took longer than this, and sum up
   the shader work between reports. Off (0) unless set.
@@ -1715,6 +1715,17 @@ puts the camera on the ground with its hands underneath it.
   only: an interface panel rendered once would keep the hole).
   `KL_VK_ASYNC_DELAY_MS=<ms>` makes every compile that much slower, to see the
   cold case on a machine whose Metal shader cache is warm.
+- `KL_VK_ASYNC_RP=0|1` — `KL_VK_ASYNC_PIPES` for pipelines made for a
+  `VkRenderPass` as well (default 0: Source 2 uses dynamic rendering, and its
+  setting stays what was measured). Unity 2022 makes all of its pipelines this
+  way (Arkham Shadow). In mode 1 the depth test is the subpass's: one with a
+  depth/stencil attachment, noted when the pass is made. A pass that is
+  destroyed waits for the compiles under way. The start window's test switch
+  "Shaders: compile behind the picture" sets both; it is on from the start
+  for `batman` (targets.py `test_on`, which adds a game's own names to
+  `KLTestOn`). The log's
+  `pipeline warmup` line says `background gfx` for a compile done behind the
+  frame.
 - `KL_VK_PIPE_REC=<file>` — one line per graphics pipeline the guest creates:
   FNV hash of each stage's SPIR-V, sample count, attachment formats, view mask,
   compile time. (How it was established that the game's shipped
