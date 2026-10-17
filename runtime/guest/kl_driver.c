@@ -391,6 +391,26 @@ static void kl_driver_env_defaults(const kl_target *t) {
             setenv("KL_VK_DEVICE_INFO", "auto", 0);
         }
     }
+    // Every Unity title under the profile for untested games gets what
+    // Walkabout, Demeo, Arkham Shadow and Moss were given for their hitches:
+    // the stall watch names what each gap was, the frame statistics say how
+    // the frames went, and a session's pipelines are recorded and compiled
+    // before the next start. LEGO Bricktales: "the picture stops for a moment
+    // now and then" (2026-10-18). The KL_VK_* lines only act on a Vulkan guest.
+    {
+        extern int kl_untested_profile(void);
+        if (t->kind == KL_GUEST_UNITY && kl_untested_profile()) {
+            setenv("KL_STALL_MS", "100", 0);
+            setenv("KL_GUEST_FRAME_STATS", "10", 0);
+            if (getenv("KL_VK_FOZ_DIR")) {
+                setenv("KL_VK_FOZ_REPLAY", "auto", 0);
+                setenv("KL_VK_FOZ_REPLAY_BLOCK", "1", 0);
+                setenv("KL_VK_FOZ_THREADS", "6", 0);
+                setenv("KL_VK_FOZ_RECORD", "auto", 0);
+                setenv("KL_VK_DEVICE_INFO", "auto", 0);
+            }
+        }
+    }
 }
 
 void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) {
