@@ -96,6 +96,15 @@ enum KLRoomLogFile {
     var active: Bool {
         switch phase { case .idle, .done, .failed: return false; default: return true }
     }
+    /// The check before a start while it is only finding the room: nothing is
+    /// shown in the room — no card, no grid over the walls — and the start
+    /// window says what is going on. The card and the grid come once the player
+    /// has something to do (room not recognised, nothing measured yet). The
+    /// owner's wish (2026-10-17): the card and the grid flashing up at every
+    /// start were in the way.
+    var quiet: Bool {
+        purpose == .check && (phase == .starting || phase == .recognising)
+    }
 
     // --- ARKit -----------------------------------------------------------------
     private var session: ARKitSession?
@@ -178,6 +187,8 @@ enum KLRoomLogFile {
         cells = []; play = []; history = []; stroke = []; strokeHand = -1
         rawFromRoom = matrix_identity_float4x4; floorRaw = 0; floorFixed = false; floorChecked = false; gridCentred = false
         cardPose = nil
+        meshRoot.isEnabled = !quiet
+        card?.isEnabled = !quiet
         rooms = KLRoomStore.load()
         roomLog("[room] opening the room space (%@), %d measured room(s)",
               purpose == .check ? "check before the start" : "measure", rooms.count)
@@ -489,13 +500,16 @@ enum KLRoomLogFile {
         let hm = head.originFromAnchorTransform
         let headPos = SIMD3<Float>(hm.columns.3.x, hm.columns.3.y, hm.columns.3.z)
         placeCard(head: hm)
+        card?.isEnabled = !quiet
+        meshRoot.isEnabled = !quiet
         let hr = roomPoint(headPos)
         lastHeadRoom = SIMD2<Float>(hr.x, hr.z)
         if KleptonControllers.spatialControllers() != trackedControllers {
             trackedControllers = KleptonControllers.spatialControllers()
             Task { await controllersChanged() }
         }
-        refreshMeshes(now)
+        // Not built while quiet: the anchors stay stale and are built once the grid is shown.
+        if !quiet { refreshMeshes(now) }
         if dirty && now - lastMap > 0.5 { rebuildMap(headPos: headPos); lastMap = now }
 
         switch phase {
@@ -1042,6 +1056,7 @@ enum KLRoomLogFile {
         // A space opened again brings a new card; the last one's must go.
         if let old = card, old !== e { old.removeFromParent() }
         card = e
+        e.isEnabled = !quiet
         root.addChild(e)
     }
 

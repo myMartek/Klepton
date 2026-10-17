@@ -1078,7 +1078,21 @@ struct BootView: View {
                     }
                     if running { ProgressView() }
                 }
-                if roomFlow.active {
+                if roomFlow.active && roomFlow.quiet {
+                    // The check before the start, finding the room: shown only here (KLRoomFlow.quiet).
+                    VStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text(klT("Finding the room …", "Raum wird erkannt …"))
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
+                        HStack(spacing: 14) {
+                            Button(klT("Play stationary / seated", "Stationär / sitzend spielen")) { roomFlow.useStationary() }
+                            Button(klT("Cancel", "Abbrechen"), role: .cancel) { roomFlow.cancel() }
+                        }
+                        .controlSize(.small)
+                    }
+                } else if roomFlow.active {
                     Label(klT("The room is being measured — follow the card in the room.",
                               "Der Raum wird vermessen – folge der Karte im Raum."),
                           systemImage: "square.dashed")
