@@ -429,6 +429,105 @@ static void ue4_maybe_stdout_cmdline(const char *proj) {
                     "(engine log will follow on stdout)\n", ov, args, extra);
 }
 
+// KL_UE4_PSO_LIST=1 — Moss from Steam compiles Unreal's own pipeline list at
+// start, as the Meta build does.
+//
+// Both builds ship the list Polyarc recorded (Content/PipelineCaches/Android/
+// Moss_SF_VULKAN_ES31_ANDROID.stable.upipelinecache). The Meta build has
+// r.ShaderPipelineCache.Enabled=1 and compiles about 350 pipelines before its
+// first frames; the Steam build sets it to 0 (Config/Android/Extensions/
+// SteamAndroidEngine.ini — on Steam Frame, Steam pre-caches shaders itself), so
+// here every one of them waits for its first draw, a third of a second each on
+// the headset. -dpcvars on the command line does not reach this cvar (a Mac run
+// still compiled 50); a [ConsoleVariables] line in the game's user Engine.ini
+// does (357), and the game keeps the line when it saves its settings. So the
+// line is written there before the engine starts, and taken out again when the
+// switch is off — the file outlives every build. Every other line of the file
+// is left as it is.
+static void ue4_moss_steam_pso_list(FILE *out) {
+    const char *t = kl_driver_target_name();
+    if (!t || strcmp(t, "moss") || !kl_steamapi_shipped()) return;
+    int on = kl_env_on("KL_UE4_PSO_LIST", 0);
+    static const char key[] = "r.ShaderPipelineCache.Enabled";
+    char dir[1024], path[1100], tmp[1110];
+    snprintf(dir, sizeof dir, "%s/%s/MossGame/MossGame/Saved/Config/Android",
+             kl_jni_files_dir(), g_native_dir);
+    snprintf(path, sizeof path, "%s/Engine.ini", dir);
+    snprintf(tmp, sizeof tmp, "%s.kltmp", path);
+
+    char *old = NULL; size_t n = 0;
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+        if (len > 0 && len < (8 << 20) && (old = malloc((size_t)len + 1)))
+            n = fread(old, 1, (size_t)len, f);
+        fclose(f);
+        if (old) old[n] = 0;
+    }
+    if (!old && !on) return;
+
+    // Copy the file line by line, without any line of ours: a key line in
+    // [ConsoleVariables] is dropped, and the section header remembered so the
+    // line goes right under it when the switch is on.
+    size_t cap = n + 128;
+    char *nw = malloc(cap);
+    if (!nw) { free(old); return; }
+    size_t w = 0;
+    int in_cv = 0, had_cv = 0, had_key = 0, was_on = 0;
+    const char *p = old ? old : "";
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t ll = e ? (size_t)(e - p + 1) : strlen(p);
+        const char *s = p;
+        while (s < p + ll && (*s == ' ' || *s == '\t')) s++;
+        if (*s == '[') in_cv = !strncmp(s, "[ConsoleVariables]", 18);
+        int keyline = in_cv && !strncmp(s, key, sizeof key - 1) &&
+                      (s[sizeof key - 1] == '=' || s[sizeof key - 1] == ' ');
+        if (keyline) {
+            had_key = 1;
+            const char *v = strchr(s, '=');
+            was_on |= v && v[1] == '1';
+        } else {
+            memcpy(nw + w, p, ll); w += ll;
+            if (in_cv && *s == '[' && on && !had_cv) {
+                if (nw[w - 1] != '\n') nw[w++] = '\n';
+                w += (size_t)snprintf(nw + w, cap - w, "%s=1\n", key);
+                had_cv = 1;
+            }
+        }
+        p += ll;
+    }
+    if (on && !had_cv) {
+        if (w && nw[w - 1] != '\n') nw[w++] = '\n';
+        w += (size_t)snprintf(nw + w, cap - w, "\n[ConsoleVariables]\n%s=1\n", key);
+    }
+    free(old);
+    if (on ? (had_key && was_on) : !had_key) {   // already as it should be
+        free(nw);
+        if (out) fprintf(out, "  [ue4] Moss from Steam: Unreal's own pipeline list %s (KL_UE4_PSO_LIST)\n",
+                         on ? "on, as before" : "off, as the game ships");
+        return;
+    }
+    char mk[1024];
+    snprintf(mk, sizeof mk, "%s/%s", kl_jni_files_dir(), g_native_dir);
+    static const char *const parts[] = { "MossGame", "MossGame", "Saved", "Config", "Android" };
+    for (size_t i = 0; i < sizeof parts / sizeof *parts; i++) {
+        mkdir(mk, 0777);
+        strncat(mk, "/", sizeof mk - strlen(mk) - 1);
+        strncat(mk, parts[i], sizeof mk - strlen(mk) - 1);
+    }
+    mkdir(mk, 0777);
+    f = fopen(tmp, "wb");
+    int ok = f && fwrite(nw, 1, w, f) == w;
+    if (f && fclose(f) != 0) ok = 0;
+    if (ok) ok = rename(tmp, path) == 0;
+    else remove(tmp);
+    free(nw);
+    if (out) fprintf(out, "  [ue4] Moss from Steam: Unreal's own pipeline list %s (KL_UE4_PSO_LIST, %s)%s\n",
+                     on ? "switched on" : "back off, as the game ships", path,
+                     ok ? "" : " — could not write the file");
+}
+
 int kl_ue4_configure(const char *libdir, const char *entry_lib, FILE *out) {
     if (!libdir || !*libdir) return ue4_fail("no library directory");
     snprintf(g_libdir, sizeof g_libdir, "%s", libdir);
@@ -465,6 +564,7 @@ int kl_ue4_configure(const char *libdir, const char *entry_lib, FILE *out) {
             ue4_maybe_stdout_cmdline(proj);
         }
     }
+    ue4_moss_steam_pso_list(out);
     if (out) {
         fprintf(out, "  [ue4] activity: %s\n", g_activity);
         fprintf(out, "  [ue4] userdata: %s\n", kl_jni_files_dir());
