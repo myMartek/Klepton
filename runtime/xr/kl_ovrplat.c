@@ -2937,6 +2937,23 @@ static const char *const g_plat_request[] = {
     "ovr_User_GetOrgScopedID",
     "ovr_User_LaunchFriendRequestFlow",
     "ovr_User_GetLoggedInUserManagedInfo",
+    // Rooms — the platform's multiplayer rooms and their invites. Every one of
+    // these returns an ovrRequest, and with no platform service none can be
+    // made (0); the ovr_Room_Get<Field> accessors read a room handle, which
+    // only a completion could hand out, so they are never reached. Medal of
+    // Honor: Above and Beyond (x3647259232032222) asks GetInvitableUsers2 at
+    // start and stopped on it as an unimplemented entry point (2026-10-18).
+    "ovr_Room_CreateAndJoinPrivate", "ovr_Room_CreateAndJoinPrivate2",
+    "ovr_Room_Get", "ovr_Room_GetCurrent", "ovr_Room_GetCurrentForUser",
+    "ovr_Room_GetInvitableUsers", "ovr_Room_GetInvitableUsers2",
+    "ovr_Room_GetModeratedRooms", "ovr_Room_GetNextRoomArrayPage",
+    "ovr_Room_InviteUser", "ovr_Room_Join", "ovr_Room_Join2", "ovr_Room_KickUser",
+    "ovr_Room_LaunchInvitableUserFlow", "ovr_Room_Leave", "ovr_Room_UpdateDataStore",
+    "ovr_Room_UpdateMembershipLockStatus", "ovr_Room_UpdateOwner",
+    "ovr_Room_UpdatePrivateRoomJoinPolicy",
+    // ...and the pending room invites, which Medal of Honor asks right after.
+    "ovr_Notification_GetRoomInvites", "ovr_Notification_GetNextRoomInviteNotificationArrayPage",
+    "ovr_Notification_MarkAsRead",
     // Device attestation: the platform service signs a token for the nonce the
     // game passes, and the game's own server checks it. There is no service
     // here to sign anything, and a made-up token would be a forged attestation;

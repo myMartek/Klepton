@@ -164,10 +164,16 @@ typedef struct { int fd; uint64_t base, len; off_t pos; int inuse;
 // table filled during mount and the LAST paks to be processed — pakchunk0/1/2,
 // which hold the global shader library and engine content — silently failed to
 // open as windows, so UE4 never mounted them and died with "Missing global
-// shader … make sure cooking was successful". 256 covers 80 paks + optional/split
+// shader … make sure cooking was successful". 256 covered 80 paks + optional/split
 // variants with headroom; the table-full path now shouts instead of failing mute.
-#define KL_OBB_MAX_VFD 256
+// Medal of Honor: Above and Beyond (x3647259232032222) mounts more than 400 paks
+// from its OBBs and content bundles: at 256 the last 169 — pakchunk0 among them —
+// did not mount, the game asked to quit and faulted at start (2026-10-18). 2048
+// slots, and the lookups only walk up to the highest slot ever taken
+// (g_vfd_hi), so a title with few paks pays what it paid before.
+#define KL_OBB_MAX_VFD 2048
 static obb_vfd  g_vfd[KL_OBB_MAX_VFD];
+static unsigned g_vfd_hi;   // slots [0, g_vfd_hi) have been used; under g_vfd_lock
 // KL_TRACE_PAKREAD: log the first reads the guest makes through each .pak window
 // fd. This is the ONE path we cannot otherwise see — the guest parses a pak's own
 // index and reads files (e.g. the global shader library) straight from the window,
@@ -942,6 +948,7 @@ int kl_obbmap_open(const char *loose, int flags) {
     for (unsigned i = 0; i < sizeof g_vfd / sizeof g_vfd[0]; i++) {
         if (g_vfd[i].inuse) continue;
         g_vfd[i] = (obb_vfd){ .fd = fd, .base = base, .len = e->size, .pos = 0, .inuse = 1 };
+        if (i >= g_vfd_hi) g_vfd_hi = i + 1;
         { const char *bn = strrchr(loose, '/'); bn = bn ? bn + 1 : loose;
           snprintf(g_vfd[i].name, sizeof g_vfd[i].name, "%s", bn); }
         pthread_mutex_unlock(&g_vfd_lock);
@@ -989,7 +996,7 @@ int kl_obbmap_open(const char *loose, int flags) {
 }
 
 static obb_vfd *vfd_find(int fd) {
-    for (unsigned i = 0; i < sizeof g_vfd / sizeof g_vfd[0]; i++)
+    for (unsigned i = 0; i < g_vfd_hi; i++)
         if (g_vfd[i].inuse && g_vfd[i].fd == fd) return &g_vfd[i];
     return NULL;
 }

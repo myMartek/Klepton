@@ -97,6 +97,10 @@ static const char *const UE4_CHAIN[] = {
     "libovraudio64.so",     // the Oculus audio spatializer — RE4/Deadpool VR
                             // ship it, Tetris Effect does not
     "libplaycore.so",       // Google Play core — the OBB downloader's half
+    // Vivox voice chat, the same case as FMOD: libUE4 binds its vx_* imports
+    // against it, and without it in the pool the first call — Medal of Honor:
+    // Above and Beyond's vx_jni_set_java_vm at start — aborted as unresolved.
+    "libvivox-sdk.so",
     UE4_LIB,
 };
 
