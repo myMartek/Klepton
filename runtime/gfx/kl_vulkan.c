@@ -633,12 +633,20 @@ static int klvk_park_instances(void) {
         // Ghost Town (x9531494193591052) takes the handle answer too
         // (klovrp_adapter_is_phys), so the probe's device has to still be the
         // one the instance it keeps enumerates.
+        // Every Unity title under the profile for untested games takes the
+        // handle answer (klovrp_adapter_is_phys), so it keeps the probe's
+        // device too: LEGO Bricktales, unparked, created its device on three
+        // host runs and on the fourth enumerated another VkPhysicalDevice and
+        // ended on "Unable to initialize the Unity Engine Graphics API".
+        extern int kl_untested_profile(void);
+        extern kl_guest_kind kl_driver_kind(void);
         on = kl_env_on("KL_VK_PARK_INSTANCE",
-                       t && (strcmp(t, "walkabout") == 0 || strcmp(t, "batman") == 0 ||
-                             strcmp(t, "x5269080709783454") == 0 ||
-                             strcmp(t, "x3634830803298285") == 0 ||
-                             strcmp(t, "x5245041552210029") == 0 ||
-                             strcmp(t, "x9531494193591052") == 0));
+                       (t && (strcmp(t, "walkabout") == 0 || strcmp(t, "batman") == 0 ||
+                              strcmp(t, "x5269080709783454") == 0 ||
+                              strcmp(t, "x3634830803298285") == 0 ||
+                              strcmp(t, "x5245041552210029") == 0 ||
+                              strcmp(t, "x9531494193591052") == 0)) ||
+                       (kl_untested_profile() && kl_driver_kind() == KL_GUEST_UNITY));
     }
     return on;
 }
@@ -6876,11 +6884,20 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties(
 // identity strings/IDs change; every limit and feature stays MoltenVK's real
 // answer, so nothing downstream is promised a capability the host lacks.
 // Default: on for batman; KL_VK_SPOOF_ADRENO=0/1 forces the A/B either way.
+// ...and for every Unity title under the profile for untested games: LEGO
+// Bricktales (Unity 6000.2) walked the device, read "Apple M4" / 0x106b and
+// raised the same warning, then "Unable to initialize the Unity Engine
+// Graphics API"; told Adreno 740 (and handed the VkPhysicalDevice as its
+// display adapter, kl_ovrp.c) it creates its device and loads its first scene
+// (Mac host, 2026-10-17). A Quest game expects a Quest's GPU.
 static int klvk_spoof_gpu(void) {
     static int on = -1;
     if (on < 0) {
         const char *t = kl_driver_target_name();
-        int dflt = t && strcmp(t, "batman") == 0;
+        extern int kl_untested_profile(void);
+        extern kl_guest_kind kl_driver_kind(void);
+        int dflt = (t && strcmp(t, "batman") == 0) ||
+                   (kl_untested_profile() && kl_driver_kind() == KL_GUEST_UNITY);
         on = kl_env_on("KL_VK_SPOOF_ADRENO", dflt);
     }
     return on;

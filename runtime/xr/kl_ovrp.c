@@ -395,6 +395,8 @@ static uint64_t klovrp_GetAudioInId2(const void **out)       { return klovrp_Get
 static int klovrp_adapter_is_phys(void) {
     static int on = -1;
     if (on < 0) {
+        extern int kl_untested_profile(void);
+        extern kl_guest_kind kl_driver_kind(void);
         const char *t = kl_driver_target_name();
         // batman (Unity 2022.3.45) is the second title measured to need it: on
         // the LUID answer it enumerated the one device, read its properties,
@@ -419,12 +421,18 @@ static int klovrp_adapter_is_phys(void) {
         // answer, one device walked, the probe instance destroyed, then a GLES2
         // context and "shader compiler platform 5" — the left eye stayed on
         // that black frame and the right eye was never given a layer.
+        // LEGO Bricktales (x6521909757843713, Unity 6000.2, OVRPlugin 1.104)
+        // is the seventh, and only one title (acnexusvr) is known to want the
+        // LUID. So the profile for untested games takes the handle for every
+        // Unity title: a GL one has no Vulkan device, and the LUID answer
+        // below still serves it (2026-10-17).
         on = kl_env_on("KL_OVRP_ADAPTER_PHYS",
-                       t && (strcmp(t, "walkabout") == 0 || strcmp(t, "batman") == 0 ||
-                             strcmp(t, "x5269080709783454") == 0 ||
-                             strcmp(t, "x3634830803298285") == 0 ||
-                             strcmp(t, "x5245041552210029") == 0 ||
-                             strcmp(t, "x9531494193591052") == 0));
+                       (t && (strcmp(t, "walkabout") == 0 || strcmp(t, "batman") == 0 ||
+                              strcmp(t, "x5269080709783454") == 0 ||
+                              strcmp(t, "x3634830803298285") == 0 ||
+                              strcmp(t, "x5245041552210029") == 0 ||
+                              strcmp(t, "x9531494193591052") == 0)) ||
+                       (kl_untested_profile() && kl_driver_kind() == KL_GUEST_UNITY));
     }
     return on;
 }
@@ -1893,6 +1901,21 @@ static int klovrp_unify_default(void) {
     const char *t = kl_driver_target_name();
     if (t) for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++)
         if (strcmp(t, on[i]) == 0) return 1;
+    // LEGO Bricktales (Unity 6000.2) is the same case again (3936x2465, both
+    // eyes full width; on device "the same scene, shifted" between the eyes,
+    // 2026-10-17). The union is consistent for any guest — what it is told is
+    // what the composite places — and costs only some density at the edge, so
+    // the profile for untested games takes it for every Unity title that ships
+    // Meta's OculusXR plugin, the one that renders with symmetric projection
+    // (Catan VR, legacy VR, keeps the cones it was confirmed with).
+    extern int kl_untested_profile(void);
+    extern kl_guest_kind kl_driver_kind(void);
+    if (kl_untested_profile() && kl_driver_kind() == KL_GUEST_UNITY) {
+        extern const char *g_native_lib_dir;
+        char path[1024];
+        snprintf(path, sizeof path, "%s/libOculusXRPlugin.so", g_native_lib_dir ? g_native_lib_dir : ".");
+        if (kl_can_load(path)) return 1;      // the ELF on a host, its translation in a bundle
+    }
     return 0;
 }
 
@@ -7773,7 +7796,14 @@ static int klovrp_pt_on(void) {
                                                     !strcmp(t, "x9449316705178989") ||
                                                     // Cubism's puzzle background can be
                                                     // replaced by the room via its MR mode.
-                                                    !strcmp(t, "x2264524423619421")));
+                                                    !strcmp(t, "x2264524423619421") ||
+                                                    // LEGO Bricktales has an AR mode; asked
+                                                    // for by the owner (2026-10-17).
+                                                    !strcmp(t, "x6521909757843713") ||
+                                                    // Angry Birds VR: Isle of Pigs has a
+                                                    // mixed reality mode; asked for by the
+                                                    // owner (2026-10-18).
+                                                    !strcmp(t, "x2718606324833775")));
         if (on)
             fprintf(stderr, "  [ovrp] passthrough: offered to the guest — the room shows "
                             "through the eye picture while it submits a passthrough layer\n");
@@ -8849,12 +8879,43 @@ static int klovrp_spacewarp_tex(void) {
         // Arizona Sunshine 2 and Ghost Town both request SpaceWarp
         // (flags=0x1300). Ghost Town's native provider has the four
         // stack-address outputs in x3..x6 required by this ABI.
-        v = kl_env_on("KL_OVRP_SPACEWARP_TEX", t &&
-                      (!strcmp(t, "x5812519008825194") ||
-                       !strcmp(t, "x5245041552210029") ||
-                       !strcmp(t, "x9531494193591052")));
+        // Every Unity title under the profile for untested games as well, but
+        // only where the call has the seven-argument shape: LEGO Bricktales
+        // (flags=0x1300) was refused, its provider stopped creating textures
+        // after stage 0, rendered one frame and tore the display down
+        // (DestroyDistortionWindow2, DestroyLayer x2) — a black picture with
+        // the game running on (2026-10-17). Value 2 = the profile's default,
+        // which klovrp_spacewarp_shape_ok checks per call.
+        extern int kl_untested_profile(void);
+        extern kl_guest_kind kl_driver_kind(void);
+        int listed = t && (!strcmp(t, "x5812519008825194") ||
+                           !strcmp(t, "x5245041552210029") ||
+                           !strcmp(t, "x9531494193591052"));
+        int profile = !listed && kl_untested_profile() && kl_driver_kind() == KL_GUEST_UNITY;
+        v = kl_env_on("KL_OVRP_SPACEWARP_TEX", listed || profile);
+        if (v && profile && !getenv("KL_OVRP_SPACEWARP_TEX")) v = 2;
     }
     return v;
+}
+// Whether the two extra out-params of the seven-argument call are this
+// thread's stack slots, as OculusXRPlugin passes them. A five-argument caller
+// leaves whatever was in x5/x6, which must not be written through; a value
+// inside the calling thread's own stack is the shape this ABI needs.
+static int klovrp_on_this_stack(const void *p) {
+    pthread_t self = pthread_self();
+    const char *hi = pthread_get_stackaddr_np(self);
+    size_t size = pthread_get_stacksize_np(self);
+    return p && hi && (const char *)p < hi && (const char *)p >= hi - size;
+}
+static int klovrp_spacewarp_shape_ok(const void *motion_depth, const void *extra) {
+    int v = klovrp_spacewarp_tex();
+    if (v != 2) return v;
+    int ok = klovrp_on_this_stack(motion_depth) && klovrp_on_this_stack(extra);
+    static int said;
+    if (!said++)
+        fprintf(stderr, "  [ovrp] SpaceWarp textures (profile for untested games): the call %s the "
+                        "seven-argument shape\n", ok ? "has" : "does NOT have");
+    return ok;
 }
 // The eye layer's size as the guest ends up allocating it: the offered size times the guest's own
 // scale, held to the cap where KL_OVRP_EYE_DESC_CAP is on (below). Exposed for the tests.
@@ -10096,7 +10157,8 @@ static uint64_t klovrp_GetLayerTextureSpaceWarp(int layer_id, int stage, int eye
     struct klovrp_layer *l = klovrp_layer(layer_id);
     if (klovrp_spacewarp_tex() && kl_vulkan_guest_active() && l && l->is_eye &&
         (l->desc.layer_flags & KLOVRP_LAYER_FLAG_SPACEWARP) &&
-        motion_depth && extra && l->desc.mv_texture_size.w > 0) {
+        motion_depth && extra && l->desc.mv_texture_size.w > 0 &&
+        klovrp_spacewarp_shape_ok(motion_depth, extra)) {
         int layers = (l->desc.layout == KLOVRP_LAYOUT_ARRAY) ? 2 : 1;
         unsigned w = (unsigned)l->desc.mv_texture_size.w;
         unsigned h = (unsigned)l->desc.mv_texture_size.h;
