@@ -132,6 +132,9 @@ ENTITLEMENTS = os.environ.get("KLEPTON_ENTITLEMENTS", "1") != "0"
 OPTIONAL_ENTITLEMENTS = {
     "com.apple.developer.low-latency-streaming": "KLEPTON_LOW_LATENCY",
     "com.apple.developer.kernel.extended-virtual-addressing": "KLEPTON_EVA",
+    # The play area's shared rooms (KleptonRoomStore.swift). Without it each
+    # game keeps its own.
+    "keychain-access-groups": "KLEPTON_SHARED_KEYCHAIN",
 }
 ENTITLEMENTS_FILE = "Klepton.entitlements"
 _dropped = [k for k, env in OPTIONAL_ENTITLEMENTS.items()
@@ -345,6 +348,11 @@ ASSETCATALOG_SETTING = ((f"\t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = \"{_icon
                         # ...and whether it is a test build (TEST_BUILD above;
                         # KLTestBuild in Info.plist).
                         + f"\t\t\t\tKL_TEST_BUILD = {1 if TEST_BUILD else 0};\n"
+                        # ...and whether the play area (KleptonRoom*.swift) is on in
+                        # this game until its owner says otherwise there: on unless
+                        # the installer says KLEPTON_ROOM_GUARD=0 (AVP Play's
+                        # setting for games it installs); KLRoomGuardDefault.
+                        + f"\t\t\t\tKL_ROOM_GUARD_DEFAULT = {0 if os.environ.get('KLEPTON_ROOM_GUARD') == '0' else 1};\n"
                         # ...and what KleptonGameData.swift reads: which files
                         # this build's guest needs and the store ids to fetch
                         # them by. KL_DATA_TREE is empty for a target without the
@@ -370,7 +378,7 @@ ASSETCATALOG_SETTING = ((f"\t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = \"{_icon
 # wherever else they do or do not survive. visionos/run.sh checks the product.
 USAGE_DESCRIPTIONS = {
     "NSMicrophoneUsageDescription": "Klepton uses the microphone only when you turn on the Microphone toggle, so a running app (such as Steam Link voice chat) can hear you.",
-    "NSWorldSensingUsageDescription": "Klepton reads the headset's own pose, which is the head pose the guest renders from, and for a mixed-reality game the floor and walls of your room.",
+    "NSWorldSensingUsageDescription": "Klepton reads the headset's own pose, which is the head pose the guest renders from, the floor and walls of your room for a mixed-reality game, and, when you measure your room, its floor, walls and furniture to find the play area.",
     "NSHandsTrackingUsageDescription": "Klepton maps your hands onto the guest's two Touch controllers.",
     "NSAccessoryTrackingUsageDescription": "Klepton maps PSVR2 Sense controllers onto the guest's two Touch controllers.",
     "NSBluetoothAlwaysUsageDescription": "Klepton connects to spatial controllers that are not visible to the system as standard game controllers.",
@@ -443,7 +451,8 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonSurrealInput.swift", "KleptonSurrealBackend.swift", "KleptonSurrealView.swift",
          "KleptonSurrealAim.swift", "KleptonSurrealAimView.swift",
          "KleptonMetalFXPreset.swift", "KleptonMetalFXAlpha.swift",
-         "KleptonEyeMax.swift", "KleptonOverlayDepth.swift"]
+         "KleptonEyeMax.swift", "KleptonOverlayDepth.swift",
+         "KleptonRoomStore.swift", "KleptonRoomSpace.swift", "KleptonBoundary.swift"]
 # Steam's connection, sign-in and Steam Cloud (SteamCloudKit/README.md: parts of
 # Glovebox's SteamLauncherKit, MIT), compiled into the app's own module. The
 # folder is a Swift package only so that its tests run on a Mac.

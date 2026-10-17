@@ -42,6 +42,10 @@
 // the compositor counts what it presents into it and reads back a sample a
 // second.
 #import "kl_metrics.h"
+// ...and by one for the play area (KleptonRoom*.swift): the room scan's grid,
+// the suggested and drawn areas, the distance to their edge the virtual wall is
+// drawn from, and finding a room measured before.
+#import "kl_room.h"
 // One call, declared here rather than importing kl_mediandk.h: that header is
 // the guest-facing media table and wants <stdio.h> and CoreVideo context the
 // Swift side has no other use for.

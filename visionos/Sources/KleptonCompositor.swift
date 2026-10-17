@@ -3842,11 +3842,45 @@ final class KleptonCompositor {
                       + (ov.head_locked != 0 ? ", HEAD-LOCKED" : ""))
             }
         }
+        // The play area's edge (KleptonBoundary.swift), over the game and its panels, under our own cards.
+        encodeBoundary(enc, viewIndices: viewIndices, drawable: drawable, originFromHead: originFromHead)
         drawn += encodeLoadingCard(enc, viewIndices: viewIndices, drawable: drawable,
                                    originFromHead: originFromHead)
         drawn += encodeStatsCard(enc, viewIndices: viewIndices, drawable: drawable,
                                  originFromHead: originFromHead)
         return drawn
+    }
+
+    // The play area (KLRoomGuard): made at the first frame, once the device and
+    // the pass's formats are known; nil for the rest of the run where there is
+    // nothing to show.
+    private var boundary: KLBoundary?
+    private var boundaryTried = false
+    private var boundaryRecenter: simd_float4x4?
+    private func encodeBoundary(_ enc: MTLRenderCommandEncoder, viewIndices: [Int],
+                                drawable: LayerRenderer.Drawable, originFromHead: simd_float4x4) {
+        if !boundaryTried {
+            boundaryTried = true
+            boundary = KLBoundary.make(device: device, color: layerRenderer.configuration.colorFormat,
+                                       amplification: amplification)
+            boundary?.watch(worldTracking)
+        }
+        guard let boundary, let head = lastGoodOriginFromDevice else { return }
+        // A stationary circle goes round the head at the first frame, and again
+        // where the player recentres (the Options hold) — as on a Quest.
+        if boundary.stationary, boundaryRecenter != recenterXform {
+            boundaryRecenter = recenterXform
+            boundary.centre(at: SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z))
+        }
+        let views = viewIndices.map { vi in
+            (projection: drawable.computeProjection(viewIndex: vi),
+             viewFromWorld: (originFromHead * Self.headFromView(drawable.views[vi].transform,
+                                                                midpoint: eyeMidpointInDevice)).inverse)
+        }
+        var points = [SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z)]
+        points += KleptonControllers.rawHandPositions()
+        boundary.encode(enc, views: views, worldFromRaw: recenterXform, points: points,
+                        mixedSpace: Immersive.mixedAtBoot, depthState: depthPassState)
     }
 
     // How the game is running, shown in the headset (KL_STATS_CARD): a panel in

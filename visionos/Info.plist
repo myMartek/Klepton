@@ -43,6 +43,8 @@
 	<string>$(KL_TEST_ON)</string>
 	<key>KLTestBuild</key>
 	<string>$(KL_TEST_BUILD)</string>
+	<key>KLRoomGuardDefault</key>
+	<string>$(KL_ROOM_GUARD_DEFAULT)</string>
 	<key>KLOutputDefault</key>
 	<string>$(KL_OUTPUT_DEFAULT)</string>
 	<key>KLStartScreen</key>
@@ -82,7 +84,9 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Klepton uses the microphone only when you turn on the Microphone toggle, so a running app (such as Steam Link voice chat) can hear you.</string>
 	<key>NSWorldSensingUsageDescription</key>
-	<string>Klepton reads the headset's own pose, which is the head pose the guest renders from, and for a mixed-reality game the floor and walls of your room.</string>
+	<string>Klepton reads the headset's own pose, which is the head pose the guest renders from, the floor and walls of your room for a mixed-reality game, and, when you measure your room, its floor, walls and furniture to find the play area.</string>
+	<key>KLSharedKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)avpplay.shared</string>
 	<key>NSHandsTrackingUsageDescription</key>
 	<string>Klepton maps your hands onto the guest's two Touch controllers.</string>
 	<key>NSAccessoryTrackingUsageDescription</key>

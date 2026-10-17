@@ -118,6 +118,8 @@ enum Immersive {
     /// ...as it stood when the game was started: the compositor reads this from
     /// its own thread, and the choice is made once per run anyway.
     nonisolated(unsafe) static var mixedBlackAtBoot = false
+    /// ...and whether the space is a mixed one at all (the play area's see-through setting needs one).
+    nonisolated(unsafe) static var mixedAtBoot = true
 
     // How many times the CompositorLayer closure has been entered. SwiftUI may
     // re-evaluate a scene, and a second layer would mean the render loop the log
@@ -291,6 +293,10 @@ struct KleptonApp: App {
             .defaultLaunchBehavior(.suppressed)
 
         ImmersiveSpace(id: SurrealAimGuide.spaceID) { KleptonSurrealAimSpace() }
+            .immersionStyle(selection: .constant(.mixed), in: .mixed)
+
+        // "Measure room" and the room check before a start (KleptonRoomSpace.swift).
+        ImmersiveSpace(id: KLRoomFlow.spaceID) { KleptonRoomSpace() }
             .immersionStyle(selection: .constant(.mixed), in: .mixed)
 
         ImmersiveSpace(id: Immersive.id) {
@@ -762,6 +768,7 @@ struct BootView: View {
     @State private var kbSuppress = false
     @FocusState private var kbFocused: Bool
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
     // The start screen of an installed game — see `startScreen`.
@@ -777,6 +784,10 @@ struct BootView: View {
     /// (KLSenseTune.targetHand).
     static let handTuneAfterStart: Bool = klEnvOn("KL_HAND_TUNE", default: false)
     @ObservedObject private var run = KLRun.shared
+    /// The play area (KLRoomGuard): the room space's state, and "no play area yet".
+    @ObservedObject private var roomFlow = KLRoomFlow.shared
+    @State private var roomMissing = false
+    @State private var roomFailed = ""
     /// Whether this build fronts as a game (a picture, its name, Start and
     /// Settings) rather than as the boot report. Asked for by whoever built it
     /// (gen_xcodeproj.py, KLEPTON_START_SCREEN) and not by the target: the same
@@ -810,6 +821,29 @@ struct BootView: View {
             else { bootReport }
         }
         .task { await watchPresentation() }
+        // The room check before a start: recognised, or measured and saved, and the game starts.
+        .onChange(of: roomFlow.phase) { _, phase in
+            switch phase {
+            case .done(let outcome):
+                guard roomFlow.purpose == .check else { return }
+                if outcome == .saved || outcome == .recognised || outcome == .stationary {
+                    roomMissing = false
+                    Task {
+                        // The room space has to be gone before the game's can open: the
+                        // boot takes about a second, and opening the game's space while
+                        // the room's was still up failed three times and left the start
+                        // hanging (2026-10-17). Closed from here and waited for.
+                        await dismissImmersiveSpace()
+                        try? await Task.sleep(for: .milliseconds(300))
+                        boot()
+                    }
+                }
+            case .failed(let message):
+                roomFailed = message
+            default:
+                break
+            }
+        }
         // Steam Link streams over the local network; see KLLocalNetwork.
         .task { if klTargetName() == "steamlink-vr" { KLLocalNetwork.ask() } }
     }
@@ -1009,7 +1043,7 @@ struct BootView: View {
                     let started = running || finished || run.started
                     Button {
                         if isLauncher, !klLauncherApply() { return }
-                        boot()
+                        startOrCheckRoom()
                     } label: {
                         let failed = finished && !succeeded
                         Label(run.up ? klT("Running", "Läuft") : failed ? klT("Not started", "Nicht gestartet")
@@ -1023,14 +1057,52 @@ struct BootView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(.white)
                     .controlSize(.extraLarge)
-                    .disabled(started || run.adjustingControllers || (isLauncher && !files.canLaunch))
+                    .disabled(started || run.adjustingControllers || roomFlow.active
+                              || (isLauncher && !files.canLaunch))
                     Button {
                         showSettings = true
                     } label: {
                         Label(klT("Settings", "Einstellungen"), systemImage: "gearshape")
                     }
                     .controlSize(.extraLarge)
+                    .disabled(roomFlow.active)
+                    // Beside Settings, as a Quest asks for its boundary before a game.
+                    if KLRoomGuard.enabled, !started {
+                        Button {
+                            openRoom(.setup)
+                        } label: {
+                            Label(klT("Measure room", "Raum vermessen"), systemImage: "square.dashed")
+                        }
+                        .controlSize(.extraLarge)
+                        .disabled(roomFlow.active)
+                    }
                     if running { ProgressView() }
+                }
+                if roomFlow.active {
+                    Label(klT("The room is being measured — follow the card in the room.",
+                              "Der Raum wird vermessen – folge der Karte im Raum."),
+                          systemImage: "square.dashed")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else if roomMissing {
+                    VStack(spacing: 10) {
+                        Label(klT("There is no play area yet. Set one up first — once, for all games — then the game starts.",
+                                  "Es gibt noch keinen Spielbereich. Leg zuerst einen an – einmal, für alle Spiele –, dann startet das Spiel."),
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.headline).foregroundStyle(.yellow)
+                            .multilineTextAlignment(.center)
+                        HStack(spacing: 14) {
+                            Button(klT("Set up the play area", "Spielbereich anlegen")) { openRoom(.check) }
+                                .buttonStyle(.borderedProminent)
+                            // Standing on the spot or seated: nothing to measure.
+                            Button(klT("Play stationary / seated", "Stationär / sitzend spielen")) {
+                                KLRoomGuard.setStyle(.stationary)
+                                roomMissing = false
+                                boot()
+                            }
+                        }
+                    }
+                } else if !roomFailed.isEmpty {
+                    Text(roomFailed).font(.callout).foregroundStyle(.yellow).multilineTextAlignment(.center)
                 }
                 KLSteamCloudStatus()
                 if running, steamCloud.syncing {
@@ -1066,6 +1138,7 @@ struct BootView: View {
                     if isLauncher { LauncherPanel() }
                     if klIsAlyx() { AlyxPanel(started: running || finished || run.started) }
                     PlayerSettingsView()
+                    RoomSettingsView(measure: { showSettings = false; openRoom(.setup) })
                     PlayerNameView()
                     GameLanguageView()
                     // Everything a player does not need to understand to play: the
@@ -1276,6 +1349,38 @@ struct BootView: View {
         }
     }
 
+    /// Start, with the play area first where it is switched on: no game
+    /// without a play area for the room the player is in (KLRoomFlow, .check).
+    private func startOrCheckRoom() {
+        guard KLRoomGuard.enabled else { boot(); return }
+        // Stationary needs no room: the circle is put round the player in the game.
+        if KLRoomGuard.style == .stationary {
+            NSLog("[room] Start: stationary play area — no room check")
+            boot()
+            return
+        }
+        if KLRoomStore.load().isEmpty {
+            roomMissing = true
+            NSLog("[room] Start: no play area measured yet — asked for one first")
+            return
+        }
+        openRoom(.check)
+    }
+
+    private func openRoom(_ purpose: KLRoomFlow.Purpose) {
+        guard !roomFlow.active else { return }
+        roomFailed = ""
+        roomFlow.begin(purpose)
+        Task {
+            let r = await openImmersiveSpace(id: KLRoomFlow.spaceID)
+            NSLog("[room] openImmersiveSpace(room) -> \(r)")
+            if case .opened = r { return }
+            roomFlow.close()
+            roomFailed = klT("The room space could not be opened. Close the app and open it again.",
+                             "Der Raum konnte nicht geöffnet werden. App schließen und wieder öffnen.")
+        }
+    }
+
     private func boot() {
         // Guarded on this side too, not only in kl_app.c. The guest boots
         // once per process — the runtime's JNI tables are process-global, so a
@@ -1354,6 +1459,7 @@ struct BootView: View {
             DispatchQueue.main.async {
                 KleptonChroma.shared.immersionFull = !Immersive.mixed
                 Immersive.mixedBlackAtBoot = Immersive.mixedBlack
+                Immersive.mixedAtBoot = Immersive.mixed
             }
 
             let logPath = String(cString: kl_app_log_path())
@@ -1464,7 +1570,7 @@ struct BootView: View {
                     // way to show it. `.userCancelled` is an answer, not a
                     // failure, and is not asked again.
                     Task {
-                        for attempt in 1...3 {
+                        for attempt in 1...5 {
                             let r = await openImmersiveSpace(id: Immersive.id)
                             NSLog("[cp] openImmersiveSpace -> \(r)"
                                   + (attempt > 1 ? " (attempt \(attempt))" : ""))
@@ -1478,7 +1584,7 @@ struct BootView: View {
                                 if Self.handTuneAfterStart { handTune = true }
                                 else { dismissWindow() }
                             }
-                            guard case .error = r, attempt < 3 else { break }
+                            guard case .error = r, attempt < 5 else { break }
                             try? await Task.sleep(nanoseconds: 2_000_000_000)
                         }
                     }

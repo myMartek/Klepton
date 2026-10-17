@@ -4372,3 +4372,36 @@ same PR is issue #42. Set by `kl_driver_env_defaults` for the title:
   `linear` or `hdr` (said once). Said once as
   `[metalfx] colour processing …`; any other value is said and ignored. Read
   once a run, at the first copy.
+
+## The play area (`visionos/Sources/KleptonRoom*.swift`, `KleptonBoundary.swift`, `runtime/xr/kl_room.c`, issue #42)
+
+- `KL_ROOM_GUARD=0|1` — the whole feature: "Measure room" beside Settings in
+  the start window, Start only with a play area for the room the player is in
+  (the room space checks it first: this game's world anchor as a guess, confirmed
+  against what is in view with `kl_room_register_near`, or the obstacles in view
+  matched against each measured room with `kl_room_register`; not found, the
+  card asks "Measure room" or "Stationary"), and the edge shown in the game. A
+  setting of each game (Settings › Play area, `klepton.room.enabled`); untouched,
+  the installation's default `KLRoomGuardDefault` holds — on, unless the build had
+  `KLEPTON_ROOM_GUARD=0` (AVP Play's setting for the games it installs). On the
+  launch line it decides either way. Scripted starts (`KL_AUTOBOOT=1`) skip the
+  check.
+- `KL_ROOM_MODE=wall|room|off` — over the game's own setting (Settings › Play
+  area): a see-through wall at the edge (default), the game turning
+  see-through near it (mixed space only; in a full space the wall is drawn),
+  or nothing.
+- `KL_ROOM_STYLE=roomscale|stationary` — over the game's own setting (Settings ›
+  Play area › Kind): the measured play area of the room, or a circle 1.5 m
+  across round where the player is at the first frame (moved by recentring),
+  with no room check at Start.
+- `KLEPTON_SHARED_KEYCHAIN=0` — (`gen_xcodeproj.py`) build without the
+  `keychain-access-groups` entitlement. The rooms are then kept by each game
+  alone (`Application Support/klepton-rooms.json`) instead of in the team's
+  shared group `<team>.avpplay.shared` (Info.plist `KLSharedKeychainGroup`).
+- Log lines: `[room] …` — the store (`rooms shared through …`, `saved to …`),
+  the scan (`suggested … m²`, `stroke … added|cut out`, `match against room …:
+  score …, next best …`), the check (`this game's anchor for room … is back`,
+  `recognised room … by its obstacles`, `not recognised within 12 s`) and the
+  game (`play area: in room …`, `near the edge`).
+- `make room` — `tests/t_room.c`: scan map, coverage, suggestion, drawing,
+  distance field, outlines and room matching on a made-up 5 x 4 m room.

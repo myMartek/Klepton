@@ -2473,6 +2473,7 @@ final class KleptonControllers {
             }
 
             if let rawP = st.position, let rawQ = st.orientation {
+                Self.noteRawHand(hand, rawP)
                 let rot = simd_quatf(trackingRebase)
                 let hp = trackingRebase * SIMD4<Float>(rawP.x, rawP.y, rawP.z, 1)
                 st.position = SIMD3<Float>(hp.x, hp.y, hp.z)
@@ -2483,6 +2484,20 @@ final class KleptonControllers {
             submit(st, hand: hand)
         }
         reportPinch()
+    }
+
+    /// Where each hand was last, in ARKit's own frame (before any recentring),
+    /// with when — for the play area's edge (KleptonBoundary), which measures in
+    /// that frame. A hand not seen for a third of a second does not count.
+    private static let rawLock = NSLock()
+    nonisolated(unsafe) private static var rawHand: [(SIMD3<Float>, TimeInterval)?] = [nil, nil]
+    private static func noteRawHand(_ hand: Int, _ p: SIMD3<Float>) {
+        rawLock.lock(); rawHand[hand] = (p, CACurrentMediaTime()); rawLock.unlock()
+    }
+    static func rawHandPositions() -> [SIMD3<Float>] {
+        let now = CACurrentMediaTime()
+        rawLock.lock(); defer { rawLock.unlock() }
+        return rawHand.compactMap { $0 }.filter { now - $0.1 < 0.33 }.map { $0.0 }
     }
 
     /// The common final Oculus seam for Standard and Surreal backends.

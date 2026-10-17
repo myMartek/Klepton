@@ -800,6 +800,12 @@ enum KleptonTestSwitches {
         ].filter { !$0.testBuildOnly || KleptonTestBuild.on }
     }
 
+    /// Whether the switch for `env` is on (the first entry naming it).
+    static func isOn(env: String) -> Bool {
+        guard available, let e = entries.first(where: { $0.env == env }) else { return false }
+        return isOn(e)
+    }
+
     /// Into the environment, before kl_app_configure. Never over the launch
     /// line's value.
     static func applyEnvironment() {
