@@ -107,6 +107,8 @@ int32_t kl_room_contours(kl_room_grid g, const uint8_t *mask, float *xz, int32_t
 
 /// Centres of the OBSTACLE cells, evenly thinned to at most `cap`.
 int32_t kl_room_obstacle_points(kl_room_grid g, const uint8_t *cells, float *xz, int32_t cap);
+/// Centres of the cells where floor was seen and nothing stands, the same way.
+int32_t kl_room_floor_points(kl_room_grid g, const uint8_t *cells, float *xz, int32_t cap);
 
 /// Where a scan of today stands in a room measured before: the turn about the
 /// vertical and the shift that put `pts` (obstacle points in today's frame)
@@ -127,6 +129,16 @@ int32_t kl_room_register(kl_room_grid g, const uint8_t *cells, const float *pts,
 /// `out->second` is not set.
 int32_t kl_room_register_near(kl_room_grid g, const uint8_t *cells, const float *pts, int32_t n,
                               const kl_room_fit *guess, float yaw_range, float t_range, kl_room_fit *out);
+/// Both, with today's free floor as well (`floor`, `nfloor` points from
+/// kl_room_floor_points; NULL/0 is the calls above): the score is then half the
+/// obstacles' and half the share of that floor which lands where nothing stood
+/// in the room. In a room full of things the obstacles alone fit too many
+/// placements near the right one; the free floor tells them apart.
+int32_t kl_room_register_scene(kl_room_grid g, const uint8_t *cells, const float *pts, int32_t n,
+                               const float *floor, int32_t nfloor, kl_room_fit *out);
+int32_t kl_room_register_near_scene(kl_room_grid g, const uint8_t *cells, const float *pts, int32_t n,
+                                    const float *floor, int32_t nfloor,
+                                    const kl_room_fit *guess, float yaw_range, float t_range, kl_room_fit *out);
 
 /// The triangles of one mesh, in the frame `m` (column-major 4x4) takes its
 /// vertices to: `verts` is `nverts` vertices of three floats `vstride` bytes

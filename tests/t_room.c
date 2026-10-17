@@ -312,6 +312,24 @@ int main(void) {
     printf("  register: yaw %.3f (%.3f), t (%.2f %.2f), score %.2f, second %.2f, %d points, error %.3f m\n",
            fit.yaw, yaw, fit.tx, fit.tz, fit.score, fit.second, no, err);
 
+    // The same with today's free floor: a room with space in it still fits as well.
+    {
+        float *fp = malloc(sizeof(float) * 2 * 4000);
+        int32_t nfl = kl_room_floor_points(g, hcells, fp, 4000);
+        for (int k = 0; k < nfl; k++) {
+            float x = fp[2 * k] - sx, z = fp[2 * k + 1] - sz;
+            fp[2 * k] = co * x + si * z;
+            fp[2 * k + 1] = -si * x + co * z;
+        }
+        kl_room_fit ff;
+        kl_room_register_scene(g, cells, op, no, fp, nfl, &ff);
+        CHECK(fabsf(remainderf(ff.yaw - yaw, 6.2831853f)) < 0.03f && ff.score > 0.6f && ff.score - ff.second > 0.08f,
+              "with the floor: yaw %.3f, score %.2f against %.2f", ff.yaw, ff.score, ff.second);
+        printf("  register with the floor: yaw %.3f, score %.2f, second %.2f, %d floor points\n",
+               ff.yaw, ff.score, ff.second, nfl);
+        free(fp);
+    }
+
     // From a guess 20 degrees and 40 cm off (an anchor that came back wrong).
     kl_room_fit guess = fit, near;
     guess.yaw += 0.35f; guess.tx += 0.3f; guess.tz -= 0.25f;
@@ -334,6 +352,59 @@ int main(void) {
     kl_room_register(g, cells, op, no2, &fit2);
     CHECK(fit2.score < 0.55f, "another room scores %.2f", fit2.score);
     printf("  another room: score %.2f, second %.2f\n", fit2.score, fit2.second);
+
+    // --- a room full of things (2026-10-17, his headset) ---
+    // Nearly the whole grid is obstacle; only an L of free floor round the
+    // player is not. The obstacles alone fit placements 25 cm off almost as well
+    // as the right one; with today's free floor the right one stands out.
+    {
+        kl_room_grid cg = kl_room_grid_make(0, 0, 3, 0.05f);
+        int32_t cn = kl_room_cells(cg);
+        uint8_t *full = calloc((size_t)cn, 1), *today = calloc((size_t)cn, 1);
+        for (int32_t c = 0; c < cn; c++) {
+            float x = cg.x0 + ((float)(c % cg.w) + 0.5f) * cg.cell, z = cg.z0 + ((float)(c / cg.w) + 0.5f) * cg.cell;
+            int freec = (x > -0.8f && x < 0.8f && z > -0.6f && z < 0.6f)      // where the player stands
+                     || (x > 0.8f && x < 1.5f && z > -0.6f && z < 0.0f)       // a bay to one side
+                     || (x > -0.3f && x < 0.2f && z > 0.6f && z < 1.6f);      // a gangway to the door
+            full[c] = freec ? KL_ROOM_FLOOR : KL_ROOM_OBSTACLE;
+        }
+        // Today: the same room in a frame turned by 0.5 rad and shifted, seen within 2.6 m.
+        const float cy = 0.5f, ctx = 0.3f, ctz = -0.2f;
+        float cc = cosf(cy), cs = sinf(cy);
+        for (int32_t c = 0; c < cn; c++) {
+            float x = cg.x0 + ((float)(c % cg.w) + 0.5f) * cg.cell, z = cg.z0 + ((float)(c / cg.w) + 0.5f) * cg.cell;
+            if (x * x + z * z > 2.6f * 2.6f) continue;
+            float rx = cc * x + cs * z + ctx, rz = -cs * x + cc * z + ctz;
+            int32_t i = (int32_t)floorf((rx - cg.x0) / cg.cell), j = (int32_t)floorf((rz - cg.z0) / cg.cell);
+            if (i < 0 || j < 0 || i >= cg.w || j >= cg.h) continue;
+            today[c] = full[j * cg.w + i];
+        }
+        float *cp = malloc(sizeof(float) * 2 * 1500), *fp = malloc(sizeof(float) * 2 * 1500);
+        int32_t cno = kl_room_obstacle_points(cg, today, cp, 1500);
+        int32_t cnf = kl_room_floor_points(cg, today, fp, 1500);
+        CHECK(cno > 1000 && cnf > 300, "cluttered: %d obstacle and %d floor points", cno, cnf);
+        kl_room_fit only, both;
+        kl_room_register(cg, full, cp, cno, &only);
+        kl_room_register_scene(cg, full, cp, cno, fp, cnf, &both);
+        printf("  cluttered room, obstacles only: yaw %.3f (%.3f), score %.2f, second %.2f\n",
+               only.yaw, cy, only.score, only.second);
+        printf("  cluttered room, with the floor: yaw %.3f (%.3f), t (%.2f %.2f), score %.2f, second %.2f\n",
+               both.yaw, cy, both.tx, both.tz, both.score, both.second);
+        CHECK(only.score - only.second < 0.1f, "the case seen on the headset: obstacles alone %.2f against %.2f",
+              only.score, only.second);
+        CHECK(fabsf(remainderf(both.yaw - cy, 6.2831853f)) < 0.03f && fabsf(both.tx - ctx) < 0.06f
+              && fabsf(both.tz - ctz) < 0.06f, "with the floor: yaw %.3f t (%.2f %.2f)", both.yaw, both.tx, both.tz);
+        CHECK(both.score >= 0.6f && both.score - both.second >= 0.1f,
+              "with the floor the right placement stands out: %.2f against %.2f", both.score, both.second);
+        // and from a guess (an anchor), the same
+        kl_room_fit g2 = both, nb;
+        g2.yaw += 0.2f; g2.tx -= 0.25f;
+        kl_room_register_near_scene(cg, full, cp, cno, fp, cnf, &g2, 0.4f, 0.6f, &nb);
+        // within 3 degrees: the free floor is a small target, about 5 cm at 1.5 m
+        CHECK(fabsf(remainderf(nb.yaw - cy, 6.2831853f)) < 0.05f && nb.score >= 0.6f,
+              "near, with the floor: yaw %.3f score %.2f", nb.yaw, nb.score);
+        free(full); free(today); free(cp); free(fp);
+    }
 
     // --- a mesh as ARKit hands it over: 16-byte vertices, 16-bit indices ---
     float verts[4][4] = { { 0, 0, 0, 0 }, { 1, 0, 0, 0 }, { 1, 0, 1, 0 }, { 0, 0, 1, 0 } };

@@ -401,6 +401,7 @@ enum KLRoomLogFile {
             pts.withUnsafeMutableBufferPointer { p in kl_room_obstacle_points(grid, c.baseAddress, p.baseAddress, 1500) }
         }
         guard n >= 80 else { return }
+        let floorPts = floorPoints()
         lastRegister = now
         registering = true
         // The anchor's room frame, as kl_room_fit in this space's floor frame (x, z only).
@@ -414,7 +415,12 @@ enum KLRoomLogFile {
             let oc = r.obstacleCells()
             var fit = kl_room_fit()
             let rc = oc.withUnsafeBufferPointer { o in
-                points.withUnsafeBufferPointer { p in kl_room_register_near(r.grid, o.baseAddress, p.baseAddress, n, &guess, 0.45, 0.8, &fit) }
+                points.withUnsafeBufferPointer { p in
+                    floorPts.withUnsafeBufferPointer { f in
+                        kl_room_register_near_scene(r.grid, o.baseAddress, p.baseAddress, n,
+                                                    f.baseAddress, Int32(floorPts.count / 2), &guess, 0.45, 0.8, &fit)
+                    }
+                }
             }
             await MainActor.run {
                 self.registering = false
@@ -622,33 +628,64 @@ enum KLRoomLogFile {
             pts.withUnsafeMutableBufferPointer { p in kl_room_obstacle_points(grid, c.baseAddress, p.baseAddress, 1500) }
         }
         guard n >= 150 else { return }
+        let floorPts = floorPoints()
         lastRegister = now
         registering = true
         let candidates = rooms
         let points = Array(pts.prefix(2 * Int(n)))
         let floorY = floorRaw
+        let previous = lastWinners
         Task.detached(priority: .userInitiated) {
             var best: (KLRoomRecord, kl_room_fit)?
+            var winners: [UUID: (kl_room_fit, Int)] = [:]
             for r in candidates {
                 let oc = r.obstacleCells()
                 var fit = kl_room_fit()
                 let rc = oc.withUnsafeBufferPointer { o in
-                    points.withUnsafeBufferPointer { p in kl_room_register(r.grid, o.baseAddress, p.baseAddress, n, &fit) }
+                    points.withUnsafeBufferPointer { p in
+                        floorPts.withUnsafeBufferPointer { f in
+                            kl_room_register_scene(r.grid, o.baseAddress, p.baseAddress, n,
+                                                   f.baseAddress, Int32(floorPts.count / 2), &fit)
+                        }
+                    }
                 }
                 guard rc == 0 else { continue }
-                roomLog("[room] match against room %@: score %.2f, next best %.2f, %d points",
-                      r.id.uuidString, fit.score, fit.second, fit.npts)
-                if fit.score >= 0.6, fit.score - fit.second >= 0.1, fit.score > (best?.1.score ?? 0) { best = (r, fit) }
+                // The same placement winning again and again is evidence too: in a
+                // room full of things the next best can stay close behind the right
+                // one (Beat Saber, 2026-10-17: 1.00 against 0.94..0.98, ten times).
+                var streak = 1
+                if let (p, k) = previous[r.id], klRoomSamePlacement(p, fit) { streak = k + 1 }
+                winners[r.id] = (fit, streak)
+                roomLog("[room] match against room %@: score %.2f, next best %.2f, %d points, %d floor, yaw %.1f° t (%.2f %.2f), %d in a row",
+                        r.id.uuidString, fit.score, fit.second, fit.npts, Int32(floorPts.count / 2),
+                        fit.yaw * 180 / .pi, fit.tx, fit.tz, Int32(streak))
+                let clear = fit.score >= 0.6 && fit.score - fit.second >= 0.1
+                let steady = fit.score >= 0.8 && fit.score - fit.second >= 0.03 && streak >= 3
+                if clear || steady, fit.score > (best?.1.score ?? 0) { best = (r, fit) }
             }
             let found = best
+            let seen = winners
             await MainActor.run {
                 self.registering = false
+                self.lastWinners = seen
                 guard self.room == nil, self.active, let (r, fit) = found else { return }
                 let roomFromRaw = klRoomFromRaw(yaw: fit.yaw, tx: fit.tx, tz: fit.tz, floorY: floorY)
-                roomLog("[room] recognised room %@ by its obstacles (yaw %.1f°)", r.id.uuidString, fit.yaw * 180 / .pi)
+                roomLog("[room] recognised room %@ by its obstacles and floor (yaw %.1f°)", r.id.uuidString, fit.yaw * 180 / .pi)
                 self.adopt(r, rawFromRoom: roomFromRaw.inverse, viaAnchor: false)
             }
         }
+    }
+
+    /// Each room's last winning placement and how many searches in a row it won.
+    private var lastWinners: [UUID: (kl_room_fit, Int)] = [:]
+
+    /// Today's free floor (floor seen, nothing standing), as kl_room_register_scene takes it.
+    private func floorPoints() -> [Float] {
+        var f = [Float](repeating: 0, count: 2 * 1500)
+        let nf = cells.withUnsafeBufferPointer { c in
+            f.withUnsafeMutableBufferPointer { p in kl_room_floor_points(grid, c.baseAddress, p.baseAddress, 1500) }
+        }
+        return Array(f.prefix(2 * Int(nf)))
     }
 
     // MARK: - Suggesting

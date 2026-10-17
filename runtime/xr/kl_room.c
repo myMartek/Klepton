@@ -596,13 +596,15 @@ int32_t kl_room_contours(kl_room_grid g, const uint8_t *mask, float *xz, int32_t
     return loops;
 }
 
-int32_t kl_room_obstacle_points(kl_room_grid g, const uint8_t *cells, float *xz, int32_t cap) {
+// Cell centres whose bits under `mask` are exactly `want`, evenly thinned to at most `cap`.
+static int32_t klr_points(kl_room_grid g, const uint8_t *cells, uint8_t mask, uint8_t want,
+                          float *xz, int32_t cap) {
     int32_t n = kl_room_cells(g), total = 0;
-    for (int32_t c = 0; c < n; c++) total += (cells[c] & KL_ROOM_OBSTACLE) != 0;
+    for (int32_t c = 0; c < n; c++) total += (cells[c] & mask) == want;
     if (total == 0 || cap <= 0) return 0;
     int32_t k = 0, seen = 0;
     for (int32_t c = 0; c < n && k < cap; c++) {
-        if (!(cells[c] & KL_ROOM_OBSTACLE)) continue;
+        if ((cells[c] & mask) != want) continue;
         // keep point `seen` when it starts a new 1/cap-th of the list
         if ((int64_t)seen * cap / total >= k) {
             xz[2 * k] = klr_cx(g, c % g.w);
@@ -612,6 +614,14 @@ int32_t kl_room_obstacle_points(kl_room_grid g, const uint8_t *cells, float *xz,
         seen++;
     }
     return k;
+}
+
+int32_t kl_room_obstacle_points(kl_room_grid g, const uint8_t *cells, float *xz, int32_t cap) {
+    return klr_points(g, cells, KL_ROOM_OBSTACLE, KL_ROOM_OBSTACLE, xz, cap);
+}
+
+int32_t kl_room_floor_points(kl_room_grid g, const uint8_t *cells, float *xz, int32_t cap) {
+    return klr_points(g, cells, KL_ROOM_FLOOR | KL_ROOM_OBSTACLE, KL_ROOM_FLOOR, xz, cap);
 }
 
 // --- Finding a room measured before ------------------------------------------------
@@ -629,6 +639,58 @@ static float klr_score(kl_room_grid g, const float *field, const float *q, int32
     return s / (float)n;
 }
 
+// The free floor of today's scan, `nf` points in `qf`, against the room's
+// obstacles: the share that lands where nothing stood (`clear`, 1 there, 0 on an
+// obstacle). Outside the room's grid counts half: nothing is known there.
+static float klr_free(kl_room_grid g, const float *clear, const float *qf, int32_t nf, float tx, float tz) {
+    if (nf <= 0) return 0.0f;
+    float s = 0.0f;
+    const float inv = 1.0f / g.cell;
+    for (int32_t k = 0; k < nf; k++) {
+        int32_t i = (int32_t)((qf[2 * k] + tx - g.x0) * inv);
+        int32_t j = (int32_t)((qf[2 * k + 1] + tz - g.z0) * inv);
+        s += ((uint32_t)i < (uint32_t)g.w && (uint32_t)j < (uint32_t)g.h) ? clear[j * g.w + i] : 0.5f;
+    }
+    return s / (float)nf;
+}
+
+// Why the floor counts too (2026-10-17, his headset): in a small room full of
+// things the obstacles cover nearly the whole grid, so the obstacle points of
+// today fit almost anywhere near the right place — Beat Saber found a room
+// measured in Walkabout at a score of 1.00 eight times running and still
+// refused it, the next placement 25 cm off scoring 0.94..0.98. What tells such
+// placements apart is the free floor: shifted, part of it lands on furniture.
+// The score is the product of the two shares (both have to fit; a mean let the
+// saturated obstacle half hide half of what the floor says); without floor
+// points it is the obstacles' alone, as before.
+#ifndef KLR_CLEAR_C
+#define KLR_CLEAR_C 0.08f
+#endif
+#ifndef KLR_CLEAR_F
+#define KLR_CLEAR_F 0.04f
+#endif
+typedef struct {
+    const float *field, *clear;     // obstacle closeness, floor clearance
+    const float *q, *qf;            // today's points, turned
+    int32_t n, nf;
+} klr_set;
+
+static float klr_score2(kl_room_grid g, const klr_set *s, float tx, float tz) {
+    float so = klr_score(g, s->field, s->q, s->n, tx, tz);
+    if (s->nf <= 0) return so;
+    return so * klr_free(g, s->clear, s->qf, s->nf, tx, tz);
+}
+
+// Clearance from the obstacles' distance field: 0 on an obstacle, rising
+// softly (over about `sigma` metres) to 1 away from it — soft so that the fine
+// search still has a slope to climb.
+static float *klr_clear(kl_room_grid g, const float *d, float sigma) {
+    int32_t ncell = kl_room_cells(g);
+    float *c = malloc(sizeof(float) * (size_t)ncell);
+    for (int32_t k = 0; k < ncell; k++) c[k] = 1.0f - expf(-d[k] * d[k] / (2.0f * sigma * sigma));
+    return c;
+}
+
 static void klr_rotate(const float *p, int32_t n, float cx, float cz, float yaw, float *q, int32_t stride) {
     float c = cosf(yaw), s = sinf(yaw);
     for (int32_t k = 0, m = 0; m < n; k += stride, m++) {
@@ -639,13 +701,15 @@ static void klr_rotate(const float *p, int32_t n, float cx, float cz, float yaw,
     }
 }
 
-int32_t kl_room_register_near(kl_room_grid g, const uint8_t *cells, const float *pts, int32_t n,
-                              const kl_room_fit *guess, float yaw_range, float t_range, kl_room_fit *out) {
+int32_t kl_room_register_near_scene(kl_room_grid g, const uint8_t *cells, const float *pts, int32_t n,
+                                    const float *floor, int32_t nfloor,
+                                    const kl_room_fit *guess, float yaw_range, float t_range, kl_room_fit *out) {
     memset(out, 0, sizeof *out);
     out->npts = n;
     int32_t ncell = kl_room_cells(g), nobst = 0;
     for (int32_t c = 0; c < ncell; c++) nobst += (cells[c] & KL_ROOM_OBSTACLE) != 0;
     if (n < 40 || nobst < 40) return -1;
+    if (!floor) nfloor = 0;
     float *d = klr_dist(g, cells, KL_ROOM_OBSTACLE, 1);
     float *coarse = malloc(sizeof(float) * (size_t)ncell), *fine = malloc(sizeof(float) * (size_t)ncell);
     const float sc = 0.15f, sf = 0.07f;
@@ -653,6 +717,7 @@ int32_t kl_room_register_near(kl_room_grid g, const uint8_t *cells, const float 
         coarse[c] = expf(-d[c] * d[c] / (2.0f * sc * sc));
         fine[c] = expf(-d[c] * d[c] / (2.0f * sf * sf));
     }
+    float *clear_c = klr_clear(g, d, KLR_CLEAR_C), *clear_f = klr_clear(g, d, KLR_CLEAR_F);
     float cx = 0, cz = 0;
     for (int32_t k = 0; k < n; k++) { cx += pts[2 * k]; cz += pts[2 * k + 1]; }
     cx /= (float)n; cz /= (float)n;
@@ -661,16 +726,21 @@ int32_t kl_room_register_near(kl_room_grid g, const uint8_t *cells, const float 
     float gcx = co * cx + si * cz + guess->tx, gcz = -si * cx + co * cz + guess->tz;
     int32_t nc = n < 150 ? n : 150, cstride = n / nc;
     int32_t nf = n < 800 ? n : 800, fstride = n / nf;
+    int32_t mc = nfloor < 150 ? nfloor : 150, mcs = mc ? nfloor / mc : 1;
+    int32_t mf = nfloor < 800 ? nfloor : 800, mfs = mf ? nfloor / mf : 1;
     float *q = malloc(sizeof(float) * 2 * (size_t)(nf > nc ? nf : nc));
+    float *qf = malloc(sizeof(float) * 2 * (size_t)(mf > 1 ? mf : 1));
     klr_cand top = { guess->yaw, gcx, gcz, -1 };
     int na = (int)ceilf(yaw_range / 0.026f), nt = (int)ceilf(t_range / 0.06f);
     for (int a = -na; a <= na; a++) {
         float yaw = guess->yaw + (float)a * 0.026f;
         klr_rotate(pts, nc, cx, cz, yaw, q, cstride);
+        if (mc) klr_rotate(floor, mc, cx, cz, yaw, qf, mcs);
+        klr_set set = { coarse, clear_c, q, qf, nc, mc };
         for (int dz = -nt; dz <= nt; dz++)
             for (int dx = -nt; dx <= nt; dx++) {
                 float tx = gcx + (float)dx * 0.06f, tz = gcz + (float)dz * 0.06f;
-                float s = klr_score(g, coarse, q, nc, tx, tz);
+                float s = klr_score2(g, &set, tx, tz);
                 if (s > top.score) top = (klr_cand){ yaw, tx, tz, s };
             }
     }
@@ -679,10 +749,12 @@ int32_t kl_room_register_near(kl_room_grid g, const uint8_t *cells, const float 
     for (int da = -6; da <= 6; da++) {
         float yaw = top.yaw + (float)da * 0.00436f;
         klr_rotate(pts, nf, cx, cz, yaw, q, fstride);
+        if (mf) klr_rotate(floor, mf, cx, cz, yaw, qf, mfs);
+        klr_set set = { fine, clear_f, q, qf, nf, mf };
         for (int dz = -4; dz <= 4; dz++)
             for (int dx = -4; dx <= 4; dx++) {
                 float tx = top.cx + (float)dx * 0.015f, tz = top.cz + (float)dz * 0.015f;
-                float s = klr_score(g, fine, q, nf, tx, tz);
+                float s = klr_score2(g, &set, tx, tz);
                 if (s > best.score) best = (klr_cand){ yaw, tx, tz, s };
             }
     }
@@ -692,12 +764,17 @@ int32_t kl_room_register_near(kl_room_grid g, const uint8_t *cells, const float 
     out->tx = best.cx - (co * cx + si * cz);
     out->tz = best.cz - (-si * cx + co * cz);
     out->score = best.score;
-    free(d); free(coarse); free(fine); free(q);
+    free(d); free(coarse); free(fine); free(clear_c); free(clear_f); free(q); free(qf);
     return 0;
 }
 
-int32_t kl_room_register(kl_room_grid g, const uint8_t *cells, const float *pts, int32_t n,
-                         kl_room_fit *out) {
+int32_t kl_room_register_near(kl_room_grid g, const uint8_t *cells, const float *pts, int32_t n,
+                              const kl_room_fit *guess, float yaw_range, float t_range, kl_room_fit *out) {
+    return kl_room_register_near_scene(g, cells, pts, n, NULL, 0, guess, yaw_range, t_range, out);
+}
+
+int32_t kl_room_register_scene(kl_room_grid g, const uint8_t *cells, const float *pts, int32_t n,
+                               const float *floor, int32_t nfloor, kl_room_fit *out) {
     memset(out, 0, sizeof *out);
     out->npts = n;
     int32_t ncell = kl_room_cells(g), nobst = 0;
@@ -712,6 +789,7 @@ int32_t kl_room_register(kl_room_grid g, const uint8_t *cells, const float *pts,
         if (z > bz1) bz1 = z;
     }
     if (n < 40 || nobst < 40) return -1;
+    if (!floor) nfloor = 0;
     float *d = klr_dist(g, cells, KL_ROOM_OBSTACLE, 1);
     float *coarse = malloc(sizeof(float) * (size_t)ncell), *fine = malloc(sizeof(float) * (size_t)ncell);
     const float sc = 0.22f, sf = 0.07f;
@@ -719,15 +797,19 @@ int32_t kl_room_register(kl_room_grid g, const uint8_t *cells, const float *pts,
         coarse[c] = expf(-d[c] * d[c] / (2.0f * sc * sc));
         fine[c] = expf(-d[c] * d[c] / (2.0f * sf * sf));
     }
+    float *clear_c = klr_clear(g, d, KLR_CLEAR_C), *clear_f = klr_clear(g, d, KLR_CLEAR_F);
     float cx = 0, cz = 0;
     for (int32_t k = 0; k < n; k++) { cx += pts[2 * k]; cz += pts[2 * k + 1]; }
     cx /= (float)n; cz /= (float)n;
 
     // Coarse: every 3 degrees, the centroid on a 12 cm lattice over the
-    // obstacles' extent, with at most 150 of the points.
+    // obstacles' extent, with at most 150 of the points (and 150 of the floor's).
     int32_t nc = n < 150 ? n : 150, cstride = n / nc;
     int32_t nf = n < 800 ? n : 800, fstride = n / nf;
+    int32_t mc = nfloor < 150 ? nfloor : 150, mcs = mc ? nfloor / mc : 1;
+    int32_t mf = nfloor < 800 ? nfloor : 800, mfs = mf ? nfloor / mf : 1;
     float *q = malloc(sizeof(float) * 2 * (size_t)(nf > nc ? nf : nc));
+    float *qf = malloc(sizeof(float) * 2 * (size_t)(mf > 1 ? mf : 1));
     enum { KEEP = 10 };
     klr_cand best[KEEP];
     int32_t nbest = 0;
@@ -735,9 +817,11 @@ int32_t kl_room_register(kl_room_grid g, const uint8_t *cells, const float *pts,
     for (int a = 0; a < 120; a++) {
         float yaw = (float)a * 6.2831853f / 120.0f;
         klr_rotate(pts, nc, cx, cz, yaw, q, cstride);
+        if (mc) klr_rotate(floor, mc, cx, cz, yaw, qf, mcs);
+        klr_set set = { coarse, clear_c, q, qf, nc, mc };
         for (float tz = bz0 - 0.3f; tz <= bz1 + 0.3f; tz += tstep)
             for (float tx = bx0 - 0.3f; tx <= bx1 + 0.3f; tx += tstep) {
-                float s = klr_score(g, coarse, q, nc, tx, tz);
+                float s = klr_score2(g, &set, tx, tz);
                 if (nbest == KEEP && s <= best[KEEP - 1].score) continue;
                 // one per neighbourhood: replace a near one if this is better
                 int near = -1;
@@ -767,10 +851,12 @@ int32_t kl_room_register(kl_room_grid g, const uint8_t *cells, const float *pts,
         for (int da = -8; da <= 8; da++) {
             float yaw = best[b].yaw + (float)da * 0.00873f;
             klr_rotate(pts, nf, cx, cz, yaw, q, fstride);
+            if (mf) klr_rotate(floor, mf, cx, cz, yaw, qf, mfs);
+            klr_set set = { fine, clear_f, q, qf, nf, mf };
             for (int dz = -9; dz <= 9; dz++)
                 for (int dx = -9; dx <= 9; dx++) {
                     float tx = best[b].cx + (float)dx * 0.02f, tz = best[b].cz + (float)dz * 0.02f;
-                    float s = klr_score(g, fine, q, nf, tx, tz);
+                    float s = klr_score2(g, &set, tx, tz);
                     if (s > top.score) top = (klr_cand){ yaw, tx, tz, s };
                 }
         }
@@ -794,8 +880,13 @@ int32_t kl_room_register(kl_room_grid g, const uint8_t *cells, const float *pts,
     out->tz = fineb[win].cz - (-si * cx + co * cz);
     out->score = fineb[win].score;
     out->second = second;
-    free(d); free(coarse); free(fine); free(q);
+    free(d); free(coarse); free(fine); free(clear_c); free(clear_f); free(q); free(qf);
     return 0;
+}
+
+int32_t kl_room_register(kl_room_grid g, const uint8_t *cells, const float *pts, int32_t n,
+                         kl_room_fit *out) {
+    return kl_room_register_scene(g, cells, pts, n, NULL, 0, out);
 }
 
 // --- Meshes ------------------------------------------------------------------------

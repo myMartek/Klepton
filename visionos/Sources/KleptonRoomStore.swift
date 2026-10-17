@@ -266,6 +266,12 @@ func klRoomFromRaw(yaw: Float, tx: Float, tz: Float, floorY: Float) -> simd_floa
     return m
 }
 
+/// Two answers of kl_room_register that put the room in the same place: within
+/// 3 degrees and 10 cm.
+func klRoomSamePlacement(_ a: kl_room_fit, _ b: kl_room_fit) -> Bool {
+    abs(remainderf(a.yaw - b.yaw, 2 * .pi)) < 0.05 && simd_distance(SIMD2<Float>(a.tx, a.tz), SIMD2<Float>(b.tx, b.tz)) < 0.10
+}
+
 /// A 4x4 as the 16 floats kl_room's calls take (column-major).
 func klRoomFloats(_ m: simd_float4x4) -> [Float] {
     [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }
