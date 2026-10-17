@@ -3880,7 +3880,8 @@ final class KleptonCompositor {
         var points = [SIMD3<Float>(head.columns.3.x, head.columns.3.y, head.columns.3.z)]
         points += KleptonControllers.rawHandPositions()
         boundary.encode(enc, views: views, worldFromRaw: recenterXform, points: points,
-                        mixedSpace: Immersive.mixedAtBoot, depthState: depthPassState)
+                        mixedSpace: Immersive.mixedAtBoot, gameShowsRoom: kl_ovrp_passthrough_live() != 0,
+                        depthState: depthPassState)
     }
 
     // How the game is running, shown in the headset (KL_STATS_CARD): a panel in

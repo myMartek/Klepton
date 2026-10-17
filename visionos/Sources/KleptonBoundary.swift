@@ -17,6 +17,12 @@ import simd
 //    space; in the full one (frame rate up to 120) visionOS shows the room at its
 //    own boundary, and the wall is drawn instead.
 //
+// Neither while the game is in its own mixed reality (a passthrough layer in its
+// frames, kl_ovrp_passthrough_live): the room is already in view there, so a wall
+// or a fade guards against nothing, and the wall was drawn wrongly over the
+// game's cut-out picture (seen in Angry Birds VR, 2026-10-18; the owner's rule:
+// never a wall or a fade in mixed reality).
+//
 // Only the distance across the floor counts — the area is a shape on the floor —
 // so a controller held low, put down or swung at the floor never sets it off,
 // and neither does a table inside the area: nothing about the floor or what
@@ -46,6 +52,7 @@ final class KLBoundary {
     private var said = Set<String>()
     private var watching = false
     private var lastNear: Float = 0
+    private var lastShowsRoom = false
 
     /// nil where there is nothing to show: the switch is off, the setting is
     /// off, or no room has been measured.
@@ -243,9 +250,17 @@ final class KLBoundary {
     /// `points`: head and hands in ARKit's frame.
     func encode(_ enc: MTLRenderCommandEncoder, views: [(projection: simd_float4x4, viewFromWorld: simd_float4x4)],
                 worldFromRaw: simd_float4x4, points: [SIMD3<Float>], mixedSpace: Bool,
-                depthState: MTLDepthStencilState?) {
+                gameShowsRoom: Bool, depthState: MTLDepthStencilState?) {
         lock.lock(); let a = active; lock.unlock()
         guard let a, !views.isEmpty else { return }
+        if gameShowsRoom {
+            if !lastShowsRoom { NSLog("[room] play area: the game shows the room (passthrough) — no wall, no fade") }
+            lastShowsRoom = true
+            lastNear = 0
+            return
+        }
+        if lastShowsRoom { NSLog("[room] play area: passthrough ended — guarding the edge again") }
+        lastShowsRoom = false
         let roomFromRaw = a.rawFromRoom.inverse
         // How near each point is, 0 (far enough inside) to 1 (on the edge or beyond).
         var near: [SIMD4<Float>] = []
