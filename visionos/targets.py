@@ -664,8 +664,11 @@ TARGETS = {
         # On from the start, as the owner tested it (2026-10-17): shaders
         # compiled behind the picture. The first session of a fresh copy
         # compiled 392 pipelines, 46 s in the compiler, with no freeze left
-        # but one of 170 ms at the start.
-        "test_on": "KL_VK_ASYNC_PIPES",
+        # but one of 170 ms at the start. And for the Steam build only, the
+        # pipeline list the game ships compiled at start, as the Meta build
+        # does (kl_ue4.c, KL_UE4_PSO_LIST) – the owner's word: on for every
+        # player, off only where it makes trouble.
+        "test_on": "KL_VK_ASYNC_PIPES,KL_UE4_PSO_LIST",
     },
     # ---- JKXR: ONE APK, TWO GAMES, TWO ROWS ----
     #

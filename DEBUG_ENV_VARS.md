@@ -1931,8 +1931,9 @@ puts the camera on the ground with its hands underneath it.
   `[ConsoleVariables]` in the game's user config
   (`<files>/UE4Game/MossGame/MossGame/Saved/Config/Android/Engine.ini`) before the
   engine starts, so it compiles the pipeline list it ships, as the Meta build
-  does; the Steam build switches that list off. `0` (default) takes the line
-  out again. A Test switch in the start window (`kl_ue4.c`).
+  does; the Steam build switches that list off. `0` takes the line out again.
+  A Test switch in the start window, on from the start for Moss (targets.py
+  `test_on`); without it the default is off (`kl_ue4.c`).
 - `KL_JKXR_WAIT=<seconds>` — the same budget for the JKXR door, default 5. Same
   reason there is no frame count: the engine owns its own render thread. A menu
   reached and rendering wants about 45. It bounds the app's window-and-report
