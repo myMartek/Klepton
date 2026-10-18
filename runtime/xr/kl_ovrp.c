@@ -1964,6 +1964,13 @@ static int klovrp_unify_default(void) {
     // the profile for untested games takes it for every Unity title that ships
     // Meta's OculusXR plugin, the one that renders with symmetric projection
     // (Catan VR, legacy VR, keeps the cones it was confirmed with).
+    // Not Angry Birds VR: Isle of Pigs (Unity 6000.0, an older OculusXR). Its
+    // plugin places each eye in the texture itself — told the real cones it
+    // makes the texture 4992 wide and puts eye1 at 991, Meta's layout, and the
+    // owner on device: "wirkt tiefer und steht besser im Raum". Told the union
+    // it still offset eye1 (-64 in a 3936 texture) and the picture was flat
+    // (2026-10-18).
+    if (t && strcmp(t, "x2718606324833775") == 0) return 0;
     extern int kl_untested_profile(void);
     extern kl_guest_kind kl_driver_kind(void);
     if (kl_untested_profile() && kl_driver_kind() == KL_GUEST_UNITY) {

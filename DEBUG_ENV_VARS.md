@@ -1819,7 +1819,11 @@ puts the camera on the ground with its hands underneath it.
   its horizontal pixels. Renders correctly on device with it **off**
   (2026-08-13, user-confirmed), so 1 is now purely the A/B — and the answer for
   any guest ever found that collapses the cones without submitting per-eye
-  rects, which would be unservable any other way.
+  rects, which would be unservable any other way. Later defaults: on for
+  Into The Radius, Walkabout, Demeo, Ghost Town and, under the profile for
+  untested games, every Unity title shipping libOculusXRPlugin — except Angry
+  Birds VR (`x2718606324833775`), which places each eye itself and looked flat
+  with the union (2026-10-18).
 - `KL_VRR` — **foveated guest rendering** (host: `tests/t_mtl_provider.m`;
   device: `KleptonCompositor.swift`). **On by default**; `KL_VRR=0` is the A/B.
   Builds an `MTLRasterizationRateMap` for the eye size and hands it to
