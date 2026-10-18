@@ -3162,6 +3162,16 @@ final class KleptonCompositor {
                                backdrop: false)
             enc.endEncoding()
             return viewIndices.count
+        } else if kl_loadingvideo_surface_served() != 0 {
+            // The guest's loading screen is its own video and no frame of it is
+            // here (yet, or the file was not found): the eye still holds the
+            // picture from before the load — Medal of Honor's old menu pieces in
+            // both eyes. Black, the clear above, plus the guest's panels.
+            _ = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
+                               originFromHead: originFromHead, writeDepth: true,
+                               backdrop: false)
+            enc.endEncoding()
+            return viewIndices.count
         }
 
         // One uniform per view, in the order the viewports and the amplification
@@ -4428,6 +4438,7 @@ final class KleptonCompositor {
     // first frame an Equirect loading layer is live, torn down when it clears.
     private var loadingVideo: LoadingVideoPlayer?
     private var loadingVideoTried = false
+    private var loadingVideoSourceGen: UInt32 = 0
     private var loadingSkyboxDraws = 0
 
     /// The current video frame as an MTLTexture, creating the player on first
@@ -4442,6 +4453,26 @@ final class KleptonCompositor {
             var sw: Int32 = 0, sh: Int32 = 0
             if let t = kl_vulkan_wild_scratch_mtl(&sw, &sh) {
                 return Unmanaged<MTLTexture>.fromOpaque(t).takeUnretainedValue()
+            }
+        }
+        // The video the guest itself asked to play onto its Equirect layer (an
+        // Unreal title's GameActivity.playVideo, kl_jni_ue4.c) comes first, and a
+        // new one replaces the one playing. With sound: it is the game's own
+        // loading video, narration included, where AC Nexus's backdrop below is
+        // a silent loop the game never names.
+        var src = [CChar](repeating: 0, count: 1024)
+        let gen = kl_loadingvideo_source(&src, Int32(src.count))
+        if gen != loadingVideoSourceGen {
+            loadingVideoSourceGen = gen
+            loadingVideo?.stop(); loadingVideo = nil; loadingVideoTried = false
+            let path = String(cString: src)
+            if !path.isEmpty {
+                loadingVideoTried = true
+                if let lv = LoadingVideoPlayer(device: device, url: URL(fileURLWithPath: path), muted: false) {
+                    NSLog("[cp] loading skybox: playing the game's video \((path as NSString).lastPathComponent)")
+                    lv.start()
+                    loadingVideo = lv
+                }
             }
         }
         if loadingVideo == nil {
@@ -5481,9 +5512,11 @@ final class LoadingVideoPlayer {
     private var retained: CVMetalTexture?
     private var current: MTLTexture?
     private var endObserver: NSObjectProtocol?
+    private let muted: Bool
 
-    init?(device: MTLDevice, url: URL) {
+    init?(device: MTLDevice, url: URL, muted: Bool = true) {
         self.url = url
+        self.muted = muted
         var c: CVMetalTextureCache?
         guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &c)
                 == kCVReturnSuccess, let c else { return nil }
@@ -5501,7 +5534,7 @@ final class LoadingVideoPlayer {
         item.add(out)
         output = out
         let p = AVPlayer(playerItem: item)
-        p.isMuted = true
+        p.isMuted = muted
         p.actionAtItemEnd = .none
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak p] _ in

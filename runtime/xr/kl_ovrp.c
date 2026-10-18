@@ -1611,6 +1611,10 @@ static int klovrp_title_cap(const char *t) {
         // the one lever. 4000 as for the other Unity GL titles above; the setting
         // (or KL_OVRP_EYE_MAX) takes it back down if a busy scene stutters.
         if (t && strcmp(t, "x2285803881494677") == 0) cap_dflt = 4000;
+        // Medal of Honor: Above and Beyond (UE4 on Vulkan): its owner on the
+        // first run that started, 2026-10-18, chose 4000 in the start window
+        // and asked for it as the default.
+        if (t && strcmp(t, "x3647259232032222") == 0) cap_dflt = 4000;
         // Batman: Arkham Shadow: 4608, the eye size rebelancap runs it at with
         // foveation "high" (kl_fove) — see the note on its row in
         // visionos/targets.py. Unfoveated he measured 4032 as its rung and 5120
@@ -7041,6 +7045,26 @@ static void kl_loadvid_recount(void) {
                 any ? "ON" : "OFF", any ? "live" : "gone");
     g_loadvid_active = any;
 }
+// The video a guest asked to play into its Equirect layer (kl_jni_ue4.c,
+// GameActivity.playVideo), as a host path, and a generation that moves with
+// every change so the compositor can tell a new video from the same one.
+static pthread_mutex_t g_loadvid_src_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_loadvid_src[1024];
+static unsigned g_loadvid_src_gen;
+void kl_loadingvideo_set_source(const char *host_path) {
+    pthread_mutex_lock(&g_loadvid_src_lock);
+    snprintf(g_loadvid_src, sizeof g_loadvid_src, "%s", host_path ? host_path : "");
+    g_loadvid_src_gen++;
+    pthread_mutex_unlock(&g_loadvid_src_lock);
+    fprintf(stderr, "  [ovrp] loading video: %s\n", host_path && *host_path ? host_path : "(none)");
+}
+unsigned kl_loadingvideo_source(char *out, int cap) {
+    pthread_mutex_lock(&g_loadvid_src_lock);
+    if (out && cap > 0) snprintf(out, (size_t)cap, "%s", g_loadvid_src);
+    unsigned gen = g_loadvid_src_gen;
+    pthread_mutex_unlock(&g_loadvid_src_lock);
+    return gen;
+}
 // Swift-facing: 1 while the guest has a live Equirect loading layer.
 int kl_loadingvideo_active(void) {
     // KL_LOADVID_OFF=1: force the loading skybox OFF regardless of whether the
@@ -10206,11 +10230,42 @@ static uint64_t klovrp_GetLayerTexturePtr(int layer_id, int stage, int eye,
 // pointer the kl_vulkan image-view guard now catches, one layer up. The caller
 // tests the result and, on failure, simply does not attach a video surface and
 // carries on; the background is dropped, the scene is not.
+//
+// ...except for an Unreal title's Equirect layer. Medal of Honor: Above and
+// Beyond plays its 360 loading videos that way: it asks for the layer's Surface
+// and hands it, with the video's path, to its Java GameActivity.playVideo, which
+// runs ExoPlayer into it. Refused, it never called playVideo, the loading
+// screens stayed empty and the compositor showed the last eye picture there —
+// old menu pieces in both eyes (2026-10-18). So the layer gets a stand-in
+// android/view/Surface; playVideo (kl_jni_ue4.c) names the file to
+// kl_loadingvideo_set_source, and the compositor's loading skybox plays it.
+// KL_OVRP_LAYER_SURFACE=0/1 overrides; default on for UE4 guests only, so AC
+// Nexus (Unity) keeps the refusal it was tuned against.
+static int g_loadvid_surface_served;
+int kl_loadingvideo_surface_served(void) { return g_loadvid_surface_served; }
 static uint64_t klovrp_GetLayerAndroidSurfaceObject(int layer_id, void **surface) {
     ovrp_hit("ovrp_GetLayerAndroidSurfaceObject");
-    (void)layer_id;
     if (surface) *surface = NULL;
-    return OVRP_FAIL_UNSUPPORTED;
+    static int on = -1;
+    if (on < 0) {
+        extern kl_guest_kind kl_driver_kind(void);
+        on = kl_env_on("KL_OVRP_LAYER_SURFACE", kl_driver_kind() == KL_GUEST_UE4);
+    }
+    int equirect = 0;
+    for (int i = 0; on && i < KLOVRP_MAX_LAYERS; i++)
+        if (g_layers[i].id == layer_id && layer_id && !g_layers[i].is_eye && g_layers[i].desc.shape == 5) {
+            equirect = 1; break;
+        }
+    if (!equirect || !surface) return OVRP_FAIL_UNSUPPORTED;
+    extern void *kl_jni_new_object(const char *class_name);
+    *surface = kl_jni_new_object("android/view/Surface");
+    if (*surface) g_loadvid_surface_served = 1;
+    static int said;
+    if (!said) { said = 1;
+        fprintf(stderr, "  [ovrp] GetLayerAndroidSurfaceObject(layer %d, Equirect) -> a stand-in "
+                        "Surface: the video the guest plays into it is drawn as the loading skybox\n",
+                layer_id); }
+    return *surface ? OVRP_SUCCESS : OVRP_FAIL_UNSUPPORTED;
 }
 
 // ---------------------------------------------------------------------------
