@@ -10257,6 +10257,8 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
         const char *fname = NULL;
         uint32_t glfmt = klovrp_gl_format(l->desc.format, &fname);
         int srgb = (glfmt == 0x8C43);              // GL_SRGB8_ALPHA8
+        int kind = glfmt == 0x881A ? KLVK_LAYER_FP16 // GL_RGBA16F
+                 : srgb ? KLVK_LAYER_SRGB : KLVK_LAYER_UNORM;
         // Array layout: ONE image for the stage with a layer per eye, and both
         // eyes get the same handle. Unity addresses the eye with
         // renderParams[].textureArraySlice, which is the provider's business
@@ -10269,7 +10271,7 @@ static uint64_t klovrp_GetLayerTexture2(int layer_id, int stage, int eye,
         // quads that were being drawn into the corner of the eye texture.
         unsigned long long img =
             kl_vulkan_layer_image(l->is_eye ? KLVK_EYE_LAYER : layer_id,
-                                  stage, eye, (unsigned)w, (unsigned)h, srgb, layers);
+                                  stage, eye, (unsigned)w, (unsigned)h, kind, layers);
         if (!img) {
             fprintf(stderr, "  [ovrp] GetLayerTexture2(layer %d stage %d eye %d): "
                             "no VkImage — the guest is on Vulkan and the layer "

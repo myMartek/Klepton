@@ -76,8 +76,8 @@ unsigned long long kl_vulkan_eye_image_layers(int s, int e, unsigned w, unsigned
     (void)s; (void)e; (void)w; (void)h; (void)srgb; (void)layers; return 0;
 }
 unsigned long long kl_vulkan_layer_image(int k, int s, int e, unsigned w, unsigned h,
-                                         int srgb, int layers) {
-    (void)k; (void)s; (void)e; (void)w; (void)h; (void)srgb; (void)layers; return 0;
+                                         int fmt, int layers) {
+    (void)k; (void)s; (void)e; (void)w; (void)h; (void)fmt; (void)layers; return 0;
 }
 unsigned long long kl_vulkan_spacewarp_image(int depth, int s, unsigned w, unsigned h,
                                              int layers) {
@@ -2158,7 +2158,7 @@ void kl_vulkan_layer_rekey(int old_key, int new_key) {
 }
 
 unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
-                                         unsigned w, unsigned h, int srgb, int layers) {
+                                         unsigned w, unsigned h, int fmt_kind, int layers) {
     if (!kl_vulkan_guest_active()) return 0;
     if (stage < 0 || stage >= KLVK_EYE_STAGES || eye < 0 || eye > 1) return 0;
     if (!w || !h) return 0;
@@ -2179,7 +2179,18 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
     }
     klvk_img_slot *slot = is_eye ? &g_eye[stage][eye] : &slots[stage * 2 + eye];
 
-    VkFormat fmt = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    // A half-float layer gets half-float storage. Ghostbusters: Rise of the
+    // Ghost Lord (x4746232908818706) sets up a 1024x280 UI quad as
+    // R16G16B16A16_FP and makes an RGBA16F view of the image it is handed; on
+    // RGBA8 storage Metal's validation aborts in newTextureViewWithPixelFormat
+    // ("not compatible with texture view pixelFormat", Mac host, 2026-10-18),
+    // and without validation the view reads the bytes as the wrong format.
+    // Overlays are sampled by the compositor, which takes either. The eye
+    // layer stays RGBA8: its table and every readback assume it.
+    int srgb = fmt_kind == KLVK_LAYER_SRGB;
+    int fp16 = fmt_kind == KLVK_LAYER_FP16 && !is_eye;
+    VkFormat fmt = fp16 ? VK_FORMAT_R16G16B16A16_SFLOAT
+                 : srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     // A cached image is only the right answer if it is the image that was
     // ASKED for. RE4 sets up its eye layer twice — 2290x2400, then 2748x2880
     // once UE4 applies its own pixel density — and the size was not consulted,
@@ -2299,7 +2310,7 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
         stage,
         layers > 1 ? "both eyes (2 array layers)" :
                      (eye ? "eye 1" : "eye 0"),
-        (void *)img, w, h, srgb ? "R8G8B8A8_SRGB" : "R8G8B8A8_UNORM");
+        (void *)img, w, h, fp16 ? "R16G16B16A16_SFLOAT" : srgb ? "R8G8B8A8_SRGB" : "R8G8B8A8_UNORM");
     return (uint64_t)(uintptr_t)img;
 }
 

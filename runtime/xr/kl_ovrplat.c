@@ -2768,6 +2768,22 @@ static uint64_t klplat_Leaderboard_Get(const char *name) {
     plat_hit("ovr_Leaderboard_Get");
     return klplat_request_err("ovr_Leaderboard_Get", KLPLAT_MSG_LEADERBOARD_GET);
 }
+// ovr_Voip_GetMicrophoneAvailability() — "may this app use the microphone for
+// platform voice chat?", an async request whose answer is a
+// MicrophoneAvailabilityState. There is no Meta voice service here to ask, so
+// it fails like the leaderboards: an ERROR completion, so the caller's
+// callback runs and takes its no-voice path. Ghostbusters: Rise of the Ghost
+// Lord (x4746232908818706) asks it right after its achievements, and the run
+// ended there by name (Mac host, 2026-10-18). Its Unreal OnlineSubsystemOculus
+// matches completions to callbacks by request id, so the type only has to be
+// the right family; this one is ovrMessage_Voip_GetMicrophoneAvailability as
+// OVR_MessageType.h spells it, not read back from a guest.
+#define KLPLAT_MSG_VOIP_MIC_AVAILABILITY 0x744CE345u
+static uint64_t klplat_Voip_GetMicrophoneAvailability(void) {
+    plat_hit("ovr_Voip_GetMicrophoneAvailability");
+    return klplat_request_err("ovr_Voip_GetMicrophoneAvailability",
+                              KLPLAT_MSG_VOIP_MIC_AVAILABILITY);
+}
 static uint64_t klplat_Leaderboard_GetEntriesAfterRank(const char *name, int limit,
                                                        unsigned long long after_rank) {
     (void)name; (void)limit; (void)after_rank;
@@ -3374,6 +3390,7 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     {"ovr_Leaderboard_GetEntries",             (void *)klplat_Leaderboard_GetEntries},
     {"ovr_Leaderboard_WriteEntry",             (void *)klplat_Leaderboard_WriteEntry},
     {"ovr_Leaderboard_Get",                    (void *)klplat_Leaderboard_Get},
+    {"ovr_Voip_GetMicrophoneAvailability",     (void *)klplat_Voip_GetMicrophoneAvailability},
     {"ovr_Leaderboard_GetEntriesAfterRank",    (void *)klplat_Leaderboard_GetEntriesAfterRank},
     {"ovr_Leaderboard_GetEntriesByIds",        (void *)klplat_Leaderboard_GetEntriesByIds},
     {"ovr_Leaderboard_WriteEntryWithSupplementaryMetric",

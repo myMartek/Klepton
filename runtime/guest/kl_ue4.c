@@ -770,6 +770,8 @@ typedef void (*ue4_fn_ssIIs)(void *, void *, void *, void *, int, int, void *);
 // UE 4.26+ grew a TargetSDKVersion int as the 2nd arg of
 // nativeSetAndroidVersionInformation: (String, int, String, String, String, String).
 typedef void (*ue4_fn_sIssss)(void *, void *, void *, int, void *, void *, void *, void *);
+// (String, String): the Redpoint EOS plugin's nativeSetEOSCacheDirectories.
+typedef void (*ue4_fn_ss)(void *, void *, void *, void *);
 
 static void *ue4_native(const char *name) {
     if (!g_ue4) return NULL;
@@ -988,6 +990,22 @@ static void kl_ue4_java_create(FILE *out) {
     void *jtype = kl_jni_new_string(ue4_meta_str("com.epicgames.ue4.GameActivity.AppType"));
     UE4_CALL(out, "nativeSetObbInfo", ue4_fn_ssIIs,
              jproj, jpkg, (int)version, 0, jtype);
+
+    // nativeSetEOSCacheDirectories(InternalFilesDir, ExternalFilesDir)
+    // Not the engine's: Redpoint's EOS Online Subsystem adds it to onCreate
+    // through its UPL, right after nativeSetObbInfo, with the same two paths
+    // nativeSetGlobalActivity got. FEOSRuntimePlatformAndroid keeps them as
+    // InternalPath/ExternalPath and check()s both when the EOS platform is
+    // initialised; never set, that check() raised SIGTRAP on the game thread
+    // seven seconds into Ghostbusters: Rise of the Ghost Lord
+    // (x4746232908818706, headset log 2026-10-18, just after an
+    // AndroidThunkJava_ForceQuit from the same failure path). Only a build
+    // with that plugin exports the native, so the others are not told it is
+    // missing.
+    if (ue4_native("nativeSetEOSCacheDirectories")) {
+        UE4_CALL(out, "nativeSetEOSCacheDirectories", ue4_fn_ss,
+                 kl_jni_new_string(files), kl_jni_new_string(files));
+    }
 }
 
 // ...and onResume's half, which is the one that starts the engine: the game

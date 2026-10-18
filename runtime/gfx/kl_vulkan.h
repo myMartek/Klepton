@@ -125,9 +125,16 @@ unsigned long long kl_vulkan_eye_image_layers(int stage, int eye, unsigned w, un
 // Only the eye layer is published into kl_glfb's eye table, because that table
 // is what every compositor samples. A size that differs from the cached one
 // re-allocates rather than answering with storage of the wrong shape.
+//
+// `fmt` is the storage: KLVK_LAYER_UNORM / KLVK_LAYER_SRGB (RGBA8, the old
+// 0/1 sRGB flag), or KLVK_LAYER_FP16 (RGBA16F) for a non-eye layer whose desc
+// asks for ovrpTextureFormat_R16G16B16A16_FP. The eye layer is RGBA8 always.
 #define KLVK_EYE_LAYER (-1)
+#define KLVK_LAYER_UNORM 0
+#define KLVK_LAYER_SRGB  1
+#define KLVK_LAYER_FP16  2
 unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
-                                         unsigned w, unsigned h, int srgb, int layers);
+                                         unsigned w, unsigned h, int fmt, int layers);
 
 // The two extra images an eye layer carries when the guest asked for
 // Application SpaceWarp: motion vectors (RGBA16F) and their depth. Nothing on
