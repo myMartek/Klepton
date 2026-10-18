@@ -4260,7 +4260,8 @@ static int klovrp_enq_retire(void);
 // the guest is drawing into NEXT — a torn picture with every counter healthy.
 // ---------------------------------------------------------------------------
 // A Vulkan frame filed when the GPU has finished it, not when the guest says it
-// has (KL_VK_FRAME_ASYNC on the OVRPlugin path; default on for LEGO Bricktales).
+// has (KL_VK_FRAME_ASYNC on the OVRPlugin path; default on for the titles in
+// klovrp_frame_async_title below).
 //
 // EndFrame waited for the guest's queue to go idle before filing the frame's
 // record (kl_vulkan_frame_done; why the record must not come first is written
@@ -4279,6 +4280,33 @@ static int klovrp_enq_retire(void);
 //
 // Not deferred: the overlay list (klovrp_record_overlays). It is filed when the
 // guest says so, as before, but no longer after its GPU work has finished.
+//
+// The titles it is on for, with the compositor's late wait (KL_CP_LATE_WAIT_MS
+// 4.5, kl_ovrp_late_wait_default_ms) — each measured on the headset with both
+// against neither in one session (KL_VK_FRAME_ASYNC_AB, 2026-10-18), averages
+// of the seconds shown at 100 Hz:
+//   LEGO Bricktales  96.5 -> 100.0 shown a second (first lab level)
+//   Arkham Shadow    93.5 -> 99.3 (6.5 -> 0.7 repeated); the worker alone 95.0
+//   Moss             94.2 -> 99.9 at every refresh (KL_GUEST_PACE_DIV=1); the
+//                    worker alone 97.3. At its default, every second refresh,
+//                    neither does anything (60 of 60, both ways).
+// Not Demeo: the worker alone 93.0 against 92.3, and the late wait made it
+// worse (86.5, twice the repeats) — its frames were nearly always in flight and
+// mostly missed the wait anyway. Nothing changes at 50 Hz, where visionOS puts
+// these games of its own accord after a minute or two. Not for a guest with
+// two stages (AC Nexus): the worker lets it draw into the one being shown.
+static int klovrp_frame_async_title(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (!t) return 0;               // asked before the guest is chosen: not yet known, not kept
+        on = !strcmp(t, "x6521909757843713") || !strcmp(t, "batman") || !strcmp(t, "moss");
+    }
+    return on;
+}
+double kl_ovrp_late_wait_default_ms(void) { return klovrp_frame_async_title() ? 4.5 : 0; }
+
 static struct {
     pthread_mutex_t     mu;
     pthread_cond_t      cv;
@@ -4360,9 +4388,7 @@ static int klovrp_defer_begin(void) {
     static double ab_s, ab_t0;
     static int ab_phase = -1, ab_modes = 2;
     if (on < 0) {
-        extern const char *kl_driver_target_name(void);
-        const char *t = kl_driver_target_name();
-        on = kl_env_on("KL_VK_FRAME_ASYNC", t && !strcmp(t, "x6521909757843713"));
+        on = kl_env_on("KL_VK_FRAME_ASYNC", klovrp_frame_async_title());
         ab_s = kl_env_float("KL_VK_FRAME_ASYNC_AB", 0.0f);
         if (!(ab_s >= 2.0)) ab_s = 0;
         ab_modes = kl_env_int("KL_VK_FRAME_ASYNC_AB_MODES", 2) == 3 ? 3 : 2;
