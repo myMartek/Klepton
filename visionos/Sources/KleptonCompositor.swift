@@ -811,6 +811,30 @@ final class KleptonCompositor {
         return recenterXform * held
     }
 
+    // The tracker's own state of the head anchor, once a second: how many
+    // frames were tracked, orientation-only, untracked or missing, and where
+    // ARKit put the head. A position that stands still while the player
+    // walks is either the game or this — orientation-only keeps answering
+    // with a transform whose translation no longer moves (Angry Birds VR,
+    // 2026-10-18: the island followed the player).
+    private var anchorStates = (tracked: 0, orientation: 0, untracked: 0, missing: 0)
+    private func traceAnchorState(_ a: DeviceAnchor?) {
+        if let a {
+            switch a.trackingState {
+            case .tracked: anchorStates.tracked += 1
+            case .orientationTracked: anchorStates.orientation += 1
+            default: anchorStates.untracked += 1
+            }
+        } else { anchorStates.missing += 1 }
+        let n = anchorStates.tracked + anchorStates.orientation + anchorStates.untracked + anchorStates.missing
+        guard n >= 100 else { return }
+        let t = a?.originFromAnchorTransform.columns.3 ?? .zero
+        NSLog("[cp] head anchor: tracked %d, orientation only %d, untracked %d, none %d; ARKit head at (%.2f, %.2f, %.2f)",
+              anchorStates.tracked, anchorStates.orientation, anchorStates.untracked, anchorStates.missing,
+              t.x, t.y, t.z)
+        anchorStates = (0, 0, 0, 0)
+    }
+
     /// Sample every pose for this frame and push it across the seam.
     ///
     /// Called once per frame, *before* kl_app_frame(), so the guest renders
@@ -822,7 +846,9 @@ final class KleptonCompositor {
         // Predicted to the presentation time, not "now": the pose the guest
         // renders with should be the pose the display will show it at, which is
         // the whole point of having a deadline to render against.
-        let controllerHeadAnchor = Self.usable(worldTracking.queryDeviceAnchor(atTimestamp: presentationTime))
+        let rawHeadAnchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime)
+        traceAnchorState(rawHeadAnchor)
+        let controllerHeadAnchor = Self.usable(rawHeadAnchor)
         if let anchor = controllerHeadAnchor {
             // This is the pose the guest will render with, and kl_ovrp latches
             // it into the stage record when the guest reaches ovrp_BeginFrame —
