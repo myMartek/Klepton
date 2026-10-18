@@ -5920,6 +5920,9 @@ static uint64_t klovrp_WaitToBeginFrame(long frame_index) {
         fprintf(stderr, "  [ovrp] frameloop WaitToBeginFrame #%u frameIdx=%ld tid=%llu\n",
                 n, frame_index, (unsigned long long)tid);
       } n++; }
+    // The game thread, once a frame: per-title adjustments to the running
+    // engine (kl_ue4.c, KL_MOH_HOVER).
+    { extern void kl_ue4_frame_tick(void); kl_ue4_frame_tick(); }
     if (g_frame_pacer) {
         g_frame_pacer();
 // Here rather than at BeginFrame, and for the reason kl_ovrp_frame_latch

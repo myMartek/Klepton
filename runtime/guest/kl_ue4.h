@@ -81,4 +81,8 @@ void kl_ue4_stop(FILE *out);
 // Everything this target's subsystems have to say, in one place.
 void kl_ue4_report(FILE *out);
 
+// Once per guest frame, on the game thread (ovrp_WaitToBeginFrame): the per-title
+// adjustments that act on the running engine's objects (KL_MOH_HOVER).
+void kl_ue4_frame_tick(void);
+
 #endif

@@ -1216,3 +1216,117 @@ void kl_ue4_report(FILE *out) {
     kl_jni_report(out);
     fflush(out);
 }
+
+// --- Medal of Honor: the desk's book and receivers answer a nearby hand ------
+//
+// The game's menu book and telephone receivers in Whitehall are BP_GrabButton
+// actors whose hover reaction is switched off in this build's own data: the
+// class default has TurnHoverAnimsOff = true and UseLabel = false (nothing in
+// the game sets UseLabel, and BFL_Global.SetHighlightForGrabObject only calls
+// HighlightOn behind it), and the level gives them no OnHoverTransform, so the
+// construction script copies their resting place into it. Only the hand opens
+// to say "you can grab this", which players do not read as the main menu.
+//
+// KL_MOH_HOVER (default on for this title): every 30 guest frames, on the game
+// thread, for every BP_GrabButton of the level 001_DesignLevel: UseLabel = 1,
+// TurnHoverAnimsOff = 0 (the game sets it again while its menu is open, and
+// back only when the player leaves the desk area), and — once, while it still
+// equals the resting place — OnHoverTransform = the resting place raised by
+// KL_MOH_HOVER_CM (default 4) cm. The game's own HighlightOn/HighlightOff then
+// play its ButtonLerp timeline there and back. Objects are found through the
+// guest's exported GUObjectArray, matched by FName index (memory reads, no
+// strings) against the UE 4.25 layout: FUObjectItem 24 bytes, 64K a chunk;
+// UObjectBase flags +0x8, index +0xC, class +0x10, name +0x18, outer +0x20;
+// UStruct super +0x40, ChildProperties +0x50; FField next +0x20, name +0x28;
+// FProperty offset +0x4C.
+#include <mach/mach.h>
+typedef struct { uint16_t *data; int32_t num, max; } klmoh_fstring;
+// A read that answers 0 instead of faulting, for a pointer not yet known good.
+static int klmoh_peek(const void *addr, void *out, size_t n) {
+    vm_size_t got = 0;
+    if ((uintptr_t)addr < 0x100000000ull) return 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)(uintptr_t)addr, n,
+                             (vm_address_t)(uintptr_t)out, &got) == KERN_SUCCESS && got == n;
+}
+// An FName (at `fname`) as ASCII, through the guest's own FName::ToString.
+static void klmoh_name(const void *fname, char *buf, size_t cap) {
+    static void (*tostring)(const void *, klmoh_fstring *);
+    static void (*mfree)(void *);
+    if (!tostring) tostring = kl_guest_sym_global("_ZNK5FName8ToStringER7FString");
+    if (!mfree) mfree = kl_guest_sym_global("_ZN7FMemory4FreeEPv");
+    buf[0] = 0;
+    if (!tostring) return;
+    klmoh_fstring s = {0};
+    tostring(fname, &s);
+    size_t n = 0;
+    for (int32_t i = 0; s.data && i < s.num && s.data[i] && n + 1 < cap; i++)
+        buf[n++] = s.data[i] < 128 ? (char)s.data[i] : '?';
+    buf[n] = 0;
+    if (s.data && mfree) mfree(s.data);   // the guest allocated it; give it back
+}
+static void klmoh_hover(void) {
+    static int on = -1;
+    static unsigned tick;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_MOH_HOVER", t && strcmp(t, "x3647259232032222") == 0);
+    }
+    if (!on || tick++ % 30) return;
+    static uint8_t *arr; static void (*mkname)(uint64_t *, const char *, int);
+    static uint64_t n_cls, n_lvl; static const uint8_t *cls; static float lift;
+    static int32_t off_label = -1, off_anims = -1, off_hover = -1, off_unhover = -1;
+    if (!arr) {
+        arr = kl_guest_sym_global("GUObjectArray");
+        mkname = kl_guest_sym_global("_ZN5FNameC1EPKc9EFindName");
+        if (!arr || !mkname) { on = 0; return; }
+        lift = kl_env_float("KL_MOH_HOVER_CM", 4.0f);
+    }
+    // FNAME_Find: NAME_None until the shell's packages are loaded.
+    if (!n_cls) { mkname(&n_cls, "BP_GrabButton_C", 0); mkname(&n_lvl, "001_DesignLevel", 0); }
+    if (!n_cls || !n_lvl) { n_cls = 0; return; }
+    uint8_t **chunks = *(uint8_t ***)(arr + 16);
+    int32_t num = *(int32_t *)(arr + 16 + 20);
+    for (int32_t i = 0; i < num; i++) {
+        uint8_t *chunk = chunks[i / 65536];
+        if (!chunk) continue;
+        uint8_t *o = *(uint8_t **)(chunk + (size_t)(i % 65536) * 24);
+        if (!o) continue;
+        const uint8_t *c = *(const uint8_t **)(o + 0x10);
+        if (!c || (cls && c != cls)) continue;
+        if (!cls) {
+            uint64_t cn;
+            if (!klmoh_peek(c + 0x18, &cn, 8) || cn != n_cls) continue;
+            cls = c;
+            for (const uint8_t *st = cls; st; st = *(const uint8_t **)(st + 0x40))
+                for (const uint8_t *f = *(const uint8_t **)(st + 0x50); f; f = *(const uint8_t **)(f + 0x20)) {
+                    char nm[64]; klmoh_name(f + 0x28, nm, sizeof nm);
+                    int32_t off = *(const int32_t *)(f + 0x4C);
+                    if (!strcmp(nm, "UseLabel")) off_label = off;
+                    else if (!strcmp(nm, "TurnHoverAnimsOff")) off_anims = off;
+                    else if (!strcmp(nm, "OnHoverTransform")) off_hover = off;
+                    else if (!strcmp(nm, "OnUnHoverTransform")) off_unhover = off;
+                }
+            fprintf(stderr, "  [ue4] KL_MOH_HOVER: BP_GrabButton found; UseLabel @0x%x TurnHoverAnimsOff @0x%x "
+                            "OnHoverTransform @0x%x OnUnHoverTransform @0x%x, lift %.1f cm\n",
+                    off_label, off_anims, off_hover, off_unhover, (double)lift);
+            if (off_label < 0 || off_anims < 0 || off_hover < 0 || off_unhover < 0) { on = 0; return; }
+        }
+        if (*(int32_t *)(o + 0xC) != i) continue;
+        if (*(const int32_t *)(o + 8) & 0x10) continue;          // RF_ClassDefaultObject
+        // only the desk in Whitehall: actor -> PersistentLevel -> world "001_DesignLevel"
+        const uint8_t *lvl = *(const uint8_t **)(o + 0x20);
+        const uint8_t *world = lvl ? *(const uint8_t **)(lvl + 0x20) : NULL;
+        uint64_t wn = 0;
+        if (!world || !klmoh_peek(world + 0x18, &wn, 8) || wn != n_lvl) continue;
+        o[off_label] = 1;
+        o[off_anims] = 0;
+        float *hov = (float *)(o + off_hover), *un = (float *)(o + off_unhover);
+        if (lift > 0 && !memcmp(hov, un, 48)) {                  // FTransform: quat, translation at +16
+            hov[6] = un[6] + lift;
+            char nm[96]; klmoh_name(o + 0x18, nm, sizeof nm);
+            fprintf(stderr, "  [ue4] KL_MOH_HOVER: %s lifts %.1f cm on hover\n", nm, (double)lift);
+        }
+    }
+}
+
+void kl_ue4_frame_tick(void) { klmoh_hover(); }

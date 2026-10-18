@@ -1950,6 +1950,13 @@ puts the camera on the ground with its hands underneath it.
   `moh-exit-no-rhi-teardown` lets `FEngineLoop::Exit` through. The bounded quit
   that came with the surface around it (`KL_UE4_QUIT_LIMIT`,
   `KL_UE4_QUIT_TRACE`) is not taken.
+- `KL_MOH_HOVER=0|1` — Medal of Honor: Above and Beyond: the menu book and the
+  telephone receivers on the Whitehall desk lift when a hand comes near. The
+  game's data has that reaction off (`TurnHoverAnimsOff` true, `UseLabel`
+  false, no hover transform); this sets the first two and gives the hover
+  transform `KL_MOH_HOVER_CM` (default 4) cm above the resting place, every 30
+  guest frames, through the engine's own object table. Default 1 for
+  `x3647259232032222`, else 0.
 - `KL_UE4_WAIT=<seconds>` — the pump budget for a NativeActivity guest, default
   5. There is no frame count on this door: the guest owns its own game thread
   and its own frame loop, so seconds are the only unit. **RE4 needs 300** — its
