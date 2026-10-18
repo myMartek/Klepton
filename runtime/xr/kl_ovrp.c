@@ -30,6 +30,7 @@
 #include "kl_egl.h"
 #include "kl_vulkan.h"
 #include "kl_openxr.h"
+#include "kl_metrics.h"
 
 #define KL_OVRP_MAX 512
 static struct { const char *name; unsigned calls; } g_ovrp[KL_OVRP_MAX];
@@ -4259,7 +4260,8 @@ static int klovrp_enq_retire(void);
 // the guest is drawing into NEXT — a torn picture with every counter healthy.
 // ---------------------------------------------------------------------------
 // A Vulkan frame filed when the GPU has finished it, not when the guest says it
-// has (KL_VK_FRAME_ASYNC on the OVRPlugin path; default on for LEGO Bricktales).
+// has (KL_VK_FRAME_ASYNC on the OVRPlugin path; default on for the titles in
+// klovrp_frame_async_title below).
 //
 // EndFrame waited for the guest's queue to go idle before filing the frame's
 // record (kl_vulkan_frame_done; why the record must not come first is written
@@ -4278,6 +4280,33 @@ static int klovrp_enq_retire(void);
 //
 // Not deferred: the overlay list (klovrp_record_overlays). It is filed when the
 // guest says so, as before, but no longer after its GPU work has finished.
+//
+// The titles it is on for, with the compositor's late wait (KL_CP_LATE_WAIT_MS
+// 4.5, kl_ovrp_late_wait_default_ms) — each measured on the headset with both
+// against neither in one session (KL_VK_FRAME_ASYNC_AB, 2026-10-18), averages
+// of the seconds shown at 100 Hz:
+//   LEGO Bricktales  96.5 -> 100.0 shown a second (first lab level)
+//   Arkham Shadow    93.5 -> 99.3 (6.5 -> 0.7 repeated); the worker alone 95.0
+//   Moss             94.2 -> 99.9 at every refresh (KL_GUEST_PACE_DIV=1); the
+//                    worker alone 97.3. At its default, every second refresh,
+//                    neither does anything (60 of 60, both ways).
+// Not Demeo: the worker alone 93.0 against 92.3, and the late wait made it
+// worse (86.5, twice the repeats) — its frames were nearly always in flight and
+// mostly missed the wait anyway. Nothing changes at 50 Hz, where visionOS puts
+// these games of its own accord after a minute or two. Not for a guest with
+// two stages (AC Nexus): the worker lets it draw into the one being shown.
+static int klovrp_frame_async_title(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (!t) return 0;               // asked before the guest is chosen: not yet known, not kept
+        on = !strcmp(t, "x6521909757843713") || !strcmp(t, "batman") || !strcmp(t, "moss");
+    }
+    return on;
+}
+double kl_ovrp_late_wait_default_ms(void) { return klovrp_frame_async_title() ? 4.5 : 0; }
+
 static struct {
     pthread_mutex_t     mu;
     pthread_cond_t      cv;
@@ -4322,11 +4351,13 @@ static void *klovrp_defer_thread(void *unused) {
     return NULL;
 }
 
+static int g_ab_nolate;                 // KL_VK_FRAME_ASYNC_AB_MODES: 1 = no late wait now
+
 // The compositor, just before it takes the newest finished stage: if a frame
 // is on its way through the worker, wait for it, but no longer than max_ms.
 // 1 = it was filed in that time, 0 = none was in flight, -1 = gave up.
 int kl_ovrp_wait_inflight(double max_ms) {
-    if (!(max_ms > 0)) return 0;
+    if (!(max_ms > 0) || g_ab_nolate) return 0;
     pthread_mutex_lock(&g_ovdefer.mu);
     if (!g_ovdefer.busy) { pthread_mutex_unlock(&g_ovdefer.mu); return 0; }
     struct timespec ts;
@@ -4343,19 +4374,49 @@ int kl_ovrp_wait_inflight(double max_ms) {
 
 // Guest thread, at EndFrame of a Vulkan guest: 1 when this frame is to be
 // filed by the worker. Waits for the frame before it first.
+//
+// KL_VK_FRAME_ASYNC_AB=<s> — an A/B in one session: the worker is used in
+// every second span of <s> seconds, counted from the first frame and starting
+// with the title's default, and every metrics sample (KL_STATS_CARD) goes to
+// the log tagged with the side it was taken on. A frame in flight is waited
+// for before a switch, so the two ways never overlap.
+// KL_VK_FRAME_ASYNC_AB_MODES=3 — three spans in turn instead: worker off,
+// worker on without the compositor's late wait (KL_CP_LATE_WAIT_MS), worker on
+// with it; tagged async=off, async=on, async=late.
 static int klovrp_defer_begin(void) {
     static int on = -1;
+    static double ab_s, ab_t0;
+    static int ab_phase = -1, ab_modes = 2;
     if (on < 0) {
-        extern const char *kl_driver_target_name(void);
-        const char *t = kl_driver_target_name();
-        on = kl_env_on("KL_VK_FRAME_ASYNC", t && !strcmp(t, "x6521909757843713"));
-        if (on) fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC: frames are filed by a worker "
-                                "when the GPU has finished them; EndFrame no longer waits\n");
+        on = kl_env_on("KL_VK_FRAME_ASYNC", klovrp_frame_async_title());
+        ab_s = kl_env_float("KL_VK_FRAME_ASYNC_AB", 0.0f);
+        if (!(ab_s >= 2.0)) ab_s = 0;
+        ab_modes = kl_env_int("KL_VK_FRAME_ASYNC_AB_MODES", 2) == 3 ? 3 : 2;
+        if (ab_s > 0)
+            fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC_AB: the frame worker is %s first and "
+                            "switches every %.0f s%s\n", on ? "on" : "off", ab_s,
+                    ab_modes == 3 ? " (off, on, on with the late wait)" : "");
+        else if (on) fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC: frames are filed by a worker "
+                                     "when the GPU has finished them; EndFrame no longer waits\n");
     }
-    if (!on) return 0;
+    int use = on;
+    if (ab_s > 0) {
+        double now = (double)klovrp_mono_ns() / 1e9;
+        if (ab_t0 == 0) ab_t0 = now;
+        int phase = (int)((now - ab_t0) / ab_s) % ab_modes;
+        use = ab_modes == 3 ? phase > 0 : phase ? !on : on;
+        if (phase != ab_phase) {
+            ab_phase = phase;
+            int late = ab_modes == 3 && phase == 2;
+            g_ab_nolate = ab_modes == 3 && !late;
+            kl_metrics_set_tag(late ? "async=late" : use ? "async=on" : "async=off");
+            fprintf(stderr, "  [ovrp] A/B: frame worker %s\n", late ? "ON + late wait" : use ? "ON" : "OFF");
+        }
+    }
     pthread_mutex_lock(&g_ovdefer.mu);
     while (g_ovdefer.busy) pthread_cond_wait(&g_ovdefer.cv, &g_ovdefer.mu);
     pthread_mutex_unlock(&g_ovdefer.mu);
+    if (!use) return 0;
     if (!kl_vulkan_frame_mark()) return 0;
     g_ovdefer.have_rec = 0;
     g_ovdefer.capturing = 1;

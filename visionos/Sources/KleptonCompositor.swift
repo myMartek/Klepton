@@ -2020,10 +2020,12 @@ final class KleptonCompositor {
     /// budget. LEGO Bricktales (2026-10-18): the game started 100 frames a
     /// second and 91-98 were shown — the rest finished a few milliseconds after
     /// this pass had taken the one before. Only frames that go through the
-    /// KL_VK_FRAME_ASYNC worker can be waited for. Default 4.5 for LEGO (its
-    /// pass needs about 3 ms of GPU).
+    /// KL_VK_FRAME_ASYNC worker can be waited for. Default 4.5 for the titles
+    /// that have the worker on by default (LEGO, Arkham Shadow, Moss — the
+    /// measurements are at klovrp_frame_async_title in kl_ovrp.c); LEGO's pass
+    /// needs about 3 ms of GPU.
     private static let lateWaitBudgetMs: Double = Double(klEnvFloat(
-        "KL_CP_LATE_WAIT_MS", klTargetName() == "x6521909757843713" ? 4.5 : 0))
+        "KL_CP_LATE_WAIT_MS", Float(kl_ovrp_late_wait_default_ms())))
     private var lateWait = (n: 0, filed: 0, gaveUp: 0, none: 0, waitedMs: 0.0, slackMs: 0.0)
     private func waitForInflightFrame(_ drawable: LayerRenderer.Drawable) {
         let budget = Self.lateWaitBudgetMs
