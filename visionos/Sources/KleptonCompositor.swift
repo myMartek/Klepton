@@ -2014,6 +2014,46 @@ final class KleptonCompositor {
         return out + (bad ? "  <-- the guest and the composite are on DIFFERENT textures" : "")
     }
 
+    /// KL_CP_LATE_WAIT_MS (budget for this composite, in ms; 0 = off): a frame
+    /// of the game that is still on the GPU when this pass takes the newest
+    /// finished one is waited for, until the rendering deadline less that
+    /// budget. LEGO Bricktales (2026-10-18): the game started 100 frames a
+    /// second and 91-98 were shown — the rest finished a few milliseconds after
+    /// this pass had taken the one before. Only frames that go through the
+    /// KL_VK_FRAME_ASYNC worker can be waited for. Default 4.5 for LEGO (its
+    /// pass needs about 3 ms of GPU).
+    private static let lateWaitBudgetMs: Double = Double(klEnvFloat(
+        "KL_CP_LATE_WAIT_MS", klTargetName() == "x6521909757843713" ? 4.5 : 0))
+    private var lateWait = (n: 0, filed: 0, gaveUp: 0, none: 0, waitedMs: 0.0, slackMs: 0.0)
+    private func waitForInflightFrame(_ drawable: LayerRenderer.Drawable) {
+        let budget = Self.lateWaitBudgetMs
+        guard budget > 0 else { return }
+        let clock = LayerRenderer.Clock()
+        let now = LayerRenderer.Clock.Instant.epoch.duration(to: clock.now).timeInterval
+        let deadline = LayerRenderer.Clock.Instant.epoch
+            .duration(to: drawable.frameTiming.renderingDeadline).timeInterval
+        let slackMs = (deadline - now) * 1000 - budget
+        lateWait.n += 1
+        lateWait.slackMs += slackMs
+        if slackMs > 0.2 {
+            let r = kl_ovrp_wait_inflight(slackMs)
+            if r == 0 { lateWait.none += 1 }
+            else {
+                if r > 0 { lateWait.filed += 1 } else { lateWait.gaveUp += 1 }
+                let after = LayerRenderer.Clock.Instant.epoch.duration(to: clock.now).timeInterval
+                lateWait.waitedMs += (after - now) * 1000
+            }
+        }
+        if lateWait.n >= 1000 {
+            let w = lateWait
+            NSLog(String(format: "[cp] late wait over %d frames (budget %.1f ms): slack %.1f ms mean; "
+                         + "a frame in flight %d times — filed in time %d, gave up %d, %.2f ms waited mean",
+                         w.n, budget, w.slackMs / Double(w.n), w.filed + w.gaveUp, w.filed, w.gaveUp,
+                         w.filed + w.gaveUp > 0 ? w.waitedMs / Double(w.filed + w.gaveUp) : 0))
+            lateWait = (0, 0, 0, 0, 0, 0)
+        }
+    }
+
     private func renderFrame() -> Int {
         guard let frame = layerRenderer.queryNextFrame() else { bailNoFrame += 1; return 0 }
         frame.startUpdate()
@@ -2111,6 +2151,7 @@ final class KleptonCompositor {
         // presented, so the submission can be opened.
         frame.startSubmission()
         let main = drawables[0]
+        waitForInflightFrame(main)
 
         // Which stage holds a *finished* picture. -1 means the guest has not
         // completed a frame yet (ovrp_EndFrame never seen) — there is nothing

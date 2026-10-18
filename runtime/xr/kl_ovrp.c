@@ -13,6 +13,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <time.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <mach/mach.h>   // vm_read_overwrite — probe a guest pointer without faulting
 #include "klepton.h"
@@ -4319,6 +4320,25 @@ static void *klovrp_defer_thread(void *unused) {
         pthread_mutex_unlock(&g_ovdefer.mu);
     }
     return NULL;
+}
+
+// The compositor, just before it takes the newest finished stage: if a frame
+// is on its way through the worker, wait for it, but no longer than max_ms.
+// 1 = it was filed in that time, 0 = none was in flight, -1 = gave up.
+int kl_ovrp_wait_inflight(double max_ms) {
+    if (!(max_ms > 0)) return 0;
+    pthread_mutex_lock(&g_ovdefer.mu);
+    if (!g_ovdefer.busy) { pthread_mutex_unlock(&g_ovdefer.mu); return 0; }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    long ns = ts.tv_nsec + (long)(max_ms * 1e6);
+    ts.tv_sec += ns / 1000000000L;
+    ts.tv_nsec = ns % 1000000000L;
+    while (g_ovdefer.busy)
+        if (pthread_cond_timedwait(&g_ovdefer.cv, &g_ovdefer.mu, &ts) == ETIMEDOUT) break;
+    int r = g_ovdefer.busy ? -1 : 1;
+    pthread_mutex_unlock(&g_ovdefer.mu);
+    return r;
 }
 
 // Guest thread, at EndFrame of a Vulkan guest: 1 when this frame is to be
