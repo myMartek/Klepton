@@ -1095,12 +1095,39 @@ static uint64_t klovrp_GetSystemMultiViewSupported(void) {
     return (uint64_t)kl_ovrp_multiview();
 }
 
+// KL_OVRP_BOUNDARY=1|<w>,<h>,<d>: tell the guest a Guardian is set up, as on
+// every Quest (a Quest cannot be used without one): configured, the given play
+// area size in metres (default 2.0 x 2.5 x 2.0), and a rectangle of that size
+// on the floor round the tracking origin as its geometry. Off, the answers say
+// "no boundary" with zero dimensions, which no Quest ever reports. Angry Birds
+// VR: Isle of Pigs fits its levels to the play area (levelScale,
+// initialPhysicalLevelScaleUp; it calls ovrp_GetBoundaryDimensions) and its
+// island did not stand in the room (2026-10-18). Default 1 for that target.
+static int klovrp_boundary(float dims[3]) {
+    static int v = -1;
+    static float d[3] = { 2.0f, 2.5f, 2.0f };
+    if (v < 0) {
+        const char *t = kl_driver_target_name();
+        const char *e = getenv("KL_OVRP_BOUNDARY");
+        float w, h, z;
+        if (e && sscanf(e, "%f,%f,%f", &w, &h, &z) == 3 && w > 0 && z > 0) {
+            d[0] = w; d[1] = h; d[2] = z; v = 1;
+        } else {
+            v = kl_env_on("KL_OVRP_BOUNDARY", t && !strcmp(t, "x2718606324833775"));
+        }
+        if (v) fprintf(stderr, "  [ovrp] Guardian: reported as set up, play area %.2f x %.2f x %.2f m "
+                               "(KL_OVRP_BOUNDARY)\n", d[0], d[1], d[2]);
+    }
+    if (v && dims) { dims[0] = d[0]; dims[1] = d[1]; dims[2] = d[2]; }
+    return v;
+}
+
 // Guardian boundary: there is no boundary system on this host, so the
 // configured flag is false — same stance as the Geometry2/Visible forms. Real
 // plugin is ovrpResult + int* out (0x171170).
 static uint64_t klovrp_GetBoundaryConfigured2(int *out) {
     ovrp_hit("ovrp_GetBoundaryConfigured2");
-    if (out) *out = 0;
+    if (out) *out = klovrp_boundary(NULL);
     return OVRP_SUCCESS;
 }
 
@@ -5972,6 +5999,12 @@ int kl_ovrp_pose_boundary_selftest(FILE *f, int which) {
 typedef struct { float x, y, z; } klovrp_vec3;
 static klovrp_vec3 klovrp_GetBoundaryDimensions(void) {
     ovrp_hit("ovrp_GetBoundaryDimensions");
+    float d[3];
+    if (klovrp_boundary(d)) {
+        static int said;
+        if (!said++) fprintf(stderr, "  [ovrp] ovrp_GetBoundaryDimensions asked (KL_OVRP_BOUNDARY)\n");
+        return (klovrp_vec3){d[0], d[1], d[2]};
+    }
     return (klovrp_vec3){0, 0, 0};
 }
 
@@ -11653,10 +11686,47 @@ static uint64_t klovrp_GetHeadPoseModifier(float *rot, float *pos) {
 // Real 0x171a60 / 0x171b00, out-pointer in x1 / x0.
 static uint64_t klovrp_GetBoundaryDimensions2(int type, float *out) {
     ovrp_hit("ovrp_GetBoundaryDimensions2");
-    (void)type;
     if (!out) return OVRP_FAIL_INVALID_PARAM;
     out[0] = out[1] = out[2] = 0.0f;
+    if (klovrp_boundary(out)) {
+        static int said;
+        if (!said++) fprintf(stderr, "  [ovrp] ovrp_GetBoundaryDimensions2(type 0x%x) asked (KL_OVRP_BOUNDARY)\n", type);
+    }
     return OVRP_SUCCESS;
+}
+
+// Under KL_OVRP_BOUNDARY only (kl_ovrp_gated_out): the v1 configured flag and
+// the geometry, a rectangle of the play area on the floor round the origin.
+// Geometry2/3 share one shape — (type, ovrpVector3f *points, int *count) — and
+// are called twice, first with no buffer for the count. 2 returns ovrpBool, 3
+// ovrpResult.
+static uint64_t klovrp_GetBoundaryConfigured(void) {
+    ovrp_hit("ovrp_GetBoundaryConfigured");
+    return (uint64_t)klovrp_boundary(NULL);
+}
+static int klovrp_boundary_rect(int type, float *pts, int *count, const char *name) {
+    float d[3];
+    if (!count || !klovrp_boundary(d)) return 0;
+    static int said;
+    if (!said++) fprintf(stderr, "  [ovrp] %s(type 0x%x) asked (KL_OVRP_BOUNDARY)\n", name, type);
+    float hx = d[0] * 0.5f, hz = d[2] * 0.5f, y = -klovrp_origin_y();
+    const float r[4][3] = { { -hx, y, -hz }, { hx, y, -hz }, { hx, y, hz }, { -hx, y, hz } };
+    if (pts) {
+        int n = *count < 4 ? *count : 4;
+        for (int i = 0; i < n; i++) { pts[3*i] = r[i][0]; pts[3*i+1] = r[i][1]; pts[3*i+2] = r[i][2]; }
+    }
+    *count = 4;
+    return 1;
+}
+static uint64_t klovrp_GetBoundaryGeometry2(int type, float *pts, int *count) {
+    ovrp_hit("ovrp_GetBoundaryGeometry2");
+    return (uint64_t)klovrp_boundary_rect(type, pts, count, "ovrp_GetBoundaryGeometry2");
+}
+static uint64_t klovrp_GetBoundaryGeometry3(int type, float *pts, int *count) {
+    ovrp_hit("ovrp_GetBoundaryGeometry3");
+    if (!count) return OVRP_FAIL_INVALID_PARAM;
+    return klovrp_boundary_rect(type, pts, count, "ovrp_GetBoundaryGeometry3")
+           ? OVRP_SUCCESS : (uint64_t)(int64_t)OVRP_FAIL_OPERATION;
 }
 
 static uint64_t klovrp_GetBoundaryVisible2(int *out) {
@@ -11691,6 +11761,9 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetBodyTrackingCalibrationStatus", (void *)klovrp_body_unsupported},
     {"ovrp_GetBodyTrackingFidelityStatus", (void *)klovrp_body_unsupported},
     {"ovrp_GetBoundaryDimensions2", (void *)klovrp_GetBoundaryDimensions2},
+    {"ovrp_GetBoundaryConfigured", (void *)klovrp_GetBoundaryConfigured},
+    {"ovrp_GetBoundaryGeometry2", (void *)klovrp_GetBoundaryGeometry2},
+    {"ovrp_GetBoundaryGeometry3", (void *)klovrp_GetBoundaryGeometry3},
     {"ovrp_GetBoundaryVisible2", (void *)klovrp_GetBoundaryVisible2},
     {"ovrp_GetConnectedControllers2", (void *)klovrp_GetConnectedControllers2},
     {"ovrp_GetConnectedControllers", (void *)klovrp_GetConnectedControllers},
@@ -12540,7 +12613,13 @@ static const char *const g_ovrp_absent[] = {
 // other target resolves these names as before: the named stub, which aborts
 // with the name (or says UNSUPPORTED under KL_OVRP_UNANSWERED).
 //   ovrp_GetTrackingCalibratedOrigin — Onward (x2677344882310094), fix 50
+//   ovrp_GetBoundaryConfigured/Geometry2/Geometry3 — KL_OVRP_BOUNDARY
 static int kl_ovrp_gated_out(const char *name) {
+    // The Guardian under KL_OVRP_BOUNDARY: off, these keep their old answers
+    // from the name lists below ("no boundary").
+    if (!strcmp(name, "ovrp_GetBoundaryConfigured") || !strcmp(name, "ovrp_GetBoundaryGeometry2") ||
+        !strcmp(name, "ovrp_GetBoundaryGeometry3"))
+        return !klovrp_boundary(NULL);
     if (strcmp(name, "ovrp_GetTrackingCalibratedOrigin") == 0) {
         const char *t = kl_driver_target_name();
         return !t || strcmp(t, "x2677344882310094") != 0;

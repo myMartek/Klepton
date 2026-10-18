@@ -2114,6 +2114,12 @@ puts the camera on the ground with its hands underneath it.
   answers how often the host has recentered (the compositor's recenter, after
   it has moved the head and the controllers) instead of 0. Default 1 for
   `x9531494193591052`, else 0.
+- `KL_OVRP_BOUNDARY=0|1|<w>,<h>,<d>` — report a Guardian as set up, as on
+  every Quest: configured, a play area of the given size in metres (default
+  2.0 x 2.5 x 2.0), and a floor rectangle of that size round the tracking
+  origin as its geometry. Off, the boundary answers say "none, size 0".
+  Angry Birds VR: Isle of Pigs fits its levels to the play area. Default 1 for
+  `x2718606324833775`, else 0.
 - `KL_OVRP_NO_TRACKERS=0|1` — answer the tracker nodes 5..8 (the Rift's
   external sensors) as a Quest does: not present, not tracked, identity at the
   origin. Off, they report the head pose like every unmapped node. Angry Birds

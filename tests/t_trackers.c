@@ -1,6 +1,7 @@
 // KL_OVRP_NO_TRACKERS (Angry Birds VR: Isle of Pigs): the four tracker nodes
 // answer as on a Quest — not present, not tracked, identity at the origin —
-// while the head and eyes keep the head pose. Milliseconds; in `make check`.
+// while the head and eyes keep the head pose; and KL_OVRP_BOUNDARY, a Guardian
+// set up as on every Quest. Milliseconds; in `make check`.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@ typedef uint64_t (*pose3_fn)(int, int, int, void *);
 
 int main(void) {
     setenv("KL_OVRP_NO_TRACKERS", "1", 1);
+    setenv("KL_OVRP_BOUNDARY", "3,2.5,2", 1);
     printf("=== tracker nodes under KL_OVRP_NO_TRACKERS ===\n");
     pred_fn present = (pred_fn)kl_ovrp_sym("ovrp_GetNodePresent2");
     pred_fn ptracked = (pred_fn)kl_ovrp_sym("ovrp_GetNodePositionTracked2");
@@ -36,6 +38,25 @@ int main(void) {
             printf("FAIL head: x=%.3f z=%.3f, want 0.7 / -0.4\n", f[4], f[6]); bad++;
         }
     }
-    printf("%s\n", bad ? "FAIL tracker nodes" : "PASS: trackers absent at the origin, the head keeps its position");
+    typedef uint64_t (*dim2_fn)(int, float *);
+    typedef uint64_t (*geo3_fn)(int, float *, int *);
+    typedef uint64_t (*cfg_fn)(void);
+    typedef uint64_t (*out_fn)(int *);
+    out_fn cfg2 = (out_fn)kl_ovrp_sym("ovrp_GetBoundaryConfigured2");
+    cfg_fn cfg1 = (cfg_fn)kl_ovrp_sym("ovrp_GetBoundaryConfigured");
+    dim2_fn dim2 = (dim2_fn)kl_ovrp_sym("ovrp_GetBoundaryDimensions2");
+    geo3_fn geo3 = (geo3_fn)kl_ovrp_sym("ovrp_GetBoundaryGeometry3");
+    int c2 = -1; cfg2(&c2);
+    float d[3] = {0};
+    dim2(0x100, d);
+    int n = 0; geo3(0x100, NULL, &n);
+    float pts[12] = {0}; int cap = 4;
+    uint64_t r = geo3(0x100, pts, &cap);
+    if (c2 != 1 || cfg1() != 1) { printf("FAIL boundary: configured %d / %llu\n", c2, (unsigned long long)cfg1()); bad++; }
+    if (d[0] != 3.0f || d[1] != 2.5f || d[2] != 2.0f) { printf("FAIL boundary: dims %.2f %.2f %.2f\n", d[0], d[1], d[2]); bad++; }
+    if (n != 4 || r != 0 || cap != 4 || pts[0] != -1.5f || pts[2] != -1.0f || pts[6] != 1.5f || pts[8] != 1.0f) {
+        printf("FAIL boundary: geometry n=%d r=%llu (%.2f,%.2f) (%.2f,%.2f)\n", n, (unsigned long long)r, pts[0], pts[2], pts[6], pts[8]); bad++;
+    }
+    printf("%s\n", bad ? "FAIL tracker nodes / boundary" : "PASS: trackers absent at the origin, the head keeps its position; Guardian 3 x 2.5 x 2 m as a floor rectangle");
     return bad ? 1 : 0;
 }
