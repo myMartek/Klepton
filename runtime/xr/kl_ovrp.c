@@ -1134,6 +1134,26 @@ static uint64_t klovrp_GetEnvironmentDepthFrameDesc(int eye, int *desc) {
     if (desc) *desc = 0;    // ovrpEnvironmentDepthFrameDesc.IsValid = ovrpBool_False
     return OVRP_SUCCESS;
 }
+// KL_OVRP_NO_TRACKERS: answer the four tracker nodes (TrackerZero..Three,
+// 5..8 — the Rift's external sensors) the way a Quest does: not present, not
+// tracked, at the origin. They used to report the HEAD pose like every other
+// unmapped node, which tells a guest that a sensor rides on the user's head.
+// Angry Birds VR: Isle of Pigs reads TrackerZero first thing from its C#, and
+// its island followed the player instead of standing in the room — turning
+// changed the view, walking only changed the angle (2026-10-18). Per target
+// for now; nothing measured says another title reads these nodes.
+static int klovrp_no_trackers(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *t = kl_driver_target_name();
+        v = kl_env_on("KL_OVRP_NO_TRACKERS", t && !strcmp(t, "x2718606324833775"));
+        if (v) fprintf(stderr, "  [ovrp] tracker nodes 5..8: not present, at the origin "
+                               "(KL_OVRP_NO_TRACKERS)\n");
+    }
+    return v;
+}
+static int klovrp_is_tracker(int node) { return node >= 5 && node <= 8; }
+
 static uint64_t klovrp_GetNodePresent2(int node, int *out) {
     ovrp_hit("ovrp_GetNodePresent2");
     // node comes FIRST (real 0x16f450: w0 = ovrpNode, x1 = int* out) — the
@@ -1141,8 +1161,7 @@ static uint64_t klovrp_GetNodePresent2(int node, int *out) {
     // pointer. Any node a caller names is one we report; the value is written
     // for the callers that read it, since at least one (OculusSystem::
     // GetNodePresent, libOculusXRPlugin+0xf264) only checks the return.
-    (void)node;
-    if (out) *out = 1;
+    if (out) *out = !(klovrp_is_tracker(node) && klovrp_no_trackers());
     return OVRP_SUCCESS;
 }
 
@@ -1151,8 +1170,7 @@ static uint64_t klovrp_GetNodePresent2(int node, int *out) {
 // every node we report poses for.
 static uint64_t klovrp_GetNodeOrientationTracked2(int node, int *out) {
     ovrp_hit("ovrp_GetNodeOrientationTracked2");
-    (void)node;
-    if (out) *out = 1;
+    if (out) *out = !(klovrp_is_tracker(node) && klovrp_no_trackers());
     return OVRP_SUCCESS;
 }
 
@@ -2545,7 +2563,7 @@ static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin) 
 static uint64_t node_tracked(const char *name, int n, uint32_t *out) {
     ovrp_hit(name);
     ovrp_log_arg(name, n, __builtin_return_address(0));
-    *out = 1;
+    *out = !(klovrp_is_tracker(n) && klovrp_no_trackers());
     return OVRP_SUCCESS;
 }
 static uint64_t klovrp_GetNodePositionTracked2(int n, uint32_t *o) {
@@ -3602,8 +3620,8 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
                     * (180.0f/3.14159265358979f);
         float pitch = asinf(2.0f*(qw*qx - qy*qz)) * (180.0f/3.14159265358979f);
         fprintf(stderr, "  [ovrp] head Y=%.3f yaw=%.1f pitch=%.1f  origin=%d "
-                        "(0=eye,1=floor,2=stage) eye_height=%.3f\n",
-                py, yaw, pitch, kl_ovrp_tracking_origin(), kl_ovrp_eye_height());
+                        "(0=eye,1=floor,2=stage) eye_height=%.3f  x=%.3f z=%.3f\n",
+                py, yaw, pitch, kl_ovrp_tracking_origin(), kl_ovrp_eye_height(), px, pz);
         n++;
     } else n++; }
 }
@@ -5518,6 +5536,10 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
             }
         }
         p = &hand;
+    } else if (klovrp_is_tracker(node) && klovrp_no_trackers()) {
+        // A Quest has no tracker here: identity at the origin, not moving.
+        static const klovrp_pose none = { 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 };
+        p = &none;
     }
     float *f = out;
     f[0] = p->qx; f[1] = p->qy;      // quat xyz at +0x00
