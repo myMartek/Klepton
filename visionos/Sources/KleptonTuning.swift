@@ -1154,9 +1154,56 @@ struct MetalFXSwitch: View {
 // runtime/xr/kl_assetcfg.h) defaults to the device's language as well: it is
 // told which packs are installed, and picks one by the language it is told
 // (Deadpool VR). Without such a list the default is unchanged.
+//
+// The picker offers the device's language, English, and the languages Quest
+// games most often ship (KleptonLanguage.choices): a locale such as "fr_FR" is
+// what the guest is then told, whatever the headset is set to (KL_DEVICE_LANG
+// is replaced, KL_LOCALE_DEVICE on). An installer can say which one a game
+// starts with (KLEPTON_GAME_LANGUAGE, KLGameLanguageDefault in Info.plist: AVP
+// Play's setting for the games it installs); a choice made in the game is kept
+// in its own settings and wins over that from then on, so an update or a
+// rebuild with another default does not reset it.
 final class KleptonLanguage: ObservableObject {
     static let shared = KleptonLanguage()
-    private static let key = "klepton.gameLanguage"      // "device" | "en"
+    private static let key = "klepton.gameLanguage"      // "device" | "en" | "<lang>_<REGION>"
+
+    /// The fixed choices beside "device": the locale the guest is told and the
+    /// language's name in itself. "en" is the old English (en_US: no locale is
+    /// passed at all), kept under its old tag so a stored choice still reads.
+    struct Choice: Hashable { let tag: String; let name: String }
+    static let choices: [Choice] = [
+        Choice(tag: "en", name: "English"),
+        Choice(tag: "en_GB", name: "English (UK)"),
+        Choice(tag: "de_DE", name: "Deutsch"),
+        Choice(tag: "fr_FR", name: "Français"),
+        Choice(tag: "es_ES", name: "Español"),
+        Choice(tag: "es_MX", name: "Español (Latinoamérica)"),
+        Choice(tag: "it_IT", name: "Italiano"),
+        Choice(tag: "pt_BR", name: "Português (Brasil)"),
+        Choice(tag: "pt_PT", name: "Português (Portugal)"),
+        Choice(tag: "nl_NL", name: "Nederlands"),
+        Choice(tag: "pl_PL", name: "Polski"),
+        Choice(tag: "sv_SE", name: "Svenska"),
+        Choice(tag: "da_DK", name: "Dansk"),
+        Choice(tag: "nb_NO", name: "Norsk"),
+        Choice(tag: "fi_FI", name: "Suomi"),
+        Choice(tag: "cs_CZ", name: "Čeština"),
+        Choice(tag: "tr_TR", name: "Türkçe"),
+        Choice(tag: "ru_RU", name: "Русский"),
+        Choice(tag: "uk_UA", name: "Українська"),
+        Choice(tag: "ja_JP", name: "日本語"),
+        Choice(tag: "ko_KR", name: "한국어"),
+        Choice(tag: "zh_CN", name: "简体中文"),
+        Choice(tag: "zh_TW", name: "繁體中文"),
+    ]
+
+    /// A tag this build can act on: "device", or a locale's shape. Anything
+    /// else (a damaged setting, a value from a newer installer) is not used.
+    static func valid(_ s: String?) -> String? {
+        guard let s, !s.isEmpty else { return nil }
+        if s == "device" || s == "en" { return s }
+        return s.range(of: "^[a-z]{2,3}_[A-Z]{2}$", options: .regularExpression) != nil ? s : nil
+    }
 
     static let assetFilesListed: Bool = {
         if let env = ProcessInfo.processInfo.environment["KL_ASSET_FILES_PATH"], !env.isEmpty { return true }
@@ -1169,6 +1216,10 @@ final class KleptonLanguage: ObservableObject {
     static let targetDefault: String =
         String(cString: kl_app_target_name_or_default()) == "wrath2" || assetFilesListed ? "device" : "en"
 
+    /// What the installer asked this game to start with, if anything.
+    static let installDefault: String? =
+        valid(Bundle.main.object(forInfoDictionaryKey: "KLGameLanguageDefault") as? String)
+
     /// The device's first language in its own words ("Deutsch"), for the picker.
     static let deviceLanguageName: String = {
         guard let first = Locale.preferredLanguages.first else { return "English" }
@@ -1176,23 +1227,36 @@ final class KleptonLanguage: ObservableObject {
         let code = loc.language.languageCode?.identifier ?? "en"
         return (loc.localizedString(forLanguageCode: code) ?? code).capitalized(with: loc)
     }()
-    static let deviceIsEnglish: Bool =
-        Locale.preferredLanguages.first?.lowercased().hasPrefix("en") ?? true
 
     @Published var choice: String {
         didSet { UserDefaults.standard.set(choice, forKey: Self.key) }
     }
 
     private init() {
-        let stored = UserDefaults.standard.string(forKey: Self.key)
-        choice = (stored == "device" || stored == "en") ? stored! : Self.targetDefault
+        // A choice made in this game first, then the installer's, then the
+        // target's. Only a change in the picker is stored (didSet does not run
+        // here), so a game nobody set keeps following its installer.
+        choice = Self.valid(UserDefaults.standard.string(forKey: Self.key))
+              ?? Self.installDefault ?? Self.targetDefault
     }
 
     /// Before kl_app_boot. An explicit KL_LOCALE_DEVICE on a launch line wins.
     func apply() {
-        setenv("KL_LOCALE_DEVICE", choice == "device" ? "1" : "0", 0)
-        NSLog("[app] game language: \(choice == "device" ? "the device's (\(Self.deviceLanguageName))" : "English")"
-              + " (target default \(Self.targetDefault))")
+        switch choice {
+        case "device":
+            setenv("KL_LOCALE_DEVICE", "1", 0)
+        case "en":
+            setenv("KL_LOCALE_DEVICE", "0", 0)
+        default:
+            // The chosen locale stands in for the device's (KleptonApp.init set
+            // KL_DEVICE_LANG from the headset; this replaces it).
+            setenv("KL_DEVICE_LANG", choice, 1)
+            setenv("KL_LOCALE_DEVICE", "1", 0)
+        }
+        let what = choice == "device" ? "the device's (\(Self.deviceLanguageName))"
+                 : choice == "en" ? "English" : choice
+        NSLog("[app] game language: \(what) (installer default \(Self.installDefault ?? "none"), "
+              + "target default \(Self.targetDefault))")
     }
 }
 
@@ -1200,22 +1264,23 @@ struct GameLanguageView: View {
     @ObservedObject private var language = KleptonLanguage.shared
 
     var body: some View {
-        // A device set to English has nothing to choose between.
-        if !KleptonLanguage.deviceIsEnglish {
-            VStack(alignment: .leading, spacing: 8) {
-                Picker(klT("Game language", "Sprache des Spiels"), selection: $language.choice) {
-                    Text(KleptonLanguage.deviceLanguageName).tag("device")
-                    Text("English").tag("en")
-                }
-                .pickerStyle(.segmented)
-                Text(klT("What the game is told this headset is set to. Games that offer the "
-                         + "language use it for text and, where their voice pack is installed, "
-                         + "for voices. Takes effect the next time the app starts.",
-                         "Was dem Spiel als Sprache dieser Brille gemeldet wird. Spiele, die die "
-                         + "Sprache anbieten, nutzen sie für Texte und – wenn ihr Sprachpaket "
-                         + "installiert ist – für die Stimmen. Gilt ab dem nächsten Start der App."))
-                    .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            Picker(klT("Game language", "Sprache des Spiels"), selection: $language.choice) {
+                Text(klT("Like this Vision Pro (\(KleptonLanguage.deviceLanguageName))",
+                         "Wie diese Vision Pro (\(KleptonLanguage.deviceLanguageName))")).tag("device")
+                ForEach(KleptonLanguage.choices, id: \.tag) { c in Text(c.name).tag(c.tag) }
             }
+            .pickerStyle(.menu)
+            Text(klT("What the game is told this headset is set to. Games that offer the "
+                     + "language use it for text and, where their voice pack is installed, "
+                     + "for voices; a game without it stays in its own language. Kept for this "
+                     + "game, also through updates. Takes effect the next time the app starts.",
+                     "Was dem Spiel als Sprache dieser Brille gemeldet wird. Spiele, die die "
+                     + "Sprache anbieten, nutzen sie für Texte und – wenn ihr Sprachpaket "
+                     + "installiert ist – für die Stimmen; ein Spiel ohne sie bleibt in seiner "
+                     + "eigenen. Bleibt für dieses Spiel erhalten, auch bei Updates. Gilt ab dem "
+                     + "nächsten Start der App."))
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 }

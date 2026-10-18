@@ -240,6 +240,16 @@ if not re.fullmatch(r"(1\.\d{1,3}\.\d{1,3})?", OVRP_GUEST_VERSION):
 if OVRP_GUEST_VERSION:
     print(f"  OVRPlugin in the game: {OVRP_GUEST_VERSION}", file=sys.stderr)
 
+# The language a game starts with (KLEPTON_GAME_LANGUAGE: "device", "en" or a
+# locale such as "fr_FR"; AVP Play's setting for the games it installs),
+# KLGameLanguageDefault in Info.plist (KleptonLanguage). A choice made in the
+# game wins over it. Unset, or not of that shape: empty, the target's default.
+GAME_LANGUAGE = os.environ.get("KLEPTON_GAME_LANGUAGE", "").strip()
+if GAME_LANGUAGE and not re.fullmatch(r"device|en|[a-z]{2,3}_[A-Z]{2}", GAME_LANGUAGE):
+    print(f"gen_xcodeproj: KLEPTON_GAME_LANGUAGE={GAME_LANGUAGE!r} is not device, en or a locale "
+          f"like fr_FR - the target's default stays", file=sys.stderr)
+    GAME_LANGUAGE = ""
+
 # Typed wire values only: never interpolate arbitrary installer input into a project.
 CONTROLLER_MODE = os.environ.get("KLEPTON_CONTROLLER_MODE", "standard")
 if CONTROLLER_MODE not in ("standard", "surreal"):
@@ -368,6 +378,9 @@ ASSETCATALOG_SETTING = ((f"\t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = \"{_icon
                         # the installer says KLEPTON_ROOM_GUARD=0 (AVP Play's
                         # setting for games it installs); KLRoomGuardDefault.
                         + f"\t\t\t\tKL_ROOM_GUARD_DEFAULT = {0 if os.environ.get('KLEPTON_ROOM_GUARD') == '0' else 1};\n"
+                        # ...and the language it starts with (GAME_LANGUAGE
+                        # above; KLGameLanguageDefault, empty for the target's).
+                        + f"\t\t\t\tKL_GAME_LANGUAGE_DEFAULT = \"{GAME_LANGUAGE}\";\n"
                         # ...and what KleptonGameData.swift reads: which files
                         # this build's guest needs and the store ids to fetch
                         # them by. KL_DATA_TREE is empty for a target without the

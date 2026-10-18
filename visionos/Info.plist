@@ -45,6 +45,8 @@
 	<string>$(KL_TEST_BUILD)</string>
 	<key>KLRoomGuardDefault</key>
 	<string>$(KL_ROOM_GUARD_DEFAULT)</string>
+	<key>KLGameLanguageDefault</key>
+	<string>$(KL_GAME_LANGUAGE_DEFAULT)</string>
 	<key>KLOutputDefault</key>
 	<string>$(KL_OUTPUT_DEFAULT)</string>
 	<key>KLStartScreen</key>
