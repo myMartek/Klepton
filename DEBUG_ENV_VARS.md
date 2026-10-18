@@ -3276,6 +3276,11 @@ vendored the whole path refuses by name and none of these do anything.
   "drawn but stale".
 - `KL_VK_OUT_EVERY=N` — capture every Nth frame (default 1). A full eye pair is
   ~21 MB of readback, so 1 is only for short runs.
+- `KL_VK_EYE_CLEAR=0` — leave a freshly allocated Vulkan eye image as Metal hands
+  it over. Default on: every new eye image is cleared to transparent black first,
+  because an uncleared one shows whatever its memory held (old frames, different
+  per eye) until the guest draws into it — Medal of Honor's smaller eye while a
+  level loads.
 - `KL_VK_EYE_TINT=1` — pre-clear every eye image before the guest ever sees it:
   **GREEN for eye 0 and BLUE for eye 1**. Two A/Bs in one. It separates the two
   ways an eye texture comes back wrong, which are otherwise identical in the

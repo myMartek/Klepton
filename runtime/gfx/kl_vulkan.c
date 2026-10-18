@@ -2202,7 +2202,17 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
     // this image at all; if it does not, the guest drew and the content is
     // genuinely what it rendered. Off by default — it costs a submit per image
     // and it is a diagnostic, not a fix.
-    if (kl_env_on("KL_VK_EYE_TINT", 0) && d->CmdClearColorImage &&
+    //
+    // ...and every fresh eye image is cleared to transparent black by default
+    // (KL_VK_EYE_CLEAR=0 leaves it as it comes). Metal does not zero a new
+    // texture: until the guest first draws into it, it shows whatever that
+    // memory held before — old frames, a different one in each eye's slice.
+    // Medal of Honor drops its eye to 3600x2888 while a level loads, the new
+    // images were shown before the engine drew into them, and the owner saw
+    // "strange frames, something different in each eye" (2026-10-18).
+    int tint = kl_env_on("KL_VK_EYE_TINT", 0);
+    int clear = tint || (is_eye && kl_env_on("KL_VK_EYE_CLEAR", 1));
+    if (clear && d->CmdClearColorImage &&
         cap_prepare(d, 4)) {
         VkCommandBufferBeginInfo bi = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -2236,11 +2246,12 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
             { .float32 = { 0.0f, 1.0f, 0.0f, 1.0f } },   // eye 0: green
             { .float32 = { 0.0f, 0.0f, 1.0f, 1.0f } },   // eye 1: blue
         };
+        static const VkClearColorValue BLACK = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } };
         for (int ly = 0; ly < layers; ly++) {
             VkImageSubresourceRange rng =
                 { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, (uint32_t)ly, 1 };
             d->CmdClearColorImage(d->cap_cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                  &TINT[layers > 1 ? ly : (eye & 1)], 1, &rng);
+                                  tint ? &TINT[layers > 1 ? ly : (eye & 1)] : &BLACK, 1, &rng);
         }
         d->EndCommandBuffer(d->cap_cmd);
         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -2248,9 +2259,12 @@ unsigned long long kl_vulkan_layer_image(int layer_key, int stage, int eye,
         d->ResetFences(d->dev, 1, &d->cap_fence);
         if (d->QueueSubmit(d->queue, 1, &si, d->cap_fence) == VK_SUCCESS)
             d->WaitForFences(d->dev, 1, &d->cap_fence, VK_TRUE, 2000000000ull);
-        VKI("eye image stage %d pre-cleared: %s (KL_VK_EYE_TINT)\n", stage,
-            layers > 1 ? "layer 0 GREEN, layer 1 BLUE"
-                       : (eye ? "eye 1 BLUE" : "eye 0 GREEN"));
+        if (tint)
+            VKI("eye image stage %d pre-cleared: %s (KL_VK_EYE_TINT)\n", stage,
+                layers > 1 ? "layer 0 GREEN, layer 1 BLUE"
+                           : (eye ? "eye 1 BLUE" : "eye 0 GREEN"));
+        else
+            VKI("eye image stage %d (%ux%u) cleared before the guest's first frame in it\n", stage, w, h);
     }
 
     slot->img = img;
