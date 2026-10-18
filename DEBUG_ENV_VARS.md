@@ -2114,6 +2114,11 @@ puts the camera on the ground with its hands underneath it.
   answers how often the host has recentered (the compositor's recenter, after
   it has moved the head and the controllers) instead of 0. Default 1 for
   `x9531494193591052`, else 0.
+- `KL_OVRP_NO_TRACKERS=0|1` — answer the tracker nodes 5..8 (the Rift's
+  external sensors) as a Quest does: not present, not tracked, identity at the
+  origin. Off, they report the head pose like every unmapped node. Angry Birds
+  VR: Isle of Pigs reads TrackerZero from its C#, and its island followed the
+  player. Default 1 for `x2718606324833775`, else 0.
 - `KL_OVRP_POSE_TIME=0|1` — fill `ovrpPoseStatef.Time` in
   `ovrp_GetNodePoseState` with the moment the step's sample was latched instead
   of leaving it 0. AC Nexus moves its physical hand bodies only when the
