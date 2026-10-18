@@ -210,8 +210,113 @@ private func klEyePixelFormat(_ glInternal: UInt32) -> MTLPixelFormat? {
     }
 }
 
+/// What the composite needs of a drawable, and nothing more.
+///
+/// A Compositor Services drawable when the picture goes to the system's own
+/// layer — the ordinary path, forwarded member for member — or a stand-in with
+/// our own textures when it goes to RealityKit instead (KL_RK_PRESENT,
+/// KleptonRealityPresent.swift). The composite below reads only these members,
+/// so it draws the same picture either way; only where it lands differs.
+final class KLDrawable {
+    struct TextureMap { let textureIndex: Int; let sliceIndex: Int; let viewport: MTLViewport }
+    struct View { let transform: simd_float4x4; let textureMap: TextureMap }
+    struct Timing { let presentationTime: LayerRenderer.Clock.Instant; let renderingDeadline: LayerRenderer.Clock.Instant }
+    let views: [View]
+    let colorTextures: [MTLTexture]
+    let depthTextures: [MTLTexture]
+    let rasterizationRateMaps: [MTLRasterizationRateMap]
+    let depthRange: SIMD2<Float>
+    let frameTiming: Timing
+    private let projections: [simd_float4x4]
+    /// The real drawable, when there is one.
+    let system: LayerRenderer.Drawable?
+
+    init(_ d: LayerRenderer.Drawable) {
+        system = d
+        views = d.views.map {
+            View(transform: $0.transform,
+                 textureMap: TextureMap(textureIndex: $0.textureMap.textureIndex,
+                                        sliceIndex: $0.textureMap.sliceIndex,
+                                        viewport: $0.textureMap.viewport))
+        }
+        colorTextures = d.colorTextures
+        depthTextures = d.depthTextures
+        rasterizationRateMaps = d.rasterizationRateMaps
+        depthRange = d.depthRange
+        frameTiming = Timing(presentationTime: d.frameTiming.presentationTime,
+                             renderingDeadline: d.frameTiming.renderingDeadline)
+        projections = d.views.indices.map { d.computeProjection(viewIndex: $0) }
+    }
+
+    /// The stand-in: our own textures, uniform (no rate map).
+    init(views: [View], projections: [simd_float4x4], color: [MTLTexture], depth: [MTLTexture],
+         presentation: TimeInterval, deadline: TimeInterval) {
+        system = nil
+        self.views = views
+        self.projections = projections
+        colorTextures = color
+        depthTextures = depth
+        rasterizationRateMaps = []
+        depthRange = SIMD2<Float>(Float.infinity, 0.1)
+        let at = { (t: TimeInterval) in LayerRenderer.Clock.Instant.epoch.advanced(by: .seconds(t)) }
+        frameTiming = Timing(presentationTime: at(presentation), renderingDeadline: at(deadline))
+    }
+
+    /// The pose the picture is drawn for: handed to the system drawable, or
+    /// kept for whoever places the stand-in's picture (the RealityKit quad).
+    private(set) var anchorSet: DeviceAnchor?
+    var deviceAnchor: DeviceAnchor? {
+        get { system?.deviceAnchor ?? anchorSet }
+        set { system?.deviceAnchor = newValue; anchorSet = newValue }
+    }
+    func computeProjection(viewIndex: Int) -> simd_float4x4 { projections[viewIndex] }
+    func encodePresent(commandBuffer: MTLCommandBuffer) { system?.encodePresent(commandBuffer: commandBuffer) }
+}
+
 final class KleptonCompositor {
-    private let layerRenderer: LayerRenderer
+    private var layerRenderer: LayerRenderer?
+    /// Set in the RealityKit mode (KL_RK_PRESENT), where there is no layer.
+    private var rkTarget: KLRealityTarget?
+
+    // The picture moving to the RealityKit space at start (KL_RK_PRESENT,
+    // KLRealityPresent.switchAtStart): the running compositor takes the new
+    // output, and the guest never notices.
+    nonisolated(unsafe) static var live: KleptonCompositor?
+    nonisolated(unsafe) static var expectingHandover = false
+    private let handover = DispatchSemaphore(value: 0)
+    private let handoverLock = NSLock()
+    private var pendingLayer: LayerRenderer?
+    private var pendingRK: KLRealityTarget?
+    /// The colour format the pipelines were built for.
+    private var pipelineFormat: MTLPixelFormat = .invalid
+
+    /// A new Compositor Services layer: handed to the running compositor if a
+    /// move is under way, else a compositor of its own (the usual start).
+    static func attach(layer: LayerRenderer) {
+        if let c = live, expectingHandover {
+            c.handoverLock.lock(); c.pendingLayer = layer; c.handoverLock.unlock()
+            c.handover.signal()
+            return
+        }
+        let c = KleptonCompositor(layer)
+        live = c
+        c.startRenderLoop()
+    }
+    /// A RealityKit target for the running compositor (the picture moving at
+    /// start, KLRealityPresent.switchAtStart). There is no other way in.
+    static func attach(rk target: KLRealityTarget) {
+        guard let c = live, expectingHandover else {
+            NSLog("[rk] a RealityKit space opened with no compositor waiting for it — ignored")
+            return
+        }
+        c.handoverLock.lock(); c.pendingRK = target; c.handoverLock.unlock()
+        c.handover.signal()
+    }
+    /// A move that failed: let the waiting loop end as usual.
+    static func handoverFailed() {
+        expectingHandover = false
+        live?.handover.signal()
+    }
     private var device: MTLDevice!
     // Optional, not implicitly unwrapped, and that is the whole fix for one
     // crash: when ANGLE has no MTLDevice this used to stay nil while the loop
@@ -979,7 +1084,8 @@ final class KleptonCompositor {
         // pipeline still claiming rgba16Float does not merely look wrong, it
         // fails to encode at all (Metal refuses the attachment mismatch) and
         // every frame goes out cleared.
-        let color = layerRenderer.configuration.colorFormat
+        let color = layerRenderer?.configuration.colorFormat ?? KLRealityTarget.colorFormat
+        pipelineFormat = color
         do {
             let lib = try device.makeLibrary(source: src, options: nil)
             let desc = MTLRenderPipelineDescriptor()
@@ -1480,8 +1586,6 @@ final class KleptonCompositor {
         // eye textures.
         guestRateMap = map
         guestRateW = w; guestRateH = h
-        kl_glfb_set_eye_rate_map(Int32(w), Int32(h), Int32(qx.count), Int32(qy.count),
-                                 Unmanaged.passUnretained(map).toOpaque())
         // What the guest will actually write of each eye: the larger layer, and
         // two texels over for the rounding at its edge.
         var pw = 0, ph = 0
@@ -1489,8 +1593,11 @@ final class KleptonCompositor {
             let p = map.physicalSize(layer: l)
             pw = max(pw, p.width); ph = max(ph, p.height)
         }
+        kl_glfb_set_eye_rate_map(Int32(w), Int32(h), Int32(qx.count), Int32(qy.count),
+                                 Unmanaged.passUnretained(map).toOpaque())
         kl_glfb_set_eye_rate_physical(Int32(min(w, pw + 2)), Int32(min(h, ph + 2)))
     }
+
 
     /// kl_glfb calls this when the guest asks for storage for one (eye, stage).
     ///
@@ -1681,6 +1788,7 @@ final class KleptonCompositor {
     /// the scene, the configuration, or the layer — and nothing in renderFrame()
     /// was ever going to fix it.
     private func minimalLoop() {
+        let layerRenderer = self.layerRenderer!
         NSLog("[cp] PROBE 9: MINIMAL LOOP — clear to blue, present, nothing else")
         var n = 0
         var next = Date()
@@ -1725,6 +1833,7 @@ final class KleptonCompositor {
     }
 
     private func renderLoop() {
+        let layerRenderer = self.layerRenderer!
         layerRenderer.waitUntilRunning()
         if probe == 9 {
             // The system default device, exactly as Apple's template uses —
@@ -1743,6 +1852,15 @@ final class KleptonCompositor {
         // only be read from a drawable, and the guest reads both exactly once
         // during the lifecycle below. See primeDisplay().
         primeDisplay()
+
+        // The RealityKit proof of concept: measured, the picture now moves to
+        // its own space; this loop keeps going until that layer closes and
+        // then takes the RealityKit output (afterOutputEnded).
+        if KLRealityPresent.enabled {
+            Self.expectingHandover = true
+            NSLog("[rk] picture through RealityKit is on — moving it there now that the display is measured")
+            KLRealityPresent.switchAtStart()
+        }
 
         // Bring the guest up, on its own thread. _begin is
         // once per process and does the /proc report, nativeRecreateGfxState,
@@ -1765,6 +1883,13 @@ final class KleptonCompositor {
             return
         }
 
+        csFrames()
+        afterOutputEnded()
+    }
+
+    /// Frames into the Compositor Services layer until it is invalidated.
+    private func csFrames() {
+        let layerRenderer = self.layerRenderer!
         // This loop's own liveness, logged on a wall clock rather than a frame
         // count. The device kills an immersive app that stops presenting, and
         // that kill arrives as a bare SIGKILL with no crash report at all — so
@@ -1831,6 +1956,46 @@ final class KleptonCompositor {
         }
         NSLog("[cp] render loop ended after \(presented) presented frames, "
               + "\(iterations) iterations, state=\(String(describing: layerRenderer.state))")
+    }
+
+    /// The output has gone: either for good (the crown, the game quit) or
+    /// because the picture is moving to the RealityKit space
+    /// (KLRealityPresent.switchAtStart), in which case that one is waited for
+    /// and the guest never notices.
+    private func afterOutputEnded() {
+        while Self.expectingHandover {
+            NSLog("[rk] output closed for the move — waiting for the RealityKit space")
+            if handover.wait(timeout: .now() + 10) == .timedOut {
+                NSLog("[rk] no new space within 10 s — ending as usual")
+                Self.expectingHandover = false
+                break
+            }
+            Self.expectingHandover = false
+            handoverLock.lock()
+            let layer = pendingLayer, rk = pendingRK
+            pendingLayer = nil; pendingRK = nil
+            handoverLock.unlock()
+            if let layer {
+                layerRenderer = layer
+                rkTarget = nil
+                let controllers = self.controllers
+                layer.onSpatialEvent = { events in controllers.handleSpatialEvents(events) }
+                layer.waitUntilRunning()
+                if layer.configuration.colorFormat != pipelineFormat { buildPipeline(); boundary = nil }
+                applyRenderQuality()
+                displayPeriod = 0.01
+                kl_ovrp_set_display_frequency(100)
+                kl_app_set_panel_hz(100)
+                NSLog("[rk] now on Compositor Services")
+                csFrames()
+            } else if let rk {
+                layerRenderer = nil
+                rkTarget = rk
+                if KLRealityTarget.colorFormat != pipelineFormat { buildPipeline(); boundary = nil }
+                NSLog("[rk] now on RealityKit")
+                rkFrames(rk)
+            }
+        }
         // The crown press invalidates the layer with NO scenePhase change at
         // all (measured on device: none fires), and the system then takes
         // ~30-60 s to background the process — which is when Lifecycle exits.
@@ -2015,7 +2180,8 @@ final class KleptonCompositor {
     }
 
     private func renderFrame() -> Int {
-        guard let frame = layerRenderer.queryNextFrame() else { bailNoFrame += 1; return 0 }
+        if let rk = rkTarget { return rkRenderFrame(rk) }
+        guard let frame = layerRenderer!.queryNextFrame() else { bailNoFrame += 1; return 0 }
         frame.startUpdate()
         frame.endUpdate()
 
@@ -2066,6 +2232,32 @@ final class KleptonCompositor {
         // picture already there against the newer pose. That case is the whole
         // reason the pass exists, and it was unreachable while the thing being
         // reprojected was the thing blocking this loop.
+        publishToGuest()
+
+        // ALL of them, not just the first. visionOS 26 hands out more than one
+        // drawable while the render quality is moving between two resolutions —
+        // the system crossfades them so the change is not visible — and a loop
+        // that renders drawables[0] and presents nothing else shows a half-empty
+        // frame for the whole transition. That is exactly the transition
+        // maxRenderQuality = 1.0 provokes, so the two changes belong together;
+        // queryDrawable() is deprecated in 26 in favour of this for the same
+        // reason, and ALVR loops over the array likewise.
+        let drawables = frame.queryDrawables()
+        guard !drawables.isEmpty else { bailNoDrawable += 1; return 0 }
+        guard let cmd = queue?.makeCommandBuffer(), pipeline != nil, sampler != nil else {
+            bailNoPipeline += 1
+            return 0
+        }
+        // Everything above may abandon the frame; from here it will be
+        // presented, so the submission can be opened.
+        frame.startSubmission()
+        let n = composeFrame(drawables.map(KLDrawable.init), cmd: cmd, raw: drawables)
+        frame.endSubmission()      // only here — see startSubmission above
+        return n
+    }
+
+    /// Offer the guest this frame's pose (see renderFrame).
+    private func publishToGuest() {
         if syncGuest {
             _ = kl_app_frame()
         } else {
@@ -2092,25 +2284,18 @@ final class KleptonCompositor {
                 }
             }
         }
+    }
 
-        // ALL of them, not just the first. visionOS 26 hands out more than one
-        // drawable while the render quality is moving between two resolutions —
-        // the system crossfades them so the change is not visible — and a loop
-        // that renders drawables[0] and presents nothing else shows a half-empty
-        // frame for the whole transition. That is exactly the transition
-        // maxRenderQuality = 1.0 provokes, so the two changes belong together;
-        // queryDrawable() is deprecated in 26 in favour of this for the same
-        // reason, and ALVR loops over the array likewise.
-        let drawables = frame.queryDrawables()
-        guard !drawables.isEmpty else { bailNoDrawable += 1; return 0 }
-        guard let cmd = queue?.makeCommandBuffer(), pipeline != nil, sampler != nil else {
-            bailNoPipeline += 1
-            return 0
-        }
-        // Everything above may abandon the frame; from here it will be
-        // presented, so the submission can be opened.
-        frame.startSubmission()
+    /// Everything after the drawables are in hand: guest picture, poses,
+    /// composite, present. Shared by the Compositor Services loop and the
+    /// RealityKit one (rkRenderFrame), which differ only in where the drawable
+    /// comes from.
+    private func composeFrame(_ drawables: [KLDrawable], cmd: MTLCommandBuffer,
+                              raw: [LayerRenderer.Drawable],
+                              presetAnchor: DeviceAnchor? = nil, hasPresetAnchor: Bool = false,
+                              finish: ((MTLCommandBuffer) -> Void)? = nil) -> Int {
         let main = drawables[0]
+        if displayQualityX.isEmpty, let first = raw.first { captureDisplayFoveation(first) }
 
         // Which stage holds a *finished* picture. -1 means the guest has not
         // completed a frame yet (ovrp_EndFrame never seen) — there is nothing
@@ -2229,7 +2414,9 @@ final class KleptonCompositor {
         // therefore also what the drawable is told it was rendered with.
         let presentation = LayerRenderer.Clock.Instant.epoch
             .duration(to: main.frameTiming.presentationTime).timeInterval
-        let displayAnchor = displayAnchor(at: presentation)
+        // The RealityKit path decides the pose before the composite, because
+        // the quad's corners are written for it in the same command buffer.
+        let displayAnchor = hasPresetAnchor ? presetAnchor : displayAnchor(at: presentation)
         let originFromDevice = originFromDevice(displayAnchor)
         // OpenXR's VIEW space is DEFINED as the midpoint between the eyes.
         // visionOS's device anchor is a point on the hardware and is not that
@@ -2342,9 +2529,9 @@ final class KleptonCompositor {
             NSLog("[cp] \(drawables.count) drawable(s); [0]: "
                   + "\(drawable.colorTextures.count) color texture(s), "
                   + "\(drawable.views.count) view(s), layout="
-                  + (layerRenderer.configuration.layout == .layered ? "layered" : "dedicated")
-                  + ", render quality \(layerRenderer.renderQuality) of max "
-                  + "\(layerRenderer.configuration.maxRenderQuality)")
+                  + ((layerRenderer?.configuration.layout ?? .layered) == .layered ? "layered" : "dedicated")
+                  + ", render quality \(layerRenderer.map { "\($0.renderQuality)" } ?? "-") of max "
+                  + "\(layerRenderer.map { "\($0.configuration.maxRenderQuality)" } ?? "-")")
             // Whose device owns what. installProvider() takes ANGLE's MTLDevice
             // so the eye textures can be shared with the guest, and its own
             // comment notes that on the host ANGLE's device and the system
@@ -2396,7 +2583,7 @@ final class KleptonCompositor {
         // The guest's stereo separation, refreshed from the display itself.
         pushEyeOffsets(main)
 
-        traceGazeMaps(drawables)
+        traceGazeMaps(raw)
 
         var encoded = 0
         for drawable in drawables {
@@ -2429,6 +2616,7 @@ final class KleptonCompositor {
         // drew black".
         // When this buffer was handed to Metal, on the clock gpuStartTime and
         // gpuEndTime are expressed in — see gpuQueuedSum.
+        finish?(cmd)
         let committedAt = CACurrentMediaTime()
         cmd.addCompletedHandler { [weak self] b in
             guard let self else { return }
@@ -2459,7 +2647,6 @@ final class KleptonCompositor {
                   + "enc=\(encoded) cmd=\(cmdCommitted)/\(dn)")
         }
         noteCadence(presentation: presentation, drawable: main)
-        frame.endSubmission()      // only here — see startSubmission above
         return encoded > 0 ? 1 : 0
     }
 
@@ -3021,7 +3208,7 @@ final class KleptonCompositor {
     ///
     /// The `.dedicated` layout keeps the old per-view pass, with that view's
     /// own single-layer rate map, because there is nothing to amplify.
-    private func encodeComposite(_ drawable: LayerRenderer.Drawable,
+    private func encodeComposite(_ drawable: KLDrawable,
                                  cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
                                  rendered: kl_ovrp_render_pose, haveRendered: Bool,
                                  originFromHead: simd_float4x4) -> Int {
@@ -3041,7 +3228,9 @@ final class KleptonCompositor {
         // would be indifferent to the cant, the pose source and the swapchain
         // alike. Take this rung first; it splits "regression from this session"
         // from "pre-existing", and nothing else does.
-        let layered = layerRenderer.configuration.layout == .layered
+        // The RealityKit stand-in has one texture per eye: a pass each.
+        let layered = (layerRenderer?.configuration.layout
+                       ?? (drawable.colorTextures.count == 1 ? .layered : .dedicated)) == .layered
                       && drawable.views.count > 1
                       && amplification >= drawable.views.count
                       && klEnvOn("KL_CP_AMPLIFY", default: true)
@@ -3072,7 +3261,7 @@ final class KleptonCompositor {
 
     /// A group of views sharing one attachment, and therefore one render pass.
     private func encodeViews(_ viewIndices: [Int],
-                             drawable: LayerRenderer.Drawable,
+                             drawable: KLDrawable,
                              layered: Bool,
                              rateMap: MTLRasterizationRateMap?,
                              cmd: MTLCommandBuffer, stage: Int, completeStage: Int,
@@ -3116,7 +3305,7 @@ final class KleptonCompositor {
             // clear of 0 reads as "everything is infinitely far away".
             // .dontCare here meant the quad's colour was correct and its
             // depth said nothing was there.
-            pass.depthAttachment.storeAction = .store
+            pass.depthAttachment.storeAction = drawable.system == nil ? .dontCare : .store
             pass.depthAttachment.clearDepth  = 0.0
         }
         if layered {
@@ -3469,7 +3658,7 @@ final class KleptonCompositor {
     @discardableResult
     private func encodeProjLayers(_ enc: MTLRenderCommandEncoder,
                                   viewIndices: [Int],
-                                  drawable: LayerRenderer.Drawable,
+                                  drawable: KLDrawable,
                                   originFromHead: simd_float4x4,
                                   count: Int) -> Int {
         guard let pipeline, let sampler else { return 0 }
@@ -3703,7 +3892,7 @@ final class KleptonCompositor {
     @discardableResult
     private func encodeOverlays(_ enc: MTLRenderCommandEncoder,
                                 viewIndices: [Int],
-                                drawable: LayerRenderer.Drawable,
+                                drawable: KLDrawable,
                                 originFromHead: simd_float4x4,
                                 writeDepth: Bool,
                                 backdrop: Bool = true) -> Int {
@@ -3858,10 +4047,10 @@ final class KleptonCompositor {
     private var boundaryTried = false
     private var boundaryRecenter: simd_float4x4?
     private func encodeBoundary(_ enc: MTLRenderCommandEncoder, viewIndices: [Int],
-                                drawable: LayerRenderer.Drawable, originFromHead: simd_float4x4) {
+                                drawable: KLDrawable, originFromHead: simd_float4x4) {
         if !boundaryTried {
             boundaryTried = true
-            boundary = KLBoundary.make(device: device, color: layerRenderer.configuration.colorFormat,
+            boundary = KLBoundary.make(device: device, color: layerRenderer?.configuration.colorFormat ?? KLRealityTarget.colorFormat,
                                        amplification: amplification)
             boundary?.watch(worldTracking)
         }
@@ -4019,7 +4208,7 @@ final class KleptonCompositor {
 
     private func encodeStatsCard(_ enc: MTLRenderCommandEncoder,
                                  viewIndices: [Int],
-                                 drawable: LayerRenderer.Drawable,
+                                 drawable: KLDrawable,
                                  originFromHead: simd_float4x4) -> Int {
         guard let pipe = overlayPipeline else { return 0 }
         let mode = Self.statsMode
@@ -4089,7 +4278,7 @@ final class KleptonCompositor {
     private func encodeBlackBackdrop(_ enc: MTLRenderCommandEncoder,
                                      pipe: MTLRenderPipelineState,
                                      viewIndices: [Int],
-                                     drawable: LayerRenderer.Drawable,
+                                     drawable: KLDrawable,
                                      originFromHead: simd_float4x4) {
         if blackTexture == nil {
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 1,
@@ -4148,7 +4337,7 @@ final class KleptonCompositor {
 
     private func encodeLoadingCard(_ enc: MTLRenderCommandEncoder,
                                    viewIndices: [Int],
-                                   drawable: LayerRenderer.Drawable,
+                                   drawable: KLDrawable,
                                    originFromHead: simd_float4x4) -> Int {
         guard Self.cardEnabled, let pipe = overlayPipeline else { return 0 }
         var st = kl_interstitial()
@@ -4369,7 +4558,7 @@ final class KleptonCompositor {
     private func encodeEquirect(_ enc: MTLRenderCommandEncoder,
                                 ov: kl_ovrp_overlay,
                                 viewIndices: [Int],
-                                drawable: LayerRenderer.Drawable,
+                                drawable: KLDrawable,
                                 originFromHead: simd_float4x4) -> Bool {
         guard let pipe = equirectPipeline else { return false }
         var w: Int32 = 0, h: Int32 = 0
@@ -4499,7 +4688,7 @@ final class KleptonCompositor {
     /// but sourced from our own player instead of a (missing) guest texture.
     private func drawLoadingSkybox(_ enc: MTLRenderCommandEncoder,
                                    viewIndices: [Int],
-                                   drawable: LayerRenderer.Drawable,
+                                   drawable: KLDrawable,
                                    layered: Bool,
                                    originFromHead: simd_float4x4,
                                    texture: MTLTexture,
@@ -4584,7 +4773,7 @@ final class KleptonCompositor {
     /// is the point — staleness is reprojection's job and it does it every
     /// period. A repeat is the case reprojection cannot reach.
     private func noteCadence(presentation: TimeInterval,
-                             drawable: LayerRenderer.Drawable) {
+                             drawable: KLDrawable) {
         // The deadline for THIS frame, against the same clock it is expressed
         // in. Checked after commit, so it measures the encode we just did.
         let now = LayerRenderer.Clock.Instant.epoch
@@ -4994,7 +5183,7 @@ final class KleptonCompositor {
         return (gridBuffer, gridVertexCount, gridPerEye)
     }
 
-    private func pushEyeTextureSize(_ drawable: LayerRenderer.Drawable) {
+    private func pushEyeTextureSize(_ drawable: KLDrawable) {
         var w = 0, h = 0
         var source = "none"
         if let rm = drawable.rasterizationRateMaps.first {
@@ -5110,7 +5299,7 @@ final class KleptonCompositor {
         return t * deviceFromView
     }
 
-    private func pushEyeOffsets(_ drawable: LayerRenderer.Drawable) {
+    private func pushEyeOffsets(_ drawable: KLDrawable) {
         // Latched, not re-read per frame. A streaming guest sends its eye
         // transform to the host ONCE and the host will not revise it, so the
         // number the guest was given has to stay the number it was given; the
@@ -5217,6 +5406,7 @@ final class KleptonCompositor {
     /// switching, which is why a frame can carry more than one drawable — see
     /// queryDrawables in renderFrame.
     private func applyRenderQuality() {
+        let layerRenderer = self.layerRenderer!
         let want = KleptonStageConfiguration.requestedQuality
         // On whether the ceiling was CONFIGURED, not on whether it was wanted.
         // The knob can be on and the ceiling still absent — the simulator
@@ -5234,6 +5424,8 @@ final class KleptonCompositor {
     }
 
     private func primeDisplay() {
+        let layerRenderer = self.layerRenderer!
+        var measuredViews: [KLDrawable.View]?
         var stamps: [TimeInterval] = []
         var tangents: [SIMD4<Float>] = []
 
@@ -5330,12 +5522,14 @@ final class KleptonCompositor {
                 tangents = (0..<drawable.views.count).map {
                     kl_reproject_tangents(drawable.computeProjection(viewIndex: $0))
                 }
-                pushEyeOffsets(drawable)
+                let measuring = KLDrawable(drawable)
+                pushEyeOffsets(measuring)
+                measuredViews = measuring.views
                 // Before the guest boots, so it allocates the right swapchain
                 // once instead of rebuilding when the size changes under it —
                 // and each of those rebuilds used to leak a whole generation
                 //.
-                pushEyeTextureSize(drawable)
+                pushEyeTextureSize(KLDrawable(drawable))
                 // Also before the guest boots, and for a stricter reason: the
                 // eye-texture provider builds the guest's own rate map from
                 // this curve, and it must be in force before the first render
@@ -5350,6 +5544,16 @@ final class KleptonCompositor {
             frame.endSubmission()
         }
 
+        // For the RealityKit output, which has no drawable to read them from.
+        if tangents.count >= 2, let views = measuredViews, views.count >= 2 {
+            KLRealityPresent.measured = KLRealityPresent.Geometry(
+                midpoint: eyeMidpointInDevice,
+                offsets: views.prefix(2).map {
+                    let c = $0.transform.columns.3
+                    return SIMD3<Float>(c.x, c.y, c.z) - eyeMidpointInDevice
+                },
+                tangents: Array(tangents.prefix(2)))
+        }
         for (i, t) in tangents.enumerated() where i < 2 {
             NSLog(String(format: "[cp] eye %d display tangents l=%.4f r=%.4f t=%.4f b=%.4f "
                                  + "(%.1f x %.1f degrees)", i, t.x, t.y, t.z, t.w,
@@ -5484,6 +5688,67 @@ final class KleptonCompositor {
         worstDelta = 0
         worstAgeMs = 0
     }
+
+    // MARK: - The RealityKit output (KL_RK_PRESENT, a proof of concept)
+
+    /// Frames into the RealityKit target until its space closes.
+    private func rkFrames(_ rk: KLRealityTarget) {
+        var presented = 0, iterations = 0
+        var nextReport = Date()
+        var lastTarget: TimeInterval = 0
+        var gaps: [TimeInterval] = []
+        NSLog("[rk] render loop entered")
+        let ticker = KLRealityTicker { [self] target in
+            if rk.stopped { return false }
+            rk.targetTimestamp = target
+            if lastTarget > 0 { gaps.append(target - lastTarget) }
+            lastTarget = target
+            autoreleasepool { presented += renderFrame() }
+            arrayViews.frameDone()
+            iterations += 1
+            if Date() >= nextReport {
+                nextReport = Date().addingTimeInterval(2)
+                let sorted = gaps.sorted()
+                let hz = sorted.isEmpty ? 0 : 1 / sorted[sorted.count / 2]
+                gaps.removeAll(keepingCapacity: true)
+                cmdLock.lock(); let done = cmdCompleted; cmdLock.unlock()
+                NSLog(String(format: "[rk] alive: %d iters, %d with a picture, %d black, display link %.1f Hz, "
+                             + "guest=%d, cmdbuf %d/%d done, layers=%d", iterations, presented, blackFrames,
+                             hz, kl_app_guest_state(), done, cmdCommitted, lastProjLayersSeen))
+                // The guest is paced to what the display link really delivers.
+                if hz > 30, abs(Float(hz) - kl_ovrp_display_frequency()) > 2 {
+                    kl_ovrp_set_display_frequency(Float(hz))
+                    kl_app_set_panel_hz(Float(hz))
+                    displayPeriod = 1 / hz
+                    NSLog(String(format: "[rk] display link runs at %.1f Hz — guest told so", hz))
+                }
+            }
+            return true
+        }
+        ticker.run(preferredHz: KLRealityPresent.hz)
+        NSLog("[rk] RealityKit frames ended after \(presented) presented frames")
+    }
+
+    /// One frame into the RealityKit target.
+    private func rkRenderFrame(_ rk: KLRealityTarget) -> Int {
+        let presentation = rk.targetTimestamp + KLRealityPresent.latency
+        updatePoses(at: presentation)
+        publishToGuest()
+        guard let cmd = queue?.makeCommandBuffer(), pipeline != nil, sampler != nil else {
+            bailNoPipeline += 1
+            return 0
+        }
+        // The pose this picture is drawn for, and the quad's corners for it,
+        // in one command buffer with the picture.
+        let anchor = displayAnchor(at: presentation)
+        let color = rk.beginFrame(cmd, pose: anchor?.originFromAnchorTransform)
+        let d = KLDrawable(views: rk.views, projections: rk.projections, color: [color], depth: [rk.depth],
+                           presentation: presentation, deadline: rk.targetTimestamp)
+        return composeFrame([d], cmd: cmd, raw: [], presetAnchor: anchor, hasPresetAnchor: true) { cmd in
+            rk.finishFrame(color, cmd)
+        }
+    }
+
 }
 
 

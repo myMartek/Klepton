@@ -190,6 +190,10 @@ enum Lifecycle {
         // platform lies about.
         if phase == .active { kl_audio_resume() }
         guard phase == .background else { return }
+        if KLRealityPresent.switching {
+            NSLog("[app] backgrounded while the picture moves between spaces — staying")
+            return
+        }
         guard klEnvOn("KL_EXIT_ON_BACKGROUND", default: true) else {
             NSLog("[app] backgrounded; KL_EXIT_ON_BACKGROUND=0, staying alive")
             return
@@ -299,6 +303,19 @@ struct KleptonApp: App {
         ImmersiveSpace(id: KLRoomFlow.spaceID) { KleptonRoomSpace() }
             .immersionStyle(selection: .constant(.mixed), in: .mixed)
 
+        // Shown for the moment the picture moves to the RealityKit space, so
+        // the app always has a scene and is not sent to the background.
+        WindowGroup(id: KLRealityPresent.switchWindowID) { KLRealitySwitchView() }
+            .defaultSize(width: 420, height: 120)
+
+        // KL_RK_PRESENT, a proof of concept: the same game, its picture shown
+        // through RealityKit so the system's eye-tracked foveation applies
+        // (KleptonRealityPresent.swift).
+        ImmersiveSpace(id: KLRealityPresent.spaceID) { KleptonRealitySpace() }
+            .immersionStyle(selection: .constant(.mixed), in: .mixed)
+            .persistentSystemOverlays(Immersive.systemOverlays)
+            .upperLimbVisibility(chroma.upperLimbVisibility)
+
         ImmersiveSpace(id: Immersive.id) {
             CompositorLayer(configuration: KleptonStageConfiguration()) { layerRenderer in
                 // How many times this closure runs, and for which renderer. If
@@ -307,7 +324,7 @@ struct KleptonApp: App {
                 // that nobody sees.
                 NSLog("[cp] CompositorLayer closure #\(Immersive.bump()) "
                       + "renderer=\(ObjectIdentifier(layerRenderer))")
-                KleptonCompositor(layerRenderer).startRenderLoop()
+                KleptonCompositor.attach(layer: layerRenderer)
             }
         }
         // .mixed vs .full is read from the observed chroma object (set by boot
@@ -1184,6 +1201,9 @@ struct BootView: View {
                             if !klIsAlyx() {
                                 GroupBox(klT("Max resolution per eye", "Maximale Auflösung je Auge")) { EyeMaxView() }
                             }
+                            if KLRealityPresentSetting.offered {
+                                GroupBox(klT("Eye-tracked sharpness", "Schärfe nach Blick")) { RealityPresentView() }
+                            }
                             DisclosureGroup(klT("Passthrough and chroma key", "Durchsicht und Chroma-Key")) { ChromaView() }
                             DisclosureGroup(klT("Controller alignment", "Ausrichtung der Controller")) { TuningView() }
                             if showMic {
@@ -1440,6 +1460,8 @@ struct BootView: View {
         // The test switches first: none of these overwrites a value that is set, so a switch under
         // Advanced › Test wins over the picture setting it retunes (the foveation profile, 2026-10-13).
         KleptonTestSwitches.applyEnvironment()
+        // Before the picture settings: it turns the game's own foveation off.
+        KLRealityPresentSetting.applyEnvironment()
         KleptonRendering.shared.applyEnvironment()
         KleptonDiagnostics.applyEnvironment()
         KleptonGuestInfo.applyEnvironment()
@@ -1609,6 +1631,12 @@ struct BootView: View {
                             let r = await openImmersiveSpace(id: Immersive.id)
                             NSLog("[cp] openImmersiveSpace -> \(r)"
                                   + (attempt > 1 ? " (attempt \(attempt))" : ""))
+                            // What moves the picture to RealityKit later on, if
+                            // that is on (KLRealityPresent.switchAtStart).
+                            if case .opened = r {
+                                KLRealityPresent.capture(open: openImmersiveSpace, dismiss: dismissImmersiveSpace,
+                                                         openWindow: openWindow, dismissWindow: dismissWindow)
+                            }
                             // An installed game's window has done its job once
                             // the picture is up: hand the keyboard poll to
                             // something that outlives it, and go.

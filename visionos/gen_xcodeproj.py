@@ -468,6 +468,7 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonMetalFXPreset.swift", "KleptonMetalFXAlpha.swift",
          "KleptonEyeMax.swift", "KleptonOverlayDepth.swift",
          "KleptonWalkaboutSave.swift",
+         "KleptonRealityPresent.swift",
          "KleptonRoomStore.swift", "KleptonRoomSpace.swift", "KleptonBoundary.swift"]
 # Steam's connection, sign-in and Steam Cloud (SteamCloudKit/README.md: parts of
 # Glovebox's SteamLauncherKit, MIT), compiled into the app's own module. The
