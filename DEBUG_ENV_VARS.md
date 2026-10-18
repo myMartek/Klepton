@@ -1819,7 +1819,11 @@ puts the camera on the ground with its hands underneath it.
   its horizontal pixels. Renders correctly on device with it **off**
   (2026-08-13, user-confirmed), so 1 is now purely the A/B — and the answer for
   any guest ever found that collapses the cones without submitting per-eye
-  rects, which would be unservable any other way.
+  rects, which would be unservable any other way. Later defaults: on for
+  Into The Radius, Walkabout, Demeo, Ghost Town and, under the profile for
+  untested games, every Unity title shipping libOculusXRPlugin — except Angry
+  Birds VR (`x2718606324833775`), which places each eye itself and looked flat
+  with the union (2026-10-18).
 - `KL_VRR` — **foveated guest rendering** (host: `tests/t_mtl_provider.m`;
   device: `KleptonCompositor.swift`). **On by default**; `KL_VRR=0` is the A/B.
   Builds an `MTLRasterizationRateMap` for the eye size and hands it to
@@ -1938,9 +1942,14 @@ puts the camera on the ground with its hands underneath it.
   - **unset (default)** — decide from `kl_vulkan_guest_active()`.
   - **`=1`** — never clear, whatever the RHI.
   - **`=0`** — always clear, Vulkan included.
-- `AndroidThunkJava_ForceQuit()` is logged with the guest's call stack and not
-  obeyed in this fork; the bounded quit that came with the surface around it
-  (`KL_UE4_FORCE_QUIT`, `KL_UE4_QUIT_LIMIT`, `KL_UE4_QUIT_TRACE`) is not taken.
+- `AndroidThunkJava_ForceQuit()` is logged with the guest's call stack, and by
+  default not obeyed: for most titles it is a bail worth staying alive for.
+  `KL_UE4_FORCE_QUIT=1` obeys it as the Quest does — the pump ends and the app
+  leaves as for a game's own quit. On by default for Medal of Honor
+  (`x3647259232032222`), whose Quit button ends in it once
+  `moh-exit-no-rhi-teardown` lets `FEngineLoop::Exit` through. The bounded quit
+  that came with the surface around it (`KL_UE4_QUIT_LIMIT`,
+  `KL_UE4_QUIT_TRACE`) is not taken.
 - `KL_UE4_WAIT=<seconds>` — the pump budget for a NativeActivity guest, default
   5. There is no frame count on this door: the guest owns its own game thread
   and its own frame loop, so seconds are the only unit. **RE4 needs 300** — its
@@ -2114,6 +2123,17 @@ puts the camera on the ground with its hands underneath it.
   answers how often the host has recentered (the compositor's recenter, after
   it has moved the head and the controllers) instead of 0. Default 1 for
   `x9531494193591052`, else 0.
+- `KL_OVRP_BOUNDARY=0|1|<w>,<h>,<d>` — report a Guardian as set up, as on
+  every Quest: configured, a play area of the given size in metres (default
+  2.0 x 2.5 x 2.0), and a floor rectangle of that size round the tracking
+  origin as its geometry. Off, the boundary answers say "none, size 0".
+  Angry Birds VR: Isle of Pigs fits its levels to the play area. Default 1 for
+  `x2718606324833775`, else 0.
+- `KL_OVRP_NO_TRACKERS=0|1` — answer the tracker nodes 5..8 (the Rift's
+  external sensors) as a Quest does: not present, not tracked, identity at the
+  origin. Off, they report the head pose like every unmapped node. Angry Birds
+  VR: Isle of Pigs reads TrackerZero from its C#, and its island followed the
+  player. Default 1 for `x2718606324833775`, else 0.
 - `KL_OVRP_POSE_TIME=0|1` — fill `ovrpPoseStatef.Time` in
   `ovrp_GetNodePoseState` with the moment the step's sample was latched instead
   of leaving it 0. AC Nexus moves its physical hand bodies only when the
@@ -2841,6 +2861,35 @@ The device stays open until the last source has closed.
   because the write loop breaks out of its spin *before* the watchdog on that
   flag. Raise it if a real interruption is being fought over.
 
+### Microphone (capture: `kl_audio.c` cap_build, `kl_aaudio.c` klaa_capture_into)
+
+Armed by the KleptonMic toggle and opened on the first guest input stream
+(Steam Link's `AAudioStream_read`, Walkabout's Photon voice through
+`kl_jni_services.c`). The unit is VoiceProcessingIO with its AGC asked on, its
+output element disabled (so its echo canceller has no reference), capturing
+int16 at the device's native rate and channel count; `kl_aaudio.c` converts to
+the guest's ask — one-pole low-pass + linear interpolation whenever the guest
+asks below the native rate (Steam Link's 16/24 kHz voice against 48 kHz).
+
+- `KL_MIC_AGC=0` — ask VPIO's automatic gain OFF (VPIO's own default is on,
+  so this sets 0 rather than skipping the set). The A/B for "others hear me
+  overdriven". Default 1. A Test switch in the start window.
+- `KL_MIC_RAW=1` — capture through plain RemoteIO: no voice processing at all
+  (quiet, ~759/32767 on Vision Pro, room and game sound included). The other
+  half of that A/B. Default 0. A Test switch in the start window.
+- `KL_MIC_REPORT_SECS=<n>` — interval of the two mic lines below (default 5,
+  0 = none). While the capture unit is open, `[au] mic: <unit> AGC on|OFF|n/a
+  <rate>/<ch> | … s captured (+…), … s read (+…), … s dropped (+…) in n s |
+  peak …/32767 (… dBFS), X of Y buffers at full scale | callback N frames
+  (min..max)` — peak and full-scale count are since the line before. A
+  growing "full scale" count is a hard clip in the int16 client format; a
+  "dropped" that grows is the guest not keeping up. Beside it, per input
+  stream, `[aaudio] mic AAudioStream_read|callback: n calls in … s, k short,
+  z empty, got of asked frames, last asked F with timeout T ms | guest
+  format <- mic format (ratio, low-pass + linear downsample | straight copy)`.
+  The one-time `[au] microphone capture:` line names the unit and the AGC
+  as read back from it.
+
 ## x18 (`runtime/kl_x18.c`)
 
 - `KL_X18=0` — disable x18 veneering (also `n`/`N`, matched on the first
@@ -3276,6 +3325,11 @@ vendored the whole path refuses by name and none of these do anything.
   "drawn but stale".
 - `KL_VK_OUT_EVERY=N` — capture every Nth frame (default 1). A full eye pair is
   ~21 MB of readback, so 1 is only for short runs.
+- `KL_VK_EYE_CLEAR=0` — leave a freshly allocated Vulkan eye image as Metal hands
+  it over. Default on: every new eye image is cleared to transparent black first,
+  because an uncleared one shows whatever its memory held (old frames, different
+  per eye) until the guest draws into it — Medal of Honor's smaller eye while a
+  level loads.
 - `KL_VK_EYE_TINT=1` — pre-clear every eye image before the guest ever sees it:
   **GREEN for eye 0 and BLUE for eye 1**. Two A/Bs in one. It separates the two
   ways an eye texture comes back wrong, which are otherwise identical in the

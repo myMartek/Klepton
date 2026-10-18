@@ -789,6 +789,18 @@ enum KleptonTestSwitches {
                              "Ton: die alte Puffergröße (240 Frames)"),
                   note: klT("Games that play through AAudio (most Unreal and newer Unity games) are handed 256 frames at a time now, which divides the blocks sound engines mix in; 240 could be heard as a fine crackle. Turn this on if a game sounds worse than it used to.",
                             "Spiele, die über AAudio spielen (die meisten Unreal- und neueren Unity-Spiele), bekommen jetzt 256 Frames auf einmal; das teilt die Blöcke, in denen Sound-Engines mischen, 240 konnte als feines Knistern hörbar sein. Einschalten, wenn ein Spiel schlechter klingt als früher.")),
+            // The A/B for "the mic sounds overdriven and crackles" (kl_audio.c, cap_build /
+            // cap_unit_create). Both off = VoiceProcessingIO with its automatic gain, as always.
+            Entry(env: "KL_MIC_AGC", value: "0",
+                  title: klT("Microphone: no automatic gain",
+                             "Mikrofon: keine automatische Verstärkung"),
+                  note: klT("Games that use the headset's microphone (Steam Link, Walkabout). The voice filter stays, but no longer turns the level up by itself. Turn it on if others hear you overdriven or crackling; you may then sound quieter.",
+                            "Spiele, die das Mikrofon des Headsets nutzen (Steam Link, Walkabout). Der Sprachfilter bleibt, dreht den Pegel aber nicht mehr selbst hoch. Einschalten, wenn andere dich übersteuert oder knisternd hören; du klingst dann womöglich leiser.")),
+            Entry(env: "KL_MIC_RAW", value: "1",
+                  title: klT("Microphone: unfiltered",
+                             "Mikrofon: ungefiltert"),
+                  note: klT("Games that use the headset's microphone (Steam Link, Walkabout). The microphone is recorded as it is, without the voice filter: no noise suppression, no automatic gain. Others hear you quieter and with the room and the game's sound; compare whether the crackling is gone.",
+                            "Spiele, die das Mikrofon des Headsets nutzen (Steam Link, Walkabout). Das Mikrofon wird aufgenommen, wie es ist, ohne Sprachfilter: keine Rauschunterdrückung, keine automatische Verstärkung. Andere hören dich leiser und mit Raum und Spielton; vergleichen, ob das Knistern weg ist.")),
             Entry(env: "KL_XR_BOOT_GATE", value: "1",
                   title: klT("OpenXR: the first frame waits for head and hands",
                              "OpenXR: das erste Bild wartet auf Kopf und Hände"),

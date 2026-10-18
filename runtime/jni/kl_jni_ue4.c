@@ -28,6 +28,8 @@
 #include "kl_ndk.h"
 #include "kl_va.h"
 #include "kl_jni_int.h"
+#include "kl_driver.h"
+#include "kl_ue4.h"
 
 // ---- UE4's MessageBox01 ----
 // `FPlatformMisc::MessageBoxExt` on Android: the engine news up one of these,
@@ -1080,7 +1082,7 @@ static klj_val klj_GA_forceQuit(void *env, void *self, const klj_val *a, int n) 
     // but if this fires, something upstream went wrong and the log above it says
     // what. (With vkGetPhysicalDeviceMemoryProperties2 implemented, the Vulkan
     // path no longer triggers it.)
-    KLJ_LOG("AndroidThunkJava_ForceQuit() — the guest asked to quit; ignored "
+    KLJ_LOG("AndroidThunkJava_ForceQuit() — the guest asked to quit "
             "(see the log just above for why it wanted to)");
     // Shipping UE builds strip their runtime log, so the "why" often is NOT
     // above — nothing reaches stdout or logcat. Dump the GUEST call stack of
@@ -1090,6 +1092,19 @@ static klj_val klj_GA_forceQuit(void *env, void *self, const klj_val *a, int n) 
     fprintf(stderr, "  [ue4] ForceQuit caller stack (symbolise against the guest "
                     "libUE4/libUnreal with tools/symof.py):\n");
     kl_fault_print_frames(stderr, __builtin_frame_address(0));
+    // KL_UE4_FORCE_QUIT=1: obey it, as the Quest does. The pump ends and the
+    // app leaves as for a game's own quit. On by default for Medal of Honor,
+    // whose Quit button reaches ForceQuit once FEngineLoop::Exit is through
+    // (moh-exit-no-rhi-teardown, kl_guestpatch.c); off for every other title,
+    // where ForceQuit is still a bail worth staying alive for.
+    const char *t = kl_driver_target_name();
+    if (kl_env_on("KL_UE4_FORCE_QUIT", t && strcmp(t, "x3647259232032222") == 0)) {
+        fprintf(stderr, "  [ue4] ForceQuit obeyed (KL_UE4_FORCE_QUIT): the game quit — ending the run\n");
+        fflush(stderr);
+        kl_ue4_note_force_quit();
+    } else {
+        fprintf(stderr, "  [ue4] ForceQuit ignored: the run goes on (KL_UE4_FORCE_QUIT=1 obeys it)\n");
+    }
     return (klj_val){0};
 }
 // AndroidThunkJava_RestartApplication(String) — on Android the activity schedules
@@ -1384,7 +1399,6 @@ typedef struct {
     float      volume;
     int        looping;
     int        started;          // start() seen; distinct from the decoder running
-    void      *buffer;           // the java.nio.Buffer handed out, cached
     unsigned long long buf_serial;
     int        last_w, last_h;   // for didResolutionChange
     int        res_changed;
@@ -1676,11 +1690,14 @@ static klj_val klj_MP14_setAudioVolume(void *env, void *self, const klj_val *a, 
 
 // The frame, as a direct ByteBuffer over the decoder's own storage.
 //
-// The buffer object is cached per player: UE4 calls this every frame it wants a
-// picture, and a fresh jobject per call is garbage the guest's local frame has
-// to retire. The ADDRESS behind it is stable for the life of the decoder — the
-// frame buffer is reallocated only when the dimensions change, which is why the
-// cache is dropped when they do.
+// A new buffer object on every call, over the same storage: the engine treats
+// the answer as a local reference and DeleteLocalRefs it once it has read the
+// pixels, which retires the object here. A cached one was dead from the second
+// call on — GetDirectBufferAddress answered NULL and -1 — so the engine got the
+// first frame of a movie and nothing after it, and Medal of Honor's intro never
+// made a texture at all (2026-10-18). The ADDRESS behind it is stable for the
+// life of the decoder; the frame buffer is reallocated only when the dimensions
+// change.
 static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
                                               const klj_val *a, int n) {
     (void)a; (void)n;
@@ -1695,13 +1712,9 @@ static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
     if (w != m->last_w || h != m->last_h) {
         m->res_changed = 1;
         m->last_w = w; m->last_h = h;
-        m->buffer = NULL;
     }
-    if (!m->buffer)
-        m->buffer = klj_own(klj_NewDirectByteBuffer(env, (void *)px, (int64_t)bytes),
-                            NULL);
     m->buf_serial = serial;
-    return (klj_val){.l = m->buffer};
+    return (klj_val){.l = klj_NewDirectByteBuffer(env, (void *)px, (int64_t)bytes)};
 }
 
 // (int destTexture) -> Z: "is there a frame", and on GLES also "put it there".

@@ -49,6 +49,11 @@ void kl_metrics_note_game_frame(void);
 // it did. Called a few times a second from a thread that may take a moment —
 // the app's heartbeat — and never from the compositor's.
 int kl_metrics_tick(void);
+// A label for the samples from now on (NULL or "" = none): while one is set,
+// EVERY sample goes to the log, tagged with it — for an A/B inside one session
+// (KL_VK_FRAME_ASYNC_AB). A sample whose second saw the label change is tagged
+// "switch". Copied.
+void kl_metrics_set_tag(const char *tag);
 // The newest sample; returns its seq (0 and an untouched *out before the first).
 unsigned kl_metrics_latest(kl_metrics *out);
 // The upscale as the compositor said it last (kl_metrics_note_upscale), into

@@ -13,6 +13,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <time.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <mach/mach.h>   // vm_read_overwrite — probe a guest pointer without faulting
 #include "klepton.h"
@@ -29,6 +30,7 @@
 #include "kl_egl.h"
 #include "kl_vulkan.h"
 #include "kl_openxr.h"
+#include "kl_metrics.h"
 
 #define KL_OVRP_MAX 512
 static struct { const char *name; unsigned calls; } g_ovrp[KL_OVRP_MAX];
@@ -1095,12 +1097,39 @@ static uint64_t klovrp_GetSystemMultiViewSupported(void) {
     return (uint64_t)kl_ovrp_multiview();
 }
 
+// KL_OVRP_BOUNDARY=1|<w>,<h>,<d>: tell the guest a Guardian is set up, as on
+// every Quest (a Quest cannot be used without one): configured, the given play
+// area size in metres (default 2.0 x 2.5 x 2.0), and a rectangle of that size
+// on the floor round the tracking origin as its geometry. Off, the answers say
+// "no boundary" with zero dimensions, which no Quest ever reports. Angry Birds
+// VR: Isle of Pigs fits its levels to the play area (levelScale,
+// initialPhysicalLevelScaleUp; it calls ovrp_GetBoundaryDimensions) and its
+// island did not stand in the room (2026-10-18). Default 1 for that target.
+static int klovrp_boundary(float dims[3]) {
+    static int v = -1;
+    static float d[3] = { 2.0f, 2.5f, 2.0f };
+    if (v < 0) {
+        const char *t = kl_driver_target_name();
+        const char *e = getenv("KL_OVRP_BOUNDARY");
+        float w, h, z;
+        if (e && sscanf(e, "%f,%f,%f", &w, &h, &z) == 3 && w > 0 && z > 0) {
+            d[0] = w; d[1] = h; d[2] = z; v = 1;
+        } else {
+            v = kl_env_on("KL_OVRP_BOUNDARY", t && !strcmp(t, "x2718606324833775"));
+        }
+        if (v) fprintf(stderr, "  [ovrp] Guardian: reported as set up, play area %.2f x %.2f x %.2f m "
+                               "(KL_OVRP_BOUNDARY)\n", d[0], d[1], d[2]);
+    }
+    if (v && dims) { dims[0] = d[0]; dims[1] = d[1]; dims[2] = d[2]; }
+    return v;
+}
+
 // Guardian boundary: there is no boundary system on this host, so the
 // configured flag is false — same stance as the Geometry2/Visible forms. Real
 // plugin is ovrpResult + int* out (0x171170).
 static uint64_t klovrp_GetBoundaryConfigured2(int *out) {
     ovrp_hit("ovrp_GetBoundaryConfigured2");
-    if (out) *out = 0;
+    if (out) *out = klovrp_boundary(NULL);
     return OVRP_SUCCESS;
 }
 
@@ -1134,6 +1163,26 @@ static uint64_t klovrp_GetEnvironmentDepthFrameDesc(int eye, int *desc) {
     if (desc) *desc = 0;    // ovrpEnvironmentDepthFrameDesc.IsValid = ovrpBool_False
     return OVRP_SUCCESS;
 }
+// KL_OVRP_NO_TRACKERS: answer the four tracker nodes (TrackerZero..Three,
+// 5..8 — the Rift's external sensors) the way a Quest does: not present, not
+// tracked, at the origin. They used to report the HEAD pose like every other
+// unmapped node, which tells a guest that a sensor rides on the user's head.
+// Angry Birds VR: Isle of Pigs reads TrackerZero first thing from its C#, and
+// its island followed the player instead of standing in the room — turning
+// changed the view, walking only changed the angle (2026-10-18). Per target
+// for now; nothing measured says another title reads these nodes.
+static int klovrp_no_trackers(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *t = kl_driver_target_name();
+        v = kl_env_on("KL_OVRP_NO_TRACKERS", t && !strcmp(t, "x2718606324833775"));
+        if (v) fprintf(stderr, "  [ovrp] tracker nodes 5..8: not present, at the origin "
+                               "(KL_OVRP_NO_TRACKERS)\n");
+    }
+    return v;
+}
+static int klovrp_is_tracker(int node) { return node >= 5 && node <= 8; }
+
 static uint64_t klovrp_GetNodePresent2(int node, int *out) {
     ovrp_hit("ovrp_GetNodePresent2");
     // node comes FIRST (real 0x16f450: w0 = ovrpNode, x1 = int* out) — the
@@ -1141,8 +1190,7 @@ static uint64_t klovrp_GetNodePresent2(int node, int *out) {
     // pointer. Any node a caller names is one we report; the value is written
     // for the callers that read it, since at least one (OculusSystem::
     // GetNodePresent, libOculusXRPlugin+0xf264) only checks the return.
-    (void)node;
-    if (out) *out = 1;
+    if (out) *out = !(klovrp_is_tracker(node) && klovrp_no_trackers());
     return OVRP_SUCCESS;
 }
 
@@ -1151,8 +1199,7 @@ static uint64_t klovrp_GetNodePresent2(int node, int *out) {
 // every node we report poses for.
 static uint64_t klovrp_GetNodeOrientationTracked2(int node, int *out) {
     ovrp_hit("ovrp_GetNodeOrientationTracked2");
-    (void)node;
-    if (out) *out = 1;
+    if (out) *out = !(klovrp_is_tracker(node) && klovrp_no_trackers());
     return OVRP_SUCCESS;
 }
 
@@ -1919,6 +1966,13 @@ static int klovrp_unify_default(void) {
     // the profile for untested games takes it for every Unity title that ships
     // Meta's OculusXR plugin, the one that renders with symmetric projection
     // (Catan VR, legacy VR, keeps the cones it was confirmed with).
+    // Not Angry Birds VR: Isle of Pigs (Unity 6000.0, an older OculusXR). Its
+    // plugin places each eye in the texture itself — told the real cones it
+    // makes the texture 4992 wide and puts eye1 at 991, Meta's layout, and the
+    // owner on device: "wirkt tiefer und steht besser im Raum". Told the union
+    // it still offset eye1 (-64 in a 3936 texture) and the picture was flat
+    // (2026-10-18).
+    if (t && strcmp(t, "x2718606324833775") == 0) return 0;
     extern int kl_untested_profile(void);
     extern kl_guest_kind kl_driver_kind(void);
     if (kl_untested_profile() && kl_driver_kind() == KL_GUEST_UNITY) {
@@ -2545,7 +2599,7 @@ static uint64_t klovrp_GetTrackingTransformRelativePose(float *out, int origin) 
 static uint64_t node_tracked(const char *name, int n, uint32_t *out) {
     ovrp_hit(name);
     ovrp_log_arg(name, n, __builtin_return_address(0));
-    *out = 1;
+    *out = !(klovrp_is_tracker(n) && klovrp_no_trackers());
     return OVRP_SUCCESS;
 }
 static uint64_t klovrp_GetNodePositionTracked2(int n, uint32_t *o) {
@@ -3602,8 +3656,8 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
                     * (180.0f/3.14159265358979f);
         float pitch = asinf(2.0f*(qw*qx - qy*qz)) * (180.0f/3.14159265358979f);
         fprintf(stderr, "  [ovrp] head Y=%.3f yaw=%.1f pitch=%.1f  origin=%d "
-                        "(0=eye,1=floor,2=stage) eye_height=%.3f\n",
-                py, yaw, pitch, kl_ovrp_tracking_origin(), kl_ovrp_eye_height());
+                        "(0=eye,1=floor,2=stage) eye_height=%.3f  x=%.3f z=%.3f\n",
+                py, yaw, pitch, kl_ovrp_tracking_origin(), kl_ovrp_eye_height(), px, pz);
         n++;
     } else n++; }
 }
@@ -4256,6 +4310,202 @@ static int klovrp_enq_retire(void);
 // provider (8786 disagreements in a 9000-frame 1.40 run, see EndFrame4), and a
 // compositor keyed on kl_ovrp_last_complete_stage() would then sample the stage
 // the guest is drawing into NEXT — a torn picture with every counter healthy.
+// ---------------------------------------------------------------------------
+// A Vulkan frame filed when the GPU has finished it, not when the guest says it
+// has (KL_VK_FRAME_ASYNC on the OVRPlugin path; default on for the titles in
+// klovrp_frame_async_title below).
+//
+// EndFrame waited for the guest's queue to go idle before filing the frame's
+// record (kl_vulkan_frame_done; why the record must not come first is written
+// at that call). The wait stands on the guest's render thread, so a frame cost
+// its CPU time PLUS its GPU time. LEGO Bricktales on the headset: the game's
+// frame call took 9.9 ms on average with the wait (a third of them over the
+// 10 ms display period) and 2.8 ms without it (headset A/B, 2026-10-18). In
+// the hub that did not yet show more pictures (98.5 a second either way).
+//
+// Here EndFrame MARKS the queue (kl_vulkan_frame_mark), files nothing, and
+// hands the record to one worker that waits for the mark, advances the Vulkan
+// serial and then files the record — the order the synchronous path keeps. One
+// frame is in flight: the next EndFrame waits for it first, which is also what
+// keeps a three-stage guest from drawing into the stage a compositor shows.
+// kl_openxr.c has the same thing for OpenXR guests (Half-Life: Alyx).
+//
+// Not deferred: the overlay list (klovrp_record_overlays). It is filed when the
+// guest says so, as before, but no longer after its GPU work has finished.
+//
+// The titles it is on for, with the compositor's late wait (KL_CP_LATE_WAIT_MS
+// 4.5, kl_ovrp_late_wait_default_ms) — each measured on the headset with both
+// against neither in one session (KL_VK_FRAME_ASYNC_AB, 2026-10-18), averages
+// of the seconds shown at 100 Hz:
+//   LEGO Bricktales  96.5 -> 100.0 shown a second (first lab level)
+//   Arkham Shadow    93.5 -> 99.3 (6.5 -> 0.7 repeated); the worker alone 95.0
+//   Moss             94.2 -> 99.9 at every refresh (KL_GUEST_PACE_DIV=1); the
+//                    worker alone 97.3. At its default, every second refresh,
+//                    neither does anything (60 of 60, both ways).
+// Not Demeo: the worker alone 93.0 against 92.3, and the late wait made it
+// worse (86.5, twice the repeats) — its frames were nearly always in flight and
+// mostly missed the wait anyway. Nothing changes at 50 Hz, where visionOS puts
+// these games of its own accord after a minute or two. Not for a guest with
+// two stages (AC Nexus): the worker lets it draw into the one being shown.
+static int klovrp_frame_async_title(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (!t) return 0;               // asked before the guest is chosen: not yet known, not kept
+        on = !strcmp(t, "x6521909757843713") || !strcmp(t, "batman") || !strcmp(t, "moss");
+    }
+    return on;
+}
+double kl_ovrp_late_wait_default_ms(void) { return klovrp_frame_async_title() ? 4.5 : 0; }
+
+static struct {
+    pthread_mutex_t     mu;
+    pthread_cond_t      cv;
+    int                 started, busy;
+    int                 capturing;      // guest thread: end_frame_impl keeps its record here
+    int                 have_rec;
+    kl_ovrp_render_pose rec;
+    unsigned long       frames, late;
+} g_ovdefer = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0, 0, {0}, 0, 0 };
+
+static void *klovrp_defer_thread(void *unused) {
+    (void)unused;
+    pthread_setname_np("Klepton OVR Frame Publish");
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    for (;;) {
+        pthread_mutex_lock(&g_ovdefer.mu);
+        while (!g_ovdefer.busy) pthread_cond_wait(&g_ovdefer.cv, &g_ovdefer.mu);
+        int have = g_ovdefer.have_rec;
+        kl_ovrp_render_pose rec = g_ovdefer.rec;
+        pthread_mutex_unlock(&g_ovdefer.mu);
+
+        int done = kl_vulkan_frame_wait(1000);
+        kl_vulkan_frame_publish();
+        if (have && (unsigned)rec.stage < KLOVRP_MAX_STAGES) {
+            pthread_mutex_lock(&g_frames.mu);
+            g_frames.r[rec.stage] = rec;
+            g_frames.last_complete = rec.stage;
+            g_frames.filed[rec.stage]++;
+            pthread_mutex_unlock(&g_frames.mu);
+        }
+
+        pthread_mutex_lock(&g_ovdefer.mu);
+        g_ovdefer.frames++;
+        if (!done && g_ovdefer.late++ < 8)
+            fprintf(stderr, "  [ovrp] a frame was filed before the GPU reported it "
+                            "finished (no answer within 1 s) — %lu of %lu so far\n",
+                    g_ovdefer.late, g_ovdefer.frames);
+        g_ovdefer.busy = 0;
+        pthread_cond_broadcast(&g_ovdefer.cv);
+        pthread_mutex_unlock(&g_ovdefer.mu);
+    }
+    return NULL;
+}
+
+static int g_ab_nolate;                 // KL_VK_FRAME_ASYNC_AB_MODES: 1 = no late wait now
+
+// The compositor, just before it takes the newest finished stage: if a frame
+// is on its way through the worker, wait for it, but no longer than max_ms.
+// 1 = it was filed in that time, 0 = none was in flight, -1 = gave up.
+int kl_ovrp_wait_inflight(double max_ms) {
+    if (!(max_ms > 0) || g_ab_nolate) return 0;
+    pthread_mutex_lock(&g_ovdefer.mu);
+    if (!g_ovdefer.busy) { pthread_mutex_unlock(&g_ovdefer.mu); return 0; }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    long ns = ts.tv_nsec + (long)(max_ms * 1e6);
+    ts.tv_sec += ns / 1000000000L;
+    ts.tv_nsec = ns % 1000000000L;
+    while (g_ovdefer.busy)
+        if (pthread_cond_timedwait(&g_ovdefer.cv, &g_ovdefer.mu, &ts) == ETIMEDOUT) break;
+    int r = g_ovdefer.busy ? -1 : 1;
+    pthread_mutex_unlock(&g_ovdefer.mu);
+    return r;
+}
+
+// Guest thread, at EndFrame of a Vulkan guest: 1 when this frame is to be
+// filed by the worker. Waits for the frame before it first.
+//
+// KL_VK_FRAME_ASYNC_AB=<s> — an A/B in one session: the worker is used in
+// every second span of <s> seconds, counted from the first frame and starting
+// with the title's default, and every metrics sample (KL_STATS_CARD) goes to
+// the log tagged with the side it was taken on. A frame in flight is waited
+// for before a switch, so the two ways never overlap.
+// KL_VK_FRAME_ASYNC_AB_MODES=3 — three spans in turn instead: worker off,
+// worker on without the compositor's late wait (KL_CP_LATE_WAIT_MS), worker on
+// with it; tagged async=off, async=on, async=late.
+static int klovrp_defer_begin(void) {
+    static int on = -1;
+    static double ab_s, ab_t0;
+    static int ab_phase = -1, ab_modes = 2;
+    if (on < 0) {
+        on = kl_env_on("KL_VK_FRAME_ASYNC", klovrp_frame_async_title());
+        ab_s = kl_env_float("KL_VK_FRAME_ASYNC_AB", 0.0f);
+        if (!(ab_s >= 2.0)) ab_s = 0;
+        ab_modes = kl_env_int("KL_VK_FRAME_ASYNC_AB_MODES", 2) == 3 ? 3 : 2;
+        if (ab_s > 0)
+            fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC_AB: the frame worker is %s first and "
+                            "switches every %.0f s%s\n", on ? "on" : "off", ab_s,
+                    ab_modes == 3 ? " (off, on, on with the late wait)" : "");
+        else if (on) fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC: frames are filed by a worker "
+                                     "when the GPU has finished them; EndFrame no longer waits\n");
+    }
+    int use = on;
+    if (ab_s > 0) {
+        double now = (double)klovrp_mono_ns() / 1e9;
+        if (ab_t0 == 0) ab_t0 = now;
+        int phase = (int)((now - ab_t0) / ab_s) % ab_modes;
+        use = ab_modes == 3 ? phase > 0 : phase ? !on : on;
+        if (phase != ab_phase) {
+            ab_phase = phase;
+            int late = ab_modes == 3 && phase == 2;
+            g_ab_nolate = ab_modes == 3 && !late;
+            kl_metrics_set_tag(late ? "async=late" : use ? "async=on" : "async=off");
+            fprintf(stderr, "  [ovrp] A/B: frame worker %s\n", late ? "ON + late wait" : use ? "ON" : "OFF");
+        }
+    }
+    pthread_mutex_lock(&g_ovdefer.mu);
+    while (g_ovdefer.busy) pthread_cond_wait(&g_ovdefer.cv, &g_ovdefer.mu);
+    pthread_mutex_unlock(&g_ovdefer.mu);
+    if (!use) return 0;
+    if (!kl_vulkan_frame_mark()) return 0;
+    g_ovdefer.have_rec = 0;
+    g_ovdefer.capturing = 1;
+    return 1;
+}
+
+static void klovrp_defer_submit(void) {
+    pthread_mutex_lock(&g_ovdefer.mu);
+    g_ovdefer.capturing = 0;
+    if (!g_ovdefer.started) {
+        pthread_t t;
+        pthread_attr_t a;
+        pthread_attr_init(&a);
+        pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        g_ovdefer.started = pthread_create(&t, &a, klovrp_defer_thread, NULL) == 0;
+        pthread_attr_destroy(&a);
+    }
+    int started = g_ovdefer.started;
+    if (started) {
+        g_ovdefer.busy = 1;
+        pthread_cond_broadcast(&g_ovdefer.cv);
+    }
+    pthread_mutex_unlock(&g_ovdefer.mu);
+    if (!started) {
+        // No worker: finish here, the synchronous way.
+        kl_vulkan_frame_wait(1000);
+        kl_vulkan_frame_publish();
+        if (g_ovdefer.have_rec && (unsigned)g_ovdefer.rec.stage < KLOVRP_MAX_STAGES) {
+            pthread_mutex_lock(&g_frames.mu);
+            g_frames.r[g_ovdefer.rec.stage] = g_ovdefer.rec;
+            g_frames.last_complete = g_ovdefer.rec.stage;
+            g_frames.filed[g_ovdefer.rec.stage]++;
+            pthread_mutex_unlock(&g_frames.mu);
+        }
+    }
+}
+
 static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewports,
                                       const int *viewport_of, int named_stage) {
     // The stall watch's stamp (kl_stall.c): an OVRPlugin guest's frame is this
@@ -4410,9 +4660,15 @@ static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewport
             stage = (int)((g_frames.serial - 1) % (unsigned)stages);
         g_frames.pending.stage = stage;
         g_frames.pending.complete = 1;
-        g_frames.r[stage] = g_frames.pending;
-        g_frames.last_complete = stage;
-        g_frames.filed[stage]++;
+        if (g_ovdefer.capturing) {
+            // KL_VK_FRAME_ASYNC: the worker files it once the GPU is done.
+            g_ovdefer.rec = g_frames.pending;
+            g_ovdefer.have_rec = 1;
+        } else {
+            g_frames.r[stage] = g_frames.pending;
+            g_frames.last_complete = stage;
+            g_frames.filed[stage]++;
+        }
         if (!binds) g_frames.guessed++;
 
         // **The measurement that decides how the stage should be derived.**
@@ -4621,6 +4877,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // kl_ovrp_last_complete_stage(), and that is not a shortcut — the latter is
     // derived from GL draw observation (kl_glfb_render_stages), which sees
     // nothing at all on a Vulkan guest.
+    int deferred = 0;
     if (kl_vulkan_guest_active()) {
         // File-scope rather than a static in here, because KL_OVRP_POKE's
         // frame form is timed against THIS number: a poke aimed at `f9900`
@@ -4632,7 +4889,10 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         // it. Ordinary runs write no captures at all, so this is the only
         // frame-completion point either way.
         uint64_t t0 = klovrp_mono_ns();
-        kl_vulkan_frame_done(named < 0 ? 0 : named);
+        // KL_VK_FRAME_ASYNC: the wait below is then for the frame BEFORE this
+        // one, and this frame's record goes to the worker.
+        deferred = klovrp_defer_begin();
+        if (!deferred) kl_vulkan_frame_done(named < 0 ? 0 : named);
         // How long the GPU still had to go when the guest said "done" — the
         // width of the window described above, and the number that says
         // whether the guest is GPU-bound.
@@ -4683,8 +4943,10 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     }
     int vp[8], of[2] = { 0, 0 };
     int have = klovrp_submit_viewports(layer_submits, layer_submit_count, vp, of);
-    return klovrp_end_frame_impl(guest_frame_index, have ? vp : NULL,
-                                 have ? of : NULL, named);
+    uint64_t rv = klovrp_end_frame_impl(guest_frame_index, have ? vp : NULL,
+                                        have ? of : NULL, named);
+    if (deferred) klovrp_defer_submit();
+    return rv;
 }
 int kl_ovrp_stage_render_pose(int stage, kl_ovrp_render_pose *out) {
     if ((unsigned)stage >= KLOVRP_MAX_STAGES || !out) return 0;
@@ -4985,6 +5247,41 @@ int kl_ovrp_head_predict_delta(double time_s, float *quat4, float *pos3) {
     return 1;
 }
 
+// KL_GRAB_TRACE=1 (diagnostic): while a hand holds any button, its buttons,
+// trigger and grip values and its pose as published, about 30 times a second,
+// plus every jump of 3 cm or more between two consecutive publishes whatever
+// is held. Built for LEGO Bricktales' "a brick lifted slowly drops" — it showed
+// the trigger bit arriving at ~0 travel, which settled it (KleptonControllers'
+// triggerClickAt).
+static void klovrp_grab_trace(int hand, const klovrp_pose *v) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_GRAB_TRACE", 0);
+    if (!on || (unsigned)hand > 1) return;
+    static float lp[2][3];
+    static int have[2];
+    static uint64_t lt[2];
+    static unsigned lines;
+    if (lines > 40000) return;
+    uint64_t now = klovrp_mono_ns();
+    float dx = v->px - lp[hand][0], dy = v->py - lp[hand][1], dz = v->pz - lp[hand][2];
+    float step = sqrtf(dx * dx + dy * dy + dz * dz);
+    int held = g_input[hand].buttons != 0;
+    if ((have[hand] && step >= 0.03f) || (held && now - lt[hand] >= 33000000ull)) {
+        lines++;
+        lt[hand] = now;
+        fprintf(stderr, "  [grab] %.3f hand %d btn %#x trig %.2f grip %.2f pos %.3f %.3f %.3f"
+                        " vel %.2f %.2f %.2f step %.1f mm%s%s\n", (double)now / 1e9, hand,
+                g_input[hand].buttons, (double)g_input[hand].index_trigger,
+                (double)g_input[hand].hand_trigger,
+                (double)v->px, (double)v->py, (double)v->pz,
+                (double)v->vx, (double)v->vy, (double)v->vz, (double)step * 1000.0,
+                v->motion_valid ? "" : " (vel derived)",
+                have[hand] && step >= 0.03f ? " JUMP" : "");
+    }
+    lp[hand][0] = v->px; lp[hand][1] = v->py; lp[hand][2] = v->pz;
+    have[hand] = 1;
+}
+
 void kl_ovrp_set_hand_motion(int hand, float px, float py, float pz,
                              float qx, float qy, float qz, float qw,
                              float vx, float vy, float vz,
@@ -4997,6 +5294,7 @@ void kl_ovrp_set_hand_motion(int hand, float px, float py, float pz,
     // history still advances, so a publisher that later drops to the pose-only
     // call differentiates against the right previous sample instead of a gap.
     klovrp_hist_note(&g_hand_hist[hand], &v, 0);
+    klovrp_grab_trace(hand, &v);
     klovrp_pose_write(&g_hand_pose[hand], &v);
     __atomic_store_n(&g_hand_set[hand], 1, __ATOMIC_RELEASE);
     float e[3]; klovrp_pose_euler_deg(&v, e);
@@ -5014,6 +5312,7 @@ void kl_ovrp_set_hand_pose(int hand, float px, float py, float pz,
     py -= klovrp_origin_y();
     klovrp_pose v = { px, py, pz, qx, qy, qz, qw, 0, 0, 0, 0, 0, 0, 0 };
     klovrp_derive_motion(&v, &g_hand_hist[hand], 0);
+    klovrp_grab_trace(hand, &v);
     klovrp_pose_write(&g_hand_pose[hand], &v);
     __atomic_store_n(&g_hand_set[hand], 1, __ATOMIC_RELEASE);
     float e[3]; klovrp_pose_euler_deg(&v, e);
@@ -5048,14 +5347,20 @@ void kl_ovrp_set_controller_input(int hand, uint32_t buttons, uint32_t touches,
     // nothing happened" splits into "the bit never arrived" (frontend mapping)
     // vs "it arrived and the guest ignored it" (guest-side read). Always on -
     // presses are rare, so this is a handful of lines per session.
+    // KL_INPUT_LOG_MAX raises the cap (LEGO Bricktales: a session of dialogue
+    // clicks spent all 400 before the first build), and each line carries its
+    // time, so a press can be put next to what the game logged.
     { static uint32_t last[2] = { 0xffffffffu, 0xffffffffu };
-      static unsigned n;
-      if (buttons != last[hand] && n < 400) { n++;
-          fprintf(stderr, "  [input] hand %d buttons %#x -> %#x (trig %.2f grip %.2f)\n",
+      static unsigned n, cap;
+      if (!cap) { const char *c = getenv("KL_INPUT_LOG_MAX");
+                  cap = c && atoi(c) > 0 ? (unsigned)atoi(c) : 400; }
+      if (buttons != last[hand] && n < cap) { n++;
+          fprintf(stderr, "  [input] %.3f hand %d buttons %#x -> %#x (trig %.2f grip %.2f)\n",
+                  (double)klovrp_mono_ns() / 1e9,
                   hand, last[hand] == 0xffffffffu ? 0 : last[hand], buttons,
                   (double)index_trigger, (double)hand_trigger);
-          last[hand] = buttons;
-      } }
+      }
+      last[hand] = buttons; }
     g_input[hand].buttons = buttons;
     g_input[hand].touches = touches;
     g_input[hand].neartouches = touches;   // capacitive proximity ~ touch
@@ -5518,6 +5823,10 @@ uint64_t klovrp_GetNodePoseState_impl(int step, int node, void *out) {
             }
         }
         p = &hand;
+    } else if (klovrp_is_tracker(node) && klovrp_no_trackers()) {
+        // A Quest has no tracker here: identity at the origin, not moving.
+        static const klovrp_pose none = { 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 };
+        p = &none;
     }
     float *f = out;
     f[0] = p->qx; f[1] = p->qy;      // quat xyz at +0x00
@@ -5950,6 +6259,12 @@ int kl_ovrp_pose_boundary_selftest(FILE *f, int which) {
 typedef struct { float x, y, z; } klovrp_vec3;
 static klovrp_vec3 klovrp_GetBoundaryDimensions(void) {
     ovrp_hit("ovrp_GetBoundaryDimensions");
+    float d[3];
+    if (klovrp_boundary(d)) {
+        static int said;
+        if (!said++) fprintf(stderr, "  [ovrp] ovrp_GetBoundaryDimensions asked (KL_OVRP_BOUNDARY)\n");
+        return (klovrp_vec3){d[0], d[1], d[2]};
+    }
     return (klovrp_vec3){0, 0, 0};
 }
 
@@ -11631,10 +11946,47 @@ static uint64_t klovrp_GetHeadPoseModifier(float *rot, float *pos) {
 // Real 0x171a60 / 0x171b00, out-pointer in x1 / x0.
 static uint64_t klovrp_GetBoundaryDimensions2(int type, float *out) {
     ovrp_hit("ovrp_GetBoundaryDimensions2");
-    (void)type;
     if (!out) return OVRP_FAIL_INVALID_PARAM;
     out[0] = out[1] = out[2] = 0.0f;
+    if (klovrp_boundary(out)) {
+        static int said;
+        if (!said++) fprintf(stderr, "  [ovrp] ovrp_GetBoundaryDimensions2(type 0x%x) asked (KL_OVRP_BOUNDARY)\n", type);
+    }
     return OVRP_SUCCESS;
+}
+
+// Under KL_OVRP_BOUNDARY only (kl_ovrp_gated_out): the v1 configured flag and
+// the geometry, a rectangle of the play area on the floor round the origin.
+// Geometry2/3 share one shape — (type, ovrpVector3f *points, int *count) — and
+// are called twice, first with no buffer for the count. 2 returns ovrpBool, 3
+// ovrpResult.
+static uint64_t klovrp_GetBoundaryConfigured(void) {
+    ovrp_hit("ovrp_GetBoundaryConfigured");
+    return (uint64_t)klovrp_boundary(NULL);
+}
+static int klovrp_boundary_rect(int type, float *pts, int *count, const char *name) {
+    float d[3];
+    if (!count || !klovrp_boundary(d)) return 0;
+    static int said;
+    if (!said++) fprintf(stderr, "  [ovrp] %s(type 0x%x) asked (KL_OVRP_BOUNDARY)\n", name, type);
+    float hx = d[0] * 0.5f, hz = d[2] * 0.5f, y = -klovrp_origin_y();
+    const float r[4][3] = { { -hx, y, -hz }, { hx, y, -hz }, { hx, y, hz }, { -hx, y, hz } };
+    if (pts) {
+        int n = *count < 4 ? *count : 4;
+        for (int i = 0; i < n; i++) { pts[3*i] = r[i][0]; pts[3*i+1] = r[i][1]; pts[3*i+2] = r[i][2]; }
+    }
+    *count = 4;
+    return 1;
+}
+static uint64_t klovrp_GetBoundaryGeometry2(int type, float *pts, int *count) {
+    ovrp_hit("ovrp_GetBoundaryGeometry2");
+    return (uint64_t)klovrp_boundary_rect(type, pts, count, "ovrp_GetBoundaryGeometry2");
+}
+static uint64_t klovrp_GetBoundaryGeometry3(int type, float *pts, int *count) {
+    ovrp_hit("ovrp_GetBoundaryGeometry3");
+    if (!count) return OVRP_FAIL_INVALID_PARAM;
+    return klovrp_boundary_rect(type, pts, count, "ovrp_GetBoundaryGeometry3")
+           ? OVRP_SUCCESS : (uint64_t)(int64_t)OVRP_FAIL_OPERATION;
 }
 
 static uint64_t klovrp_GetBoundaryVisible2(int *out) {
@@ -11669,6 +12021,9 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetBodyTrackingCalibrationStatus", (void *)klovrp_body_unsupported},
     {"ovrp_GetBodyTrackingFidelityStatus", (void *)klovrp_body_unsupported},
     {"ovrp_GetBoundaryDimensions2", (void *)klovrp_GetBoundaryDimensions2},
+    {"ovrp_GetBoundaryConfigured", (void *)klovrp_GetBoundaryConfigured},
+    {"ovrp_GetBoundaryGeometry2", (void *)klovrp_GetBoundaryGeometry2},
+    {"ovrp_GetBoundaryGeometry3", (void *)klovrp_GetBoundaryGeometry3},
     {"ovrp_GetBoundaryVisible2", (void *)klovrp_GetBoundaryVisible2},
     {"ovrp_GetConnectedControllers2", (void *)klovrp_GetConnectedControllers2},
     {"ovrp_GetConnectedControllers", (void *)klovrp_GetConnectedControllers},
@@ -12518,7 +12873,13 @@ static const char *const g_ovrp_absent[] = {
 // other target resolves these names as before: the named stub, which aborts
 // with the name (or says UNSUPPORTED under KL_OVRP_UNANSWERED).
 //   ovrp_GetTrackingCalibratedOrigin — Onward (x2677344882310094), fix 50
+//   ovrp_GetBoundaryConfigured/Geometry2/Geometry3 — KL_OVRP_BOUNDARY
 static int kl_ovrp_gated_out(const char *name) {
+    // The Guardian under KL_OVRP_BOUNDARY: off, these keep their old answers
+    // from the name lists below ("no boundary").
+    if (!strcmp(name, "ovrp_GetBoundaryConfigured") || !strcmp(name, "ovrp_GetBoundaryGeometry2") ||
+        !strcmp(name, "ovrp_GetBoundaryGeometry3"))
+        return !klovrp_boundary(NULL);
     if (strcmp(name, "ovrp_GetTrackingCalibratedOrigin") == 0) {
         const char *t = kl_driver_target_name();
         return !t || strcmp(t, "x2677344882310094") != 0;

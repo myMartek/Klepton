@@ -369,6 +369,13 @@ int kl_ovrp_stage_render_pose(int stage, kl_ovrp_render_pose *out);
 // This is the stage a compositor should be sampling, and the only stage index
 // a caller has any business passing to the call above.
 int kl_ovrp_last_complete_stage(void);
+// KL_VK_FRAME_ASYNC: wait up to max_ms for a frame the GPU is still finishing
+// (1 filed, 0 none in flight, -1 gave up). For the compositor, just before it
+// takes the newest finished stage.
+int kl_ovrp_wait_inflight(double max_ms);
+// The budget KL_CP_LATE_WAIT_MS defaults to for this title (0 = no late wait):
+// the titles that have KL_VK_FRAME_ASYNC on by default.
+double kl_ovrp_late_wait_default_ms(void);
 
 // ---------------------------------------------------------------------------
 // The OTHER layers — what a compositor has to draw ON TOP of the eye picture

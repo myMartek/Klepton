@@ -916,6 +916,30 @@ final class KleptonCompositor {
         return recenterXform * held
     }
 
+    // The tracker's own state of the head anchor, once a second: how many
+    // frames were tracked, orientation-only, untracked or missing, and where
+    // ARKit put the head. A position that stands still while the player
+    // walks is either the game or this — orientation-only keeps answering
+    // with a transform whose translation no longer moves (Angry Birds VR,
+    // 2026-10-18: the island followed the player).
+    private var anchorStates = (tracked: 0, orientation: 0, untracked: 0, missing: 0)
+    private func traceAnchorState(_ a: DeviceAnchor?) {
+        if let a {
+            switch a.trackingState {
+            case .tracked: anchorStates.tracked += 1
+            case .orientationTracked: anchorStates.orientation += 1
+            default: anchorStates.untracked += 1
+            }
+        } else { anchorStates.missing += 1 }
+        let n = anchorStates.tracked + anchorStates.orientation + anchorStates.untracked + anchorStates.missing
+        guard n >= 100 else { return }
+        let t = a?.originFromAnchorTransform.columns.3 ?? .zero
+        NSLog("[cp] head anchor: tracked %d, orientation only %d, untracked %d, none %d; ARKit head at (%.2f, %.2f, %.2f)",
+              anchorStates.tracked, anchorStates.orientation, anchorStates.untracked, anchorStates.missing,
+              t.x, t.y, t.z)
+        anchorStates = (0, 0, 0, 0)
+    }
+
     /// Sample every pose for this frame and push it across the seam.
     ///
     /// Called once per frame, *before* kl_app_frame(), so the guest renders
@@ -927,7 +951,9 @@ final class KleptonCompositor {
         // Predicted to the presentation time, not "now": the pose the guest
         // renders with should be the pose the display will show it at, which is
         // the whole point of having a deadline to render against.
-        let controllerHeadAnchor = Self.usable(worldTracking.queryDeviceAnchor(atTimestamp: presentationTime))
+        let rawHeadAnchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime)
+        traceAnchorState(rawHeadAnchor)
+        let controllerHeadAnchor = Self.usable(rawHeadAnchor)
         if let anchor = controllerHeadAnchor {
             // This is the pose the guest will render with, and kl_ovrp latches
             // it into the stage record when the guest reaches ovrp_BeginFrame —
@@ -2179,6 +2205,48 @@ final class KleptonCompositor {
         return out + (bad ? "  <-- the guest and the composite are on DIFFERENT textures" : "")
     }
 
+    /// KL_CP_LATE_WAIT_MS (budget for this composite, in ms; 0 = off): a frame
+    /// of the game that is still on the GPU when this pass takes the newest
+    /// finished one is waited for, until the rendering deadline less that
+    /// budget. LEGO Bricktales (2026-10-18): the game started 100 frames a
+    /// second and 91-98 were shown — the rest finished a few milliseconds after
+    /// this pass had taken the one before. Only frames that go through the
+    /// KL_VK_FRAME_ASYNC worker can be waited for. Default 4.5 for the titles
+    /// that have the worker on by default (LEGO, Arkham Shadow, Moss — the
+    /// measurements are at klovrp_frame_async_title in kl_ovrp.c); LEGO's pass
+    /// needs about 3 ms of GPU.
+    private static let lateWaitBudgetMs: Double = Double(klEnvFloat(
+        "KL_CP_LATE_WAIT_MS", Float(kl_ovrp_late_wait_default_ms())))
+    private var lateWait = (n: 0, filed: 0, gaveUp: 0, none: 0, waitedMs: 0.0, slackMs: 0.0)
+    private func waitForInflightFrame(_ drawable: LayerRenderer.Drawable) {
+        let budget = Self.lateWaitBudgetMs
+        guard budget > 0 else { return }
+        let clock = LayerRenderer.Clock()
+        let now = LayerRenderer.Clock.Instant.epoch.duration(to: clock.now).timeInterval
+        let deadline = LayerRenderer.Clock.Instant.epoch
+            .duration(to: drawable.frameTiming.renderingDeadline).timeInterval
+        let slackMs = (deadline - now) * 1000 - budget
+        lateWait.n += 1
+        lateWait.slackMs += slackMs
+        if slackMs > 0.2 {
+            let r = kl_ovrp_wait_inflight(slackMs)
+            if r == 0 { lateWait.none += 1 }
+            else {
+                if r > 0 { lateWait.filed += 1 } else { lateWait.gaveUp += 1 }
+                let after = LayerRenderer.Clock.Instant.epoch.duration(to: clock.now).timeInterval
+                lateWait.waitedMs += (after - now) * 1000
+            }
+        }
+        if lateWait.n >= 1000 {
+            let w = lateWait
+            NSLog(String(format: "[cp] late wait over %d frames (budget %.1f ms): slack %.1f ms mean; "
+                         + "a frame in flight %d times — filed in time %d, gave up %d, %.2f ms waited mean",
+                         w.n, budget, w.slackMs / Double(w.n), w.filed + w.gaveUp, w.filed, w.gaveUp,
+                         w.filed + w.gaveUp > 0 ? w.waitedMs / Double(w.filed + w.gaveUp) : 0))
+            lateWait = (0, 0, 0, 0, 0, 0)
+        }
+    }
+
     private func renderFrame() -> Int {
         if let rk = rkTarget { return rkRenderFrame(rk) }
         guard let frame = layerRenderer!.queryNextFrame() else { bailNoFrame += 1; return 0 }
@@ -2295,6 +2363,9 @@ final class KleptonCompositor {
                               presetAnchor: DeviceAnchor? = nil, hasPresetAnchor: Bool = false,
                               finish: ((MTLCommandBuffer) -> Void)? = nil) -> Int {
         let main = drawables[0]
+        // The late wait reads the Compositor Services deadline; the RealityKit
+        // output has none and goes without it.
+        if let first = raw.first { waitForInflightFrame(first) }
         if displayQualityX.isEmpty, let first = raw.first { captureDisplayFoveation(first) }
 
         // Which stage holds a *finished* picture. -1 means the guest has not

@@ -1163,11 +1163,16 @@ static void ue4_no_multiview(void) {
     }
 }
 
+static int g_force_quit;
+void kl_ue4_note_force_quit(void) { __atomic_store_n(&g_force_quit, 1, __ATOMIC_RELEASE); }
+int kl_ue4_force_quit_obeyed(void) { return __atomic_load_n(&g_force_quit, __ATOMIC_ACQUIRE); }
+
 double kl_ue4_pump(double seconds, const volatile int *quit) {
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     double elapsed = 0;
-    for (unsigned t = 0; (quit ? !*quit : 1) && (seconds < 0 || elapsed < seconds); t++) {
+    for (unsigned t = 0; (quit ? !*quit : 1) && (seconds < 0 || elapsed < seconds)
+                         && !kl_ue4_force_quit_obeyed(); t++) {
         kl_ndk_pump_looper(100);
         // Cheap and idempotent: the RHI decides multiview during its own init,
         // which is somewhere inside this pump, and the answer is read much

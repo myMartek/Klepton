@@ -413,6 +413,14 @@ build/t_ovrplayers: tests/t_ovrplayers.c $(RUNTIME) $(RUNTIME_HDRS)
 ovrplayers: build/t_ovrplayers
 	./build/t_ovrplayers
 
+# Tracker nodes 5..8 as a Quest answers them (KL_OVRP_NO_TRACKERS, Angry Birds VR). In `make check`.
+build/t_trackers: tests/t_trackers.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_trackers.c $(RUNTIME) $(LDLIBS)
+
+trackers: build/t_trackers
+	./build/t_trackers
+
 # The profile for untested games (kl_untested_profile): which titles, the
 # OVRPlugin version read from a game's own library, and unknown Java methods
 # answered with zero. Milliseconds; in `make check`.
@@ -1087,7 +1095,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room
+check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1116,6 +1124,8 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@head -1 build/posebound.log && grep -E '^(PASS|FAIL)' build/posebound.log
 	@./build/t_ovrplayers > build/ovrplayers.log 2>&1 || { cat build/ovrplayers.log; exit 1; }
 	@cat build/ovrplayers.log
+	@./build/t_trackers > build/trackers.log 2>&1 || { cat build/trackers.log; exit 1; }
+	@tail -1 build/trackers.log
 	@./build/t_untested > build/untested.log 2>&1 || { cat build/untested.log; exit 1; }
 	@head -1 build/untested.log && tail -1 build/untested.log
 	@./build/t_audio > build/audio.log 2>&1 || { cat build/audio.log; exit 1; }
