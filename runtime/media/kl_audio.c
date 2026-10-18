@@ -228,6 +228,17 @@ static size_t           g_cap_scratch_frames;
 static _Atomic uint64_t g_mic_frames_cap, g_mic_frames_drop, g_mic_frames_read;
 static _Atomic int      g_mic_peak;
 
+// ...and the ones the mic heartbeat (mic_heartbeat) prints per interval. A
+// report of "peak 32767" since the start cannot tell one loud cough from a mic
+// that clips all the time, so the heartbeat's peak is reset on every line, and
+// a buffer that touched full scale (±32767: the int16 client format has nowhere
+// to put more, so an AGC that overshoots is a hard clip) is counted.
+static _Atomic int      g_mic_peak_iv;         // since the last heartbeat line
+static _Atomic uint64_t g_mic_bufs, g_mic_bufs_clip;
+static _Atomic uint32_t g_mic_cb_frames;       // the last callback's size, as asked
+static _Atomic uint32_t g_mic_cb_min, g_mic_cb_max;   // ...and its range since the last line
+static int              g_mic_agc = -1;        // AGC as read back from VPIO: -1 unknown / not VPIO
+
 static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 
 // ---- the source table: which guest backend owns the one output ----
@@ -1988,6 +1999,13 @@ static OSStatus capture_cb(void *ref, AudioUnitRenderActionFlags *flags,
     (void)ref; (void)io;
     AudioUnit u = g_cap_unit;
     if (!u || !g_mic_ring || !g_cap_scratch) return noErr;
+    // The size CoreAudio asked for, before the scratch cap below: a burst that
+    // changes (or is clipped) is part of what the heartbeat has to show.
+    atomic_store_explicit(&g_mic_cb_frames, nframes, memory_order_relaxed);
+    uint32_t lo = atomic_load_explicit(&g_mic_cb_min, memory_order_relaxed);
+    if (!lo || nframes < lo) atomic_store_explicit(&g_mic_cb_min, nframes, memory_order_relaxed);
+    if (nframes > atomic_load_explicit(&g_mic_cb_max, memory_order_relaxed))
+        atomic_store_explicit(&g_mic_cb_max, nframes, memory_order_relaxed);
     // Never ask AudioUnitRender for more than the scratch can hold. iOS bursts
     // are far below this cap; a larger one is simply clipped rather than risking
     // a write past the buffer.
@@ -2016,6 +2034,12 @@ static OSStatus capture_cb(void *ref, AudioUnitRenderActionFlags *flags,
     }
     if (peak > atomic_load_explicit(&g_mic_peak, memory_order_relaxed))
         atomic_store_explicit(&g_mic_peak, peak, memory_order_relaxed);
+    // The per-line twin. A heartbeat resetting it between the load and the
+    // store loses at most this one buffer's peak to the next line; no lock.
+    if (peak > atomic_load_explicit(&g_mic_peak_iv, memory_order_relaxed))
+        atomic_store_explicit(&g_mic_peak_iv, peak, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_mic_bufs, 1, memory_order_relaxed);
+    if (peak >= 32767) atomic_fetch_add_explicit(&g_mic_bufs_clip, 1, memory_order_relaxed);
 
     // A one-shot verdict for the next log: is the callback actually HEARING
     // anything, or rendering silence? Fires at most twice over a session, so the
@@ -2062,12 +2086,79 @@ static OSStatus capture_cb(void *ref, AudioUnitRenderActionFlags *flags,
 // RemoteIO/HALOutput fallback), for the one-time log.
 static const char *g_mic_unit_name = "?";
 
+static const char *mic_agc_name(void) {
+    return g_mic_agc == 1 ? "on" : g_mic_agc == 0 ? "OFF" : "n/a";
+}
+
+// ---- the mic heartbeat ----
+//
+// The report's "microphone:" line is cumulative and rides on the output's live
+// report; neither can say whether the mic CLIPS or how it is being clocked. So
+// while a capture unit is open this prints one line every KL_MIC_REPORT_SECS
+// (default 5, 0 = none): totals, the peak and the full-scale buffers since the
+// line before, and the callback's frame size. Its own thread — started once, on
+// the first open — so it touches none of the output side's state, and a run
+// that never records never starts it.
+static void mic_heartbeat(unsigned secs) {
+    static uint64_t cap0, rd0, dr0, bufs0, clip0;
+    uint64_t cap  = atomic_load(&g_mic_frames_cap);
+    uint64_t rd   = atomic_load(&g_mic_frames_read);
+    uint64_t dr   = atomic_load(&g_mic_frames_drop);
+    uint64_t bufs = atomic_load(&g_mic_bufs);
+    uint64_t clip = atomic_load(&g_mic_bufs_clip);
+    int pk = atomic_exchange(&g_mic_peak_iv, 0);
+    uint32_t lo = atomic_exchange(&g_mic_cb_min, 0), hi = atomic_exchange(&g_mic_cb_max, 0);
+    double r = g_mic_rate ? (double)g_mic_rate : 48000.0;
+    fprintf(stderr, "  [au] mic: %s AGC %s %u Hz/%u ch | %.2f s captured (+%.2f), "
+                    "%.2f s read (+%.2f), %.2f s dropped (+%.2f) in %u s | "
+                    "peak %d/32767 (%.1f dBFS), %llu of %llu buffers at full scale | "
+                    "callback %u frames (%u..%u)%s\n",
+            g_mic_unit_name, mic_agc_name(), g_mic_rate, g_mic_ch,
+            cap / r, (cap - cap0) / r, rd / r, (rd - rd0) / r, dr / r, (dr - dr0) / r, secs,
+            pk, pk ? 20.0 * log10((double)pk / 32767.0) : -99.0,
+            (unsigned long long)(clip - clip0), (unsigned long long)(bufs - bufs0),
+            atomic_load(&g_mic_cb_frames), lo, hi,
+            hi > g_cap_scratch_frames && g_cap_scratch_frames ? " — CLIPPED TO THE SCRATCH" : "");
+    cap0 = cap; rd0 = rd; dr0 = dr; bufs0 = bufs; clip0 = clip;
+}
+
+static void *mic_heartbeat_thread(void *unused) {
+    (void)unused;
+    pthread_setname_np("klepton-mic-heartbeat");
+    unsigned secs = (unsigned)kl_env_int("KL_MIC_REPORT_SECS", 5);
+    uint64_t last = 0;
+    for (;;) {
+        nap_ms(250);
+        if (!g_mic_open) { last = 0; continue; }
+        uint64_t now = now_ns();
+        if (!last) { last = now; continue; }
+        if (now - last < (uint64_t)secs * 1000000000ull) continue;
+        last = now;
+        mic_heartbeat(secs);
+    }
+    return NULL;
+}
+
+// Under g_mic_lock (kl_audio_mic_open), so it starts at most once.
+static void mic_heartbeat_start(void) {
+    static int started;
+    if (started) return;
+    started = 1;
+    if (kl_env_int("KL_MIC_REPORT_SECS", 5) <= 0) return;
+    pthread_t t;
+    if (pthread_create(&t, NULL, mic_heartbeat_thread, NULL) != 0) {
+        fprintf(stderr, "  [au] could not start the mic heartbeat thread\n");
+        return;
+    }
+    pthread_detach(t);
+}
+
 // The client format — int16 interleaved at `rate`/`ch`, set on the OUTPUT scope
 // of the input element (element 1). This is FORMAT PACKING ONLY: `rate`/`ch` are
 // the mic's NATIVE values (see cap_build), so the unit converts neither rate nor
 // channels — it just hands us signed 16-bit instead of its canonical float. The
 // device->guest rate/channel conversion is kl_aaudio.c's job (anti-aliased there
-// by its low-pass net on the rare downsample path).
+// by its one-pole low-pass whenever the guest asks below the native rate).
 static OSStatus cap_set_client_format(unsigned rate, unsigned ch) {
     AudioStreamBasicDescription fmt = {0};
     fmt.mSampleRate       = rate;
@@ -2131,12 +2222,18 @@ static int cap_build(OSType subtype, const char *name, int vpio) {
     // no such properties. BypassVoiceProcessing = 0 makes sure the noise
     // suppression + AGC that cleans the raw beamformed array is actually ON;
     // EnableAGC = 1 asks for the automatic gain that lifts the low capture level.
+    //
+    // KL_MIC_AGC=0 (a Test switch in the start window) is the A/B for "the mic
+    // sounds overdriven": the AGC is asked OFF instead. Asked, not merely left
+    // alone — VPIO's own default for this property is on, so skipping the set
+    // would change nothing. Default 1 is the behaviour this has always had.
+    g_mic_agc = -1;
     if (vpio) {
-        UInt32 off = 0, on = 1;
+        UInt32 off = 0, agc = kl_env_on("KL_MIC_AGC", 1) ? 1 : 0;
         OSStatus vp = AudioUnitSetProperty(g_cap_unit, kAUVoiceIOProperty_BypassVoiceProcessing,
                                            kAudioUnitScope_Global, 0, &off, sizeof off);
         OSStatus ag = AudioUnitSetProperty(g_cap_unit, kAUVoiceIOProperty_VoiceProcessingEnableAGC,
-                                           kAudioUnitScope_Global, 0, &on, sizeof on);
+                                           kAudioUnitScope_Global, 0, &agc, sizeof agc);
         if (vp != noErr || ag != noErr) {
             char b1[8], b2[8];
             fprintf(stderr, "  [au] VPIO props (non-fatal): bypass=%s, AGC=%s\n",
@@ -2169,6 +2266,15 @@ static int cap_build(OSType subtype, const char *name, int vpio) {
     CHECK(cap_set_client_format(g_mic_rate, g_mic_ch), "SetProperty(StreamFormat,capture)");
     CHECK(AudioUnitInitialize(g_cap_unit), "AudioUnitInitialize(capture)");
 
+    // What the unit says the AGC is now, not what we asked: the one-time line
+    // and every heartbeat carry it, so an A/B log cannot be misread.
+    if (vpio) {
+        UInt32 v = 0, vsz = sizeof v;
+        if (AudioUnitGetProperty(g_cap_unit, kAUVoiceIOProperty_VoiceProcessingEnableAGC,
+                                 kAudioUnitScope_Global, 0, &v, &vsz) == noErr)
+            g_mic_agc = v ? 1 : 0;
+    }
+
     g_mic_unit_name = name;
     return 0;
 fail:
@@ -2191,7 +2297,14 @@ static int cap_unit_create(unsigned want_rate, unsigned want_ch) {
     // it coexists with the .voiceChat session instead of being starved by it. If
     // VPIO will not initialise, fall back to plain RemoteIO — "works but raw"
     // rather than silent.
-    if (cap_build(kAudioUnitSubType_VoiceProcessingIO, "VoiceProcessingIO", 1) != 0) {
+    //
+    // KL_MIC_RAW=1 (a Test switch in the start window) goes straight to that
+    // RemoteIO: no noise suppression, no AGC, no voice processing at all — the
+    // other half of the "overdriven / crackling" A/B. Off by default.
+    if (kl_env_on("KL_MIC_RAW", 0)) {
+        fprintf(stderr, "  [au] KL_MIC_RAW=1 — capturing through plain RemoteIO (raw mic)\n");
+        if (cap_build(kAudioUnitSubType_RemoteIO, "RemoteIO (KL_MIC_RAW)", 0) != 0) return -1;
+    } else if (cap_build(kAudioUnitSubType_VoiceProcessingIO, "VoiceProcessingIO", 1) != 0) {
         fprintf(stderr, "  [au] VPIO capture unavailable — falling back to plain "
                         "RemoteIO (raw mic)\n");
         if (cap_build(kAudioUnitSubType_RemoteIO, "RemoteIO", 0) != 0) return -1;
@@ -2199,8 +2312,8 @@ static int cap_unit_create(unsigned want_rate, unsigned want_ch) {
 #endif
 
     // The one-time verdict the next steamlink log is read against.
-    fprintf(stderr, "  [au] microphone capture: %s, native %u Hz/%u ch int16 (device %u Hz)\n",
-            g_mic_unit_name, g_mic_rate, g_mic_ch, g_mic_dev_rate);
+    fprintf(stderr, "  [au] microphone capture: %s, AGC %s, native %u Hz/%u ch int16 (device %u Hz)\n",
+            g_mic_unit_name, mic_agc_name(), g_mic_rate, g_mic_ch, g_mic_dev_rate);
     return 0;
 }
 
@@ -2262,6 +2375,7 @@ int kl_audio_mic_open(unsigned want_rate, unsigned want_channels) {
         return -1;
     }
     g_mic_open = 1;
+    mic_heartbeat_start();
     pthread_mutex_unlock(&g_mic_lock);
 
     fprintf(stderr, "  [au] CoreAudio in: guest wants %u Hz/%u ch -> capturing %u Hz/%u ch%s\n",

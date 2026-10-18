@@ -2841,6 +2841,35 @@ The device stays open until the last source has closed.
   because the write loop breaks out of its spin *before* the watchdog on that
   flag. Raise it if a real interruption is being fought over.
 
+### Microphone (capture: `kl_audio.c` cap_build, `kl_aaudio.c` klaa_capture_into)
+
+Armed by the KleptonMic toggle and opened on the first guest input stream
+(Steam Link's `AAudioStream_read`, Walkabout's Photon voice through
+`kl_jni_services.c`). The unit is VoiceProcessingIO with its AGC asked on, its
+output element disabled (so its echo canceller has no reference), capturing
+int16 at the device's native rate and channel count; `kl_aaudio.c` converts to
+the guest's ask — one-pole low-pass + linear interpolation whenever the guest
+asks below the native rate (Steam Link's 16/24 kHz voice against 48 kHz).
+
+- `KL_MIC_AGC=0` — ask VPIO's automatic gain OFF (VPIO's own default is on,
+  so this sets 0 rather than skipping the set). The A/B for "others hear me
+  overdriven". Default 1. A Test switch in the start window.
+- `KL_MIC_RAW=1` — capture through plain RemoteIO: no voice processing at all
+  (quiet, ~759/32767 on Vision Pro, room and game sound included). The other
+  half of that A/B. Default 0. A Test switch in the start window.
+- `KL_MIC_REPORT_SECS=<n>` — interval of the two mic lines below (default 5,
+  0 = none). While the capture unit is open, `[au] mic: <unit> AGC on|OFF|n/a
+  <rate>/<ch> | … s captured (+…), … s read (+…), … s dropped (+…) in n s |
+  peak …/32767 (… dBFS), X of Y buffers at full scale | callback N frames
+  (min..max)` — peak and full-scale count are since the line before. A
+  growing "full scale" count is a hard clip in the int16 client format; a
+  "dropped" that grows is the guest not keeping up. Beside it, per input
+  stream, `[aaudio] mic AAudioStream_read|callback: n calls in … s, k short,
+  z empty, got of asked frames, last asked F with timeout T ms | guest
+  format <- mic format (ratio, low-pass + linear downsample | straight copy)`.
+  The one-time `[au] microphone capture:` line names the unit and the AGC
+  as read back from it.
+
 ## x18 (`runtime/kl_x18.c`)
 
 - `KL_X18=0` — disable x18 veneering (also `n`/`N`, matched on the first

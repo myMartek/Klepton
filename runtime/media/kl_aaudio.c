@@ -152,11 +152,17 @@ typedef struct klaa_stream {
     size_t   in_have;            // valid mic frames currently in in_hold
     double   in_pos;             // fractional read position within in_hold
     unsigned mic_rate, mic_ch;   // the capture format this stream resamples FROM
-    // Anti-alias safety net for the fallback path only (mic_rate > rate, i.e. a
-    // real downsample this code has to do because RemoteIO would not capture at
-    // the guest rate). One-pole low-pass state per channel; unused when the
-    // capture already arrives at the guest rate (ratio == 1, the normal case).
+    // Anti-alias state for the downsample (mic_rate > rate): the capture always
+    // arrives at the device's native rate, so this runs whenever the guest asks
+    // for less than that — Steam Link's 16/24 kHz voice included. One-pole
+    // low-pass state per channel; unused only when the rates match (ratio == 1).
     float    in_lp[8];
+    // How the guest's pulls fare, per KL_MIC_REPORT_SECS interval (klaa_capture_into):
+    // calls, how many came back short of what was asked, how many with nothing.
+    unsigned long in_calls, in_short, in_zero;
+    uint64_t in_req, in_got;
+    int64_t  in_timeout_ns;      // the last call's timeout, as the guest gave it
+    double   in_t0;              // start of the interval (klaa_now)
 
     unsigned long callbacks, frames;   // for the report
 
@@ -696,12 +702,15 @@ static void klaa_stop_join(klaa_stream *s) {
 // real-time callback in kl_audio.c.
 
 // A one-pole low-pass over mic frames [from, to), in place, per channel — the
-// anti-alias pre-filter for the rare FALLBACK where the capture unit would not
-// take the guest's rate and we must decimate in software (mic_rate > guest rate).
-// The coefficient tracks the decimation depth (a ~= 1/ratio: a bigger ratio wants
-// a lower cutoff); it is a gentle roll-off, not a brick wall, but it turns raw
-// aliasing into something far less harsh. Never runs on the normal path, where
-// the capture already arrives at the guest rate (ratio == 1).
+// anti-alias pre-filter for decimating in software (mic_rate > guest rate). That
+// is not a rare fallback: the capture unit always records at the device's native
+// rate (cap_unit_create ignores the guest's ask; the input bus converts no rate),
+// so this runs on EVERY stream that asks for less than the native rate — Steam
+// Link's voice at 16 or 24 kHz against a 48 kHz mic, for one. The coefficient
+// tracks the decimation depth (a ~= 1/ratio: a bigger ratio wants a lower
+// cutoff); it is a gentle roll-off, not a brick wall, so some aliasing still
+// gets through the linear interpolation after it. Only a stream at the native
+// rate (ratio == 1) skips it.
 static void klaa_lowpass(klaa_stream *s, size_t from, size_t to, unsigned mch, double ratio) {
     float a = (float)(1.0 / ratio);
     if (a <= 0.0f) a = 0.001f; else if (a > 1.0f) a = 1.0f;
@@ -711,6 +720,41 @@ static void klaa_lowpass(klaa_stream *s, size_t from, size_t to, unsigned mch, d
             s->in_lp[c] += a * (x - s->in_lp[c]);
             s->in_hold[i * mch + c] = (int16_t)lrintf(s->in_lp[c]);
         }
+}
+
+// One line per KL_MIC_REPORT_SECS (default 5, 0 = none) about the guest's side
+// of the capture: how many pulls (AAudioStream_read, or the input feeder for a
+// callback stream) came back short of what they asked, or empty, and the
+// conversion they went through. A guest that keeps getting short reads hears
+// gaps, which a mic heartbeat alone ([au] mic) cannot show. Called on the
+// guest's reader thread, never a real-time one.
+static void klaa_capture_census(klaa_stream *s, int32_t req, int32_t got,
+                                int64_t timeout_ns, double ratio) {
+    static int secs = -1;
+    if (secs < 0) secs = kl_env_int("KL_MIC_REPORT_SECS", 5);
+    if (secs <= 0) return;
+    s->in_calls++;
+    if (got < req) s->in_short++;
+    if (got == 0) s->in_zero++;
+    s->in_req += (uint64_t)req;
+    s->in_got += (uint64_t)got;
+    s->in_timeout_ns = timeout_ns;
+    double now = klaa_now();
+    if (s->in_t0 == 0.0) { s->in_t0 = now; return; }
+    if (now - s->in_t0 < (double)secs) return;
+    fprintf(stderr, "  [aaudio] mic %s: %lu calls in %.1f s, %lu short, %lu empty, "
+                    "%llu of %llu frames asked, last asked %d with timeout %.1f ms | "
+                    "%d Hz/%d ch %s <- mic %u Hz/%u ch (ratio %.3f%s)\n",
+            s->data_cb ? "callback" : "AAudioStream_read",
+            s->in_calls, now - s->in_t0, s->in_short, s->in_zero,
+            (unsigned long long)s->in_got, (unsigned long long)s->in_req,
+            req, (double)timeout_ns / 1e6,
+            s->rate, s->channels, klaa_format_name(s->format), s->mic_rate, s->mic_ch,
+            ratio, ratio > 1.0 ? ", low-pass + linear downsample" :
+                   ratio < 1.0 ? ", linear upsample" : ", straight copy");
+    s->in_calls = s->in_short = s->in_zero = 0;
+    s->in_req = s->in_got = 0;
+    s->in_t0 = now;
 }
 
 // Produce up to `req` guest frames into `dst`, in the stream's format, from the
@@ -757,8 +801,8 @@ static int32_t klaa_capture_into(klaa_stream *s, void *dst, int32_t req, int64_t
             if (got > 0) {
                 s->in_have += (size_t)got;
                 // Filter ONLY the newly-pulled frames, exactly once, so the carried
-                // leftover from a previous call is never double-filtered. No-op
-                // unless this is the downsample fallback (ratio > 1).
+                // leftover from a previous call is never double-filtered. Runs
+                // whenever the guest rate is below the mic's (ratio > 1).
                 if (ratio > 1.0) klaa_lowpass(s, prev, s->in_have, mch, ratio);
             }
         }
@@ -806,6 +850,7 @@ static int32_t klaa_capture_into(klaa_stream *s, void *dst, int32_t req, int64_t
     }
 
     s->frames += (unsigned long)produced;
+    klaa_capture_census(s, req, produced, timeout_ns, ratio);
     return produced;
 }
 
