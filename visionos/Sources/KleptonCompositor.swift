@@ -3162,19 +3162,6 @@ final class KleptonCompositor {
                                backdrop: false)
             enc.endEncoding()
             return viewIndices.count
-        } else if kl_loadingvideo_surface_served() != 0 {
-            // The guest's loading screen is its own video and no frame of it is
-            // here (yet, or the file was not found): the eye still holds the
-            // picture from before the load — Medal of Honor's old menu pieces in
-            // both eyes. Black plus the guest's panels — the black drawn as the
-            // panels' backdrop, WITH depth: a clear alone writes none, and a
-            // drawable block with no depth is where the mixed space shows the
-            // room (Medal of Honor's loading turned into passthrough, 2026-10-18).
-            _ = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
-                               originFromHead: originFromHead, writeDepth: true,
-                               backdrop: true)
-            enc.endEncoding()
-            return viewIndices.count
         }
 
         // One uniform per view, in the order the viewports and the amplification
@@ -4459,10 +4446,10 @@ final class KleptonCompositor {
             }
         }
         // The video the guest itself asked to play onto its Equirect layer (an
-        // Unreal title's GameActivity.playVideo, kl_jni_ue4.c) comes first, and a
-        // new one replaces the one playing. With sound: it is the game's own
-        // loading video, narration included, where AC Nexus's backdrop below is
-        // a silent loop the game never names.
+        // Unreal title's GameActivity.playVideo, kl_jni_ue4.c — Medal of Honor's
+        // 360 gallery films) comes first, and a new one replaces the one
+        // playing. With sound: it is the film itself, narration included, where
+        // AC Nexus's backdrop below is a silent loop the game never names.
         var src = [CChar](repeating: 0, count: 1024)
         let gen = kl_loadingvideo_source(&src, Int32(src.count))
         if gen != loadingVideoSourceGen {

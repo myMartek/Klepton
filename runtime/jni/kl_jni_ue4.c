@@ -1232,7 +1232,7 @@ static klj_val klj_GA_getAppPackageName(void *env, void *self, const klj_val *a,
 // GameActivity.playVideo(String path, Surface) — an Unreal title's own Java
 // video player (ExoPlayer) run into the Surface of an Equirect layer
 // (kl_ovrp.c, GetLayerAndroidSurfaceObject). Medal of Honor: Above and Beyond
-// plays its 360 loading videos this way. There is no ExoPlayer here; the path
+// plays its 360 gallery films this way. There is no ExoPlayer here; the path
 // is resolved to a host file and handed to the compositor's loading skybox,
 // which plays it on that layer (kl_loadingvideo_set_source). The Java side
 // takes "file://…", a bare path, or "jar:file:<container>!/<entry>" for a
@@ -1280,7 +1280,7 @@ static klj_val klj_GA_playVideo(void *env, void *self, const klj_val *a, int n) 
     char host[1024];
     klj_GA_video_resolve(what, host, sizeof host);
     KLJ_LOG("GameActivity.playVideo(\"%s\") -> %s", what ? what : "",
-            host[0] ? host : "not found; the loading layer stays black");
+            host[0] ? host : "not found; nothing is played");
     kl_loadingvideo_set_source(host[0] ? host : NULL);
     return (klj_val){.j = 0};
 }

@@ -10232,17 +10232,14 @@ static uint64_t klovrp_GetLayerTexturePtr(int layer_id, int stage, int eye,
 // carries on; the background is dropped, the scene is not.
 //
 // ...except for an Unreal title's Equirect layer. Medal of Honor: Above and
-// Beyond plays its 360 loading videos that way: it asks for the layer's Surface
-// and hands it, with the video's path, to its Java GameActivity.playVideo, which
-// runs ExoPlayer into it. Refused, it never called playVideo, the loading
-// screens stayed empty and the compositor showed the last eye picture there —
-// old menu pieces in both eyes (2026-10-18). So the layer gets a stand-in
+// Beyond plays its 360 gallery films that way (ANative360VideoPlayer): it sets
+// the layer up in the menu, asks for the layer's Surface, and once a film is
+// picked hands it, with the film's path, to its Java GameActivity.playVideo,
+// which runs ExoPlayer into it. So the layer gets a stand-in
 // android/view/Surface; playVideo (kl_jni_ue4.c) names the file to
-// kl_loadingvideo_set_source, and the compositor's loading skybox plays it.
+// kl_loadingvideo_set_source, and the compositor's Equirect skybox plays it.
 // KL_OVRP_LAYER_SURFACE=0/1 overrides; default on for UE4 guests only, so AC
 // Nexus (Unity) keeps the refusal it was tuned against.
-static int g_loadvid_surface_served;
-int kl_loadingvideo_surface_served(void) { return g_loadvid_surface_served; }
 static uint64_t klovrp_GetLayerAndroidSurfaceObject(int layer_id, void **surface) {
     ovrp_hit("ovrp_GetLayerAndroidSurfaceObject");
     if (surface) *surface = NULL;
@@ -10259,7 +10256,6 @@ static uint64_t klovrp_GetLayerAndroidSurfaceObject(int layer_id, void **surface
     if (!equirect || !surface) return OVRP_FAIL_UNSUPPORTED;
     extern void *kl_jni_new_object(const char *class_name);
     *surface = kl_jni_new_object("android/view/Surface");
-    if (*surface) g_loadvid_surface_served = 1;
     static int said;
     if (!said) { said = 1;
         fprintf(stderr, "  [ovrp] GetLayerAndroidSurfaceObject(layer %d, Equirect) -> a stand-in "

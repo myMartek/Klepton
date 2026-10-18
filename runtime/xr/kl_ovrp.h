@@ -469,10 +469,6 @@ void kl_loadingvideo_stop(void);
 // copies it out and returns a generation that changes with every set.
 void kl_loadingvideo_set_source(const char *host_path);
 unsigned kl_loadingvideo_source(char *out, int cap);
-// 1 once an Equirect layer was handed a stand-in Surface: the loading screen is
-// the guest's video, so with no frame of it yet the compositor shows black
-// rather than the last eye picture (which holds whatever came before).
-int kl_loadingvideo_surface_served(void);
 
 // ...and the two calls that FILE those records for a guest that does not speak
 // OVRPlugin at all.
