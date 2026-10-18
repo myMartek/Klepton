@@ -1696,10 +1696,27 @@ static void *guest_thread(void *unused) {
     printf("\n=== guest thread running, one frame per published pose ===\n");
     fflush(NULL);
 
+    // KL_GUEST_PACE_DIV holds here as well, the way guest_pace_wait applies it
+    // to a guest that owns its loop: a pose that comes too soon after the one
+    // the last frame started on is let go by. Until 2026-10-18 this loop never
+    // read it, so the Test switch did nothing for any Unity game (Arkham Shadow
+    // and LEGO Bricktales on the headset: no "[guest] paced" line, the full
+    // rate shown).
+    int pace_div = guest_pace_div();
+    uint64_t last_turn_ns = 0;
     for (;;) {
         pthread_mutex_lock(&g_guest.mu);
-        while (!g_guest.stop && g_guest.published == g_guest.consumed)
-            pthread_cond_wait(&g_guest.cv, &g_guest.mu);
+        for (;;) {
+            while (!g_guest.stop && g_guest.published == g_guest.consumed)
+                pthread_cond_wait(&g_guest.cv, &g_guest.mu);
+            if (pace_div <= 1 || g_guest.stop || !last_turn_ns) break;
+            uint64_t gap = guest_pose_gap_ns();
+            if (!gap || gap >= 13000000ull) break;  // not known yet, or shown at half rate already
+            if (g_guest.published_ns - last_turn_ns >= (uint64_t)pace_div * gap - gap / 4) break;
+            g_guest.consumed = g_guest.published;  // too soon after the last frame: let this pose go by
+        }
+        last_turn_ns = g_guest.published_ns;
+        kl_metrics_note_game_frame();
         int stop = g_guest.stop;
         // Coalesce, do not queue: take everything published since the last
         // frame as a single turn. This is what makes "the guest is late" mean
