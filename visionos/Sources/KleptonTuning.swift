@@ -316,6 +316,8 @@ final class KleptonRendering: ObservableObject {
         // in the room (kl_driver.c sets its passthrough).
         return t == "x5340130476095884" || t == "x3634830803298285" || t == "x2436558143118760"
             || t == "x8387152738076399"
+            || t == "x6521909757843713"     // LEGO Bricktales: its AR mode (2026-10-17)
+            || t == "x2718606324833775"     // Angry Birds VR: its mixed reality mode (2026-10-18)
             || klEnvOn("KL_OVRP_PASSTHROUGH", default: false)
     }()
     @Published var maxRate: Int {
