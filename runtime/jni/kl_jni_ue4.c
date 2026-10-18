@@ -1384,7 +1384,6 @@ typedef struct {
     float      volume;
     int        looping;
     int        started;          // start() seen; distinct from the decoder running
-    void      *buffer;           // the java.nio.Buffer handed out, cached
     unsigned long long buf_serial;
     int        last_w, last_h;   // for didResolutionChange
     int        res_changed;
@@ -1676,11 +1675,14 @@ static klj_val klj_MP14_setAudioVolume(void *env, void *self, const klj_val *a, 
 
 // The frame, as a direct ByteBuffer over the decoder's own storage.
 //
-// The buffer object is cached per player: UE4 calls this every frame it wants a
-// picture, and a fresh jobject per call is garbage the guest's local frame has
-// to retire. The ADDRESS behind it is stable for the life of the decoder — the
-// frame buffer is reallocated only when the dimensions change, which is why the
-// cache is dropped when they do.
+// A new buffer object on every call, over the same storage: the engine treats
+// the answer as a local reference and DeleteLocalRefs it once it has read the
+// pixels, which retires the object here. A cached one was dead from the second
+// call on — GetDirectBufferAddress answered NULL and -1 — so the engine got the
+// first frame of a movie and nothing after it, and Medal of Honor's intro never
+// made a texture at all (2026-10-18). The ADDRESS behind it is stable for the
+// life of the decoder; the frame buffer is reallocated only when the dimensions
+// change.
 static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
                                               const klj_val *a, int n) {
     (void)a; (void)n;
@@ -1695,13 +1697,9 @@ static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
     if (w != m->last_w || h != m->last_h) {
         m->res_changed = 1;
         m->last_w = w; m->last_h = h;
-        m->buffer = NULL;
     }
-    if (!m->buffer)
-        m->buffer = klj_own(klj_NewDirectByteBuffer(env, (void *)px, (int64_t)bytes),
-                            NULL);
     m->buf_serial = serial;
-    return (klj_val){.l = m->buffer};
+    return (klj_val){.l = klj_NewDirectByteBuffer(env, (void *)px, (int64_t)bytes)};
 }
 
 // (int destTexture) -> Z: "is there a frame", and on GLES also "put it there".
