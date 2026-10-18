@@ -28,6 +28,8 @@
 #include "kl_ndk.h"
 #include "kl_va.h"
 #include "kl_jni_int.h"
+#include "kl_driver.h"
+#include "kl_ue4.h"
 
 // ---- UE4's MessageBox01 ----
 // `FPlatformMisc::MessageBoxExt` on Android: the engine news up one of these,
@@ -1080,7 +1082,7 @@ static klj_val klj_GA_forceQuit(void *env, void *self, const klj_val *a, int n) 
     // but if this fires, something upstream went wrong and the log above it says
     // what. (With vkGetPhysicalDeviceMemoryProperties2 implemented, the Vulkan
     // path no longer triggers it.)
-    KLJ_LOG("AndroidThunkJava_ForceQuit() — the guest asked to quit; ignored "
+    KLJ_LOG("AndroidThunkJava_ForceQuit() — the guest asked to quit "
             "(see the log just above for why it wanted to)");
     // Shipping UE builds strip their runtime log, so the "why" often is NOT
     // above — nothing reaches stdout or logcat. Dump the GUEST call stack of
@@ -1090,6 +1092,19 @@ static klj_val klj_GA_forceQuit(void *env, void *self, const klj_val *a, int n) 
     fprintf(stderr, "  [ue4] ForceQuit caller stack (symbolise against the guest "
                     "libUE4/libUnreal with tools/symof.py):\n");
     kl_fault_print_frames(stderr, __builtin_frame_address(0));
+    // KL_UE4_FORCE_QUIT=1: obey it, as the Quest does. The pump ends and the
+    // app leaves as for a game's own quit. On by default for Medal of Honor,
+    // whose Quit button reaches ForceQuit once FEngineLoop::Exit is through
+    // (moh-exit-no-rhi-teardown, kl_guestpatch.c); off for every other title,
+    // where ForceQuit is still a bail worth staying alive for.
+    const char *t = kl_driver_target_name();
+    if (kl_env_on("KL_UE4_FORCE_QUIT", t && strcmp(t, "x3647259232032222") == 0)) {
+        fprintf(stderr, "  [ue4] ForceQuit obeyed (KL_UE4_FORCE_QUIT): the game quit — ending the run\n");
+        fflush(stderr);
+        kl_ue4_note_force_quit();
+    } else {
+        fprintf(stderr, "  [ue4] ForceQuit ignored: the run goes on (KL_UE4_FORCE_QUIT=1 obeys it)\n");
+    }
     return (klj_val){0};
 }
 // AndroidThunkJava_RestartApplication(String) — on Android the activity schedules

@@ -677,7 +677,37 @@ static const kl_gp_word k_shave_stuff_missing_selection_fx[] = {
     { 0x2660d28, 0xb0010773, 0xd65f03c0, "return without optional selection effect" },
 };
 
+// Medal of Honor: Above and Beyond (libUE4.so, UE 4.25, store target
+// x3647259232032222): the game's own Quit tears the RHI down twice.
+//
+// AndroidMain ends with FEngineLoop::Exit() and then RequestExit(true), i.e.
+// ForceQuit. Inside Exit, FShaderCodeLibrary::Shutdown() frees the shader code
+// archive, and RHIExit() -> FVulkanDynamicRHI::Shutdown() ->
+// FRHIResource::FlushPendingDeletes() then runs ~FShaderCodeArchive on it a
+// second time: FMallocBinned2::Free reads the pool header of a page that has
+// already gone back to the system, and the game thread faults (his headset,
+// 2026-10-18 02:56, a second after "Quit"; symbolised from the build's own
+// exports). On a Quest that fault lands in a process that is about to end and
+// nobody sees it. Here it is a crash in front of the player.
+//
+// The RHI is the last thing Exit tears down before the movie player and the
+// task graph, and the process ends right after; skip only that call. Settings
+// and saves are written by the game as they change (SaveConfig flushes), not
+// here. The neighbouring calls are fingerprints, which pins it to this build.
+//   0x685236c  bl RHIExit  -> nop
+static const kl_gp_word k_moh_exit_no_rhi_teardown[] = {
+    { 0x685236c, 0x94754624, 0xd503201f, "FEngineLoop::Exit: skip RHIExit (nop)" },
+    { 0x6852368, 0x9450db4f, 0x9450db4f, "fingerprint only (bl FGraphEvent::Recycle)" },
+    { 0x6852370, 0x94beaafe, 0x94beaafe, "fingerprint only (bl DestroyMoviePlayer)" },
+    { 0x684f3b0, 0x94000ad8, 0x94000ad8, "fingerprint only (AndroidMain: bl FEngineLoop::Exit)" },
+    { 0x684f3b8, 0x9450a993, 0x9450a993, "fingerprint only (AndroidMain: bl RequestExit)" },
+};
+
 static const kl_gp_patch k_patches[] = {
+    { "moh-exit-no-rhi-teardown", "libUE4.so",
+      "Quit does not tear the Vulkan RHI down a second time (shader archive double free)",
+      k_moh_exit_no_rhi_teardown,
+      sizeof k_moh_exit_no_rhi_teardown / sizeof *k_moh_exit_no_rhi_teardown },
     // Order matters: can-start-offline fingerprints the words selection-fx rewrites.
     { "shave-stuff-can-start-offline", "libil2cpp.so",
       "the already-selected base salon can start without optional remote config",

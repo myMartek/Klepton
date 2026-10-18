@@ -17,6 +17,7 @@
 #include "kl_fault.h"
 #include "kl_egl.h"
 #include "kl_driver.h"    // the guest's own sequences, shared with build/m_boot
+#include "kl_ue4.h"       // kl_ue4_force_quit_obeyed
 #include "kl_audio.h"     // kl_audio_set_latency_ms — streamed audio needs a deeper buffer
 #include "kl_opensl.h"    // kl_opensl_heartbeat — the live audio census in the [hb] loop
 #include "kl_ovrp.h"      // kl_ovrp_set_frame_pacer — the OVRPlugin frame clock
@@ -1687,6 +1688,14 @@ static void *guest_thread(void *unused) {
         fflush(NULL);
         double secs = kl_driver_pump(-1.0, &g_guest_quit);
         printf("[guest] pumped for %.1fs\n", secs);
+        // An Unreal game whose ForceQuit was obeyed (KL_UE4_FORCE_QUIT) has
+        // quit by itself: leave the app, as for a Unity guest's quit.
+        if (g_target && g_target->kind == KL_GUEST_UE4 && kl_ue4_force_quit_obeyed()) {
+            printf("[guest] the game asked to quit (ForceQuit) — the run ends here\n");
+            pthread_mutex_lock(&g_guest.mu);
+            g_guest.asked_quit = 1;
+            pthread_mutex_unlock(&g_guest.mu);
+        }
         fflush(NULL);
         kl_app_lifecycle_report();
         guest_finished();
