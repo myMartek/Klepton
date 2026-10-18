@@ -4985,6 +4985,41 @@ int kl_ovrp_head_predict_delta(double time_s, float *quat4, float *pos3) {
     return 1;
 }
 
+// KL_GRAB_TRACE=1 (diagnostic): while a hand holds any button, its buttons,
+// trigger and grip values and its pose as published, about 30 times a second,
+// plus every jump of 3 cm or more between two consecutive publishes whatever
+// is held. Built for LEGO Bricktales' "a brick lifted slowly drops" — it showed
+// the trigger bit arriving at ~0 travel, which settled it (KleptonControllers'
+// triggerClickAt).
+static void klovrp_grab_trace(int hand, const klovrp_pose *v) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_GRAB_TRACE", 0);
+    if (!on || (unsigned)hand > 1) return;
+    static float lp[2][3];
+    static int have[2];
+    static uint64_t lt[2];
+    static unsigned lines;
+    if (lines > 40000) return;
+    uint64_t now = klovrp_mono_ns();
+    float dx = v->px - lp[hand][0], dy = v->py - lp[hand][1], dz = v->pz - lp[hand][2];
+    float step = sqrtf(dx * dx + dy * dy + dz * dz);
+    int held = g_input[hand].buttons != 0;
+    if ((have[hand] && step >= 0.03f) || (held && now - lt[hand] >= 33000000ull)) {
+        lines++;
+        lt[hand] = now;
+        fprintf(stderr, "  [grab] %.3f hand %d btn %#x trig %.2f grip %.2f pos %.3f %.3f %.3f"
+                        " vel %.2f %.2f %.2f step %.1f mm%s%s\n", (double)now / 1e9, hand,
+                g_input[hand].buttons, (double)g_input[hand].index_trigger,
+                (double)g_input[hand].hand_trigger,
+                (double)v->px, (double)v->py, (double)v->pz,
+                (double)v->vx, (double)v->vy, (double)v->vz, (double)step * 1000.0,
+                v->motion_valid ? "" : " (vel derived)",
+                have[hand] && step >= 0.03f ? " JUMP" : "");
+    }
+    lp[hand][0] = v->px; lp[hand][1] = v->py; lp[hand][2] = v->pz;
+    have[hand] = 1;
+}
+
 void kl_ovrp_set_hand_motion(int hand, float px, float py, float pz,
                              float qx, float qy, float qz, float qw,
                              float vx, float vy, float vz,
@@ -4997,6 +5032,7 @@ void kl_ovrp_set_hand_motion(int hand, float px, float py, float pz,
     // history still advances, so a publisher that later drops to the pose-only
     // call differentiates against the right previous sample instead of a gap.
     klovrp_hist_note(&g_hand_hist[hand], &v, 0);
+    klovrp_grab_trace(hand, &v);
     klovrp_pose_write(&g_hand_pose[hand], &v);
     __atomic_store_n(&g_hand_set[hand], 1, __ATOMIC_RELEASE);
     float e[3]; klovrp_pose_euler_deg(&v, e);
@@ -5014,6 +5050,7 @@ void kl_ovrp_set_hand_pose(int hand, float px, float py, float pz,
     py -= klovrp_origin_y();
     klovrp_pose v = { px, py, pz, qx, qy, qz, qw, 0, 0, 0, 0, 0, 0, 0 };
     klovrp_derive_motion(&v, &g_hand_hist[hand], 0);
+    klovrp_grab_trace(hand, &v);
     klovrp_pose_write(&g_hand_pose[hand], &v);
     __atomic_store_n(&g_hand_set[hand], 1, __ATOMIC_RELEASE);
     float e[3]; klovrp_pose_euler_deg(&v, e);
@@ -5048,14 +5085,20 @@ void kl_ovrp_set_controller_input(int hand, uint32_t buttons, uint32_t touches,
     // nothing happened" splits into "the bit never arrived" (frontend mapping)
     // vs "it arrived and the guest ignored it" (guest-side read). Always on -
     // presses are rare, so this is a handful of lines per session.
+    // KL_INPUT_LOG_MAX raises the cap (LEGO Bricktales: a session of dialogue
+    // clicks spent all 400 before the first build), and each line carries its
+    // time, so a press can be put next to what the game logged.
     { static uint32_t last[2] = { 0xffffffffu, 0xffffffffu };
-      static unsigned n;
-      if (buttons != last[hand] && n < 400) { n++;
-          fprintf(stderr, "  [input] hand %d buttons %#x -> %#x (trig %.2f grip %.2f)\n",
+      static unsigned n, cap;
+      if (!cap) { const char *c = getenv("KL_INPUT_LOG_MAX");
+                  cap = c && atoi(c) > 0 ? (unsigned)atoi(c) : 400; }
+      if (buttons != last[hand] && n < cap) { n++;
+          fprintf(stderr, "  [input] %.3f hand %d buttons %#x -> %#x (trig %.2f grip %.2f)\n",
+                  (double)klovrp_mono_ns() / 1e9,
                   hand, last[hand] == 0xffffffffu ? 0 : last[hand], buttons,
                   (double)index_trigger, (double)hand_trigger);
-          last[hand] = buttons;
-      } }
+      }
+      last[hand] = buttons; }
     g_input[hand].buttons = buttons;
     g_input[hand].touches = touches;
     g_input[hand].neartouches = touches;   // capacitive proximity ~ touch

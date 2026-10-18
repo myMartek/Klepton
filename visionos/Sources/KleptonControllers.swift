@@ -412,6 +412,26 @@ final class KleptonControllers {
     // Shave & Stuff only: a reported trigger press is a full pull (see the poll).
     private static let triggerPressIsFull = klTargetName() == "x7532973430077887"
 
+    /// Where a Sense trigger becomes a CLICK (the IndexTrigger bit). The Sense
+    /// controller says "pressed" at the first millimetre of travel, while its
+    /// analog value is still 0.00–0.10; an Oculus Touch sets the bit about
+    /// halfway down. LEGO Bricktales (2026-10-18) dropped a brick picked up
+    /// with a slow squeeze and kept one picked up with a fast pull — the bit
+    /// arrived at 0.00-0.10 of travel either way, the value only followed. From
+    /// KL_SENSE_TRIGGER_CLICK (0 = the old answer, any travel at all); LEGO
+    /// starts at 0.55. The bit lets go below 64% of that (0.35), so a finger
+    /// resting near the threshold does not chatter.
+    private static let triggerClickAt: Float = klEnvFloat(
+        "KL_SENSE_TRIGGER_CLICK", klTargetName() == "x6521909757843713" ? 0.55 : 0)
+    private var triggerClicked = [false, false]
+    private func triggerBit(_ hand: Int, _ value: Float) -> Bool {
+        let on = Self.triggerClickAt
+        guard on > 0 else { return value > 0 }
+        if triggerClicked[hand] { if value < on * 0.64 { triggerClicked[hand] = false } }
+        else if value >= on { triggerClicked[hand] = true }
+        return triggerClicked[hand]
+    }
+
     init() {
         surreal.setSettings(.stored())
         surreal.setEnabled(mode == .surreal)
@@ -1363,7 +1383,7 @@ final class KleptonControllers {
                 if touched("Button A") { touch |= OVRPRawButton.x }
                 if touched("Button B") { touch |= OVRPRawButton.y }
                 if pressed("Thumbstick Button") { bits |= OVRPRawButton.lThumbstick }
-                if st.indexTrigger > 0 { bits |= OVRPRawButton.lIndexTrigger }
+                if triggerBit(hand, st.indexTrigger) { bits |= OVRPRawButton.lIndexTrigger }
                 if st.handTrigger  > 0 { bits |= OVRPRawButton.lHandTrigger }
                 if menuish { pill |= OVRPRawButton.start }
                 if pressed("Button Menu") { pill |= OVRPRawButton.back }
@@ -1374,7 +1394,7 @@ final class KleptonControllers {
                 if touched("Button A") { touch |= OVRPRawButton.a }
                 if touched("Button B") { touch |= OVRPRawButton.b }
                 if pressed("Thumbstick Button") { bits |= OVRPRawButton.rThumbstick }
-                if st.indexTrigger > 0 { bits |= OVRPRawButton.rIndexTrigger }
+                if triggerBit(hand, st.indexTrigger) { bits |= OVRPRawButton.rIndexTrigger }
                 if st.handTrigger  > 0 { bits |= OVRPRawButton.rHandTrigger }
                 // Both bits on both hands. The Oculus Touch interaction profile
                 // splits the pair — the LEFT carries `menu/click` and no

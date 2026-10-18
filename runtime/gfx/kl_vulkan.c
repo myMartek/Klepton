@@ -271,6 +271,23 @@ static void vk_init(void) {
             setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 0);  // 0 = NEVER
     }
 
+    // LEGO Bricktales' see-through build preview flickered in stripes: it draws
+    // the same bricks in two passes that must reach the same depth, and Metal's
+    // fast math lets two vertex functions round the same position differently
+    // (on a Quest the two agree). Fast math off made it clean on the
+    // headset (2026-10-18, MVK_CONFIG_FAST_MATH_ENABLED=0 at launch) with the
+    // GPU wait per frame unchanged (7-8 ms mean either way). LEGO-gated,
+    // env-overridable (KL_MVK_NO_FAST_MATH).
+    {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        int def = (t && strcmp(t, "x6521909757843713") == 0) ? 1 : 0;
+        if (kl_env_on("KL_MVK_NO_FAST_MATH", def)) {
+            setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);   // 0 = NEVER
+            VKI("Metal shaders without fast math (KL_MVK_NO_FAST_MATH)\n");
+        }
+    }
+
     // (The former MVK_CONFIG_USE_MTLHEAP=2 forcing lived here. It existed only to
     // make the dead fork-B alias land at MTLBuffer offset 0 via MTLHeap placement.
     // The alias is gone, replaced by the 2D-image mirror below, which is entirely
