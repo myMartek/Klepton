@@ -4323,11 +4323,13 @@ static void *klovrp_defer_thread(void *unused) {
     return NULL;
 }
 
+static int g_ab_nolate;                 // KL_VK_FRAME_ASYNC_AB_MODES: 1 = no late wait now
+
 // The compositor, just before it takes the newest finished stage: if a frame
 // is on its way through the worker, wait for it, but no longer than max_ms.
 // 1 = it was filed in that time, 0 = none was in flight, -1 = gave up.
 int kl_ovrp_wait_inflight(double max_ms) {
-    if (!(max_ms > 0)) return 0;
+    if (!(max_ms > 0) || g_ab_nolate) return 0;
     pthread_mutex_lock(&g_ovdefer.mu);
     if (!g_ovdefer.busy) { pthread_mutex_unlock(&g_ovdefer.mu); return 0; }
     struct timespec ts;
@@ -4350,19 +4352,24 @@ int kl_ovrp_wait_inflight(double max_ms) {
 // with the title's default, and every metrics sample (KL_STATS_CARD) goes to
 // the log tagged with the side it was taken on. A frame in flight is waited
 // for before a switch, so the two ways never overlap.
+// KL_VK_FRAME_ASYNC_AB_MODES=3 — three spans in turn instead: worker off,
+// worker on without the compositor's late wait (KL_CP_LATE_WAIT_MS), worker on
+// with it; tagged async=off, async=on, async=late.
 static int klovrp_defer_begin(void) {
     static int on = -1;
     static double ab_s, ab_t0;
-    static int ab_phase = -1;
+    static int ab_phase = -1, ab_modes = 2;
     if (on < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
         on = kl_env_on("KL_VK_FRAME_ASYNC", t && !strcmp(t, "x6521909757843713"));
         ab_s = kl_env_float("KL_VK_FRAME_ASYNC_AB", 0.0f);
         if (!(ab_s >= 2.0)) ab_s = 0;
+        ab_modes = kl_env_int("KL_VK_FRAME_ASYNC_AB_MODES", 2) == 3 ? 3 : 2;
         if (ab_s > 0)
             fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC_AB: the frame worker is %s first and "
-                            "switches every %.0f s\n", on ? "on" : "off", ab_s);
+                            "switches every %.0f s%s\n", on ? "on" : "off", ab_s,
+                    ab_modes == 3 ? " (off, on, on with the late wait)" : "");
         else if (on) fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC: frames are filed by a worker "
                                      "when the GPU has finished them; EndFrame no longer waits\n");
     }
@@ -4370,12 +4377,14 @@ static int klovrp_defer_begin(void) {
     if (ab_s > 0) {
         double now = (double)klovrp_mono_ns() / 1e9;
         if (ab_t0 == 0) ab_t0 = now;
-        int phase = (int)((now - ab_t0) / ab_s) & 1;
-        use = phase ? !on : on;
+        int phase = (int)((now - ab_t0) / ab_s) % ab_modes;
+        use = ab_modes == 3 ? phase > 0 : phase ? !on : on;
         if (phase != ab_phase) {
             ab_phase = phase;
-            kl_metrics_set_tag(use ? "async=on" : "async=off");
-            fprintf(stderr, "  [ovrp] A/B: frame worker %s\n", use ? "ON" : "OFF");
+            int late = ab_modes == 3 && phase == 2;
+            g_ab_nolate = ab_modes == 3 && !late;
+            kl_metrics_set_tag(late ? "async=late" : use ? "async=on" : "async=off");
+            fprintf(stderr, "  [ovrp] A/B: frame worker %s\n", late ? "ON + late wait" : use ? "ON" : "OFF");
         }
     }
     pthread_mutex_lock(&g_ovdefer.mu);
