@@ -1423,11 +1423,18 @@ static long long klj_media_position(klj_media *m) {
 // thread it came from, for the first few hundred. The order of an engine's
 // calls on its player IS its playback logic, and it is not written anywhere
 // else that can be read from here.
+// A call that repeats the one before it (the position, asked every frame) is
+// said only every 120th time, so the budget lasts for the whole of a movie
+// rather than its first half second.
 static void klj_media_trace(const char *what, long long value) {
     static int on = -1;
-    static unsigned said;
+    static unsigned said, repeats;
+    static const char *last;
     if (on < 0) on = kl_env_on("KL_MP14_TRACE", 0);
     if (!on || said >= 600) return;
+    if (what == last && (++repeats % 120) != 0) return;
+    if (what != last) repeats = 0;
+    last = what;
     said++;
     uint64_t tid = 0;
     pthread_threadid_np(NULL, &tid);
@@ -1683,6 +1690,7 @@ static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
     size_t bytes = 0;
     unsigned long long serial = 0;
     const void *px = kl_avdec_frame(m->dec, &w, &h, &bytes, &serial);
+    klj_media_trace("getVideoLastFrameData(serial)", px && bytes ? (long long)serial : -1);
     if (!px || !bytes) return (klj_val){.l = NULL};
     if (w != m->last_w || h != m->last_h) {
         m->res_changed = 1;
@@ -1712,6 +1720,7 @@ static klj_val klj_MP14_getVideoLastFrame_locked(klj_media *m, uint32_t tex);
 static klj_val klj_MP14_getVideoLastFrame(void *env, void *self, const klj_val *a, int n) {
     (void)env;
     klj_media *m = klj_media_of(self);
+    klj_media_trace("getVideoLastFrame(texture)", n > 0 ? (long long)(int32_t)a[0].j : -1);
     if (!m || !m->dec) return (klj_val){.j = 0};
     // Held until the upload below is done: kl_avdec_frame hands back the
     // decoder's own buffer, and its decode thread writes the next frame into

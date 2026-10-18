@@ -3166,10 +3166,13 @@ final class KleptonCompositor {
             // The guest's loading screen is its own video and no frame of it is
             // here (yet, or the file was not found): the eye still holds the
             // picture from before the load — Medal of Honor's old menu pieces in
-            // both eyes. Black, the clear above, plus the guest's panels.
+            // both eyes. Black plus the guest's panels — the black drawn as the
+            // panels' backdrop, WITH depth: a clear alone writes none, and a
+            // drawable block with no depth is where the mixed space shows the
+            // room (Medal of Honor's loading turned into passthrough, 2026-10-18).
             _ = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                originFromHead: originFromHead, writeDepth: true,
-                               backdrop: false)
+                               backdrop: true)
             enc.endEncoding()
             return viewIndices.count
         }
