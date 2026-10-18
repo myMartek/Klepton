@@ -8788,6 +8788,113 @@ static uint32_t *klvk_spirv_subpass_ms_sample(const uint32_t *code, size_t nw, s
     return out;
 }
 
+// KL_VK_SKY_FAR: a sky drawn as a mesh, moved to the far plane. LEGO Bricktales
+// draws its sky as a dome around the player (a vertical-gradient vertex shader,
+// depth test and write like any opaque object) AFTER the clouds, and the clouds
+// stand partly outside that dome: in VR the dome's wall covered the lower half
+// of every cloud along one straight line, while in mixed reality — no dome —
+// they were whole (his report and a device capture, 2026-10-18). The vertex
+// shader is given one more step before it returns, z = w * 1e-6: with the
+// reversed depth Unity uses, that is a hair in front of the cleared far value,
+// so the dome only fills what nothing else has drawn on, as a skybox does.
+// Which shaders: the FNV of the module's words, from KL_VK_MOD_DUMP; the
+// default list is per target. KL_VK_SKY_FAR=<hex,hex,...> replaces it, =0 is off.
+static int klvk_sky_far_wanted(const uint32_t *code, size_t bytes) {
+    static char list[256];
+    static int init;
+    if (!init) {
+        const char *t = kl_driver_target_name();
+        const char *dflt = t && strcmp(t, "x6521909757843713") == 0 ? "1758a968" : "";
+        const char *v = kl_env_str("KL_VK_SKY_FAR", dflt);
+        snprintf(list, sizeof list, "%s", v && strcmp(v, "0") ? v : "");
+        init = 1;
+    }
+    if (!list[0]) return 0;
+    char h[16];
+    snprintf(h, sizeof h, "%08x", klvk_fnv(code, bytes));
+    return strstr(list, h) != NULL;
+}
+static uint32_t *klvk_spirv_far_position(const uint32_t *code, size_t nw, size_t *out_nw) {
+    if (!code || nw < 6 || code[0] != 0x07230203u) return NULL;
+    uint32_t bound = code[3];
+    if (bound < 2 || bound > (1u << 22)) return NULL;
+    uint32_t entry = 0, posvar = 0, posblock = 0, posmember = 0, blockptr = 0, blockvar = 0;
+    uint32_t outvec4ptr = 0, vec4 = 0, flt = 0, memberidx = 0, intType[2] = {0, 0};
+    size_t firstFn = 0, nret = 0;
+    // First pass: the entry point, how Position is reached, and the types the new steps need.
+    for (size_t i = 5; i < nw; ) {
+        uint32_t len = code[i] >> 16, op = code[i] & 0xffffu;
+        if (!len || i + len > nw) return NULL;
+        if (op == 15 && len >= 3 && code[i + 1] == 0 && !entry) entry = code[i + 2];   // OpEntryPoint Vertex
+        else if (op == 71 && len >= 4 && code[i + 2] == 11 && code[i + 3] == 0) posvar = code[i + 1];
+        else if (op == 72 && len >= 5 && code[i + 3] == 11 && code[i + 4] == 0) {
+            posblock = code[i + 1]; posmember = code[i + 2];
+        } else if (op == 22 && len == 3 && code[i + 2] == 32 && !flt) flt = code[i + 1];
+        else if (op == 23 && len == 4 && code[i + 2] == flt && code[i + 3] == 4 && !vec4) vec4 = code[i + 1];
+        else if (op == 21 && len == 4 && code[i + 2] == 32 && !intType[code[i + 3] ? 1 : 0])
+            intType[code[i + 3] ? 1 : 0] = code[i + 1];
+        else if (op == 32 && len == 4 && code[i + 2] == 3) {                              // OpTypePointer Output
+            if (vec4 && code[i + 3] == vec4) outvec4ptr = code[i + 1];
+            if (posblock && code[i + 3] == posblock) blockptr = code[i + 1];
+        } else if (op == 59 && len >= 4 && code[i + 3] == 3 && blockptr && code[i + 1] == blockptr)
+            blockvar = code[i + 2];
+        else if (op == 43 && len == 4 && code[i + 3] == posmember && !memberidx &&
+                 (code[i + 1] == intType[0] || code[i + 1] == intType[1]))
+            memberidx = code[i + 2];
+        else if (op == 54 && !firstFn) firstFn = i;
+        i += len;
+    }
+    int viaBlock = !posvar;
+    if (!entry || !firstFn || !flt || !vec4 || !outvec4ptr) return NULL;
+    if (viaBlock && (!blockvar || !memberidx)) return NULL;
+    // Count the returns of the entry function, which is where the steps go.
+    int inEntry = 0;
+    for (size_t i = firstFn; i < nw; ) {
+        uint32_t len = code[i] >> 16, op = code[i] & 0xffffu;
+        if (op == 54) inEntry = code[i + 2] == entry;
+        else if (op == 56) inEntry = 0;
+        else if (op == 253 && inEntry) nret++;
+        i += len;
+    }
+    if (!nret) return NULL;
+    uint32_t *out = malloc((nw + 4 + nret * 26) * sizeof *out);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < 5; i++) out[o++] = code[i];
+    uint32_t eps = 0;
+    union { float f; uint32_t u; } e = { 1.0e-6f };
+    inEntry = 0;
+    for (size_t i = 5; i < nw; ) {
+        uint32_t len = code[i] >> 16, op = code[i] & 0xffffu;
+        if (i == firstFn) {
+            eps = bound++;
+            out[o++] = (4u << 16) | 43u; out[o++] = flt; out[o++] = eps; out[o++] = e.u;   // OpConstant
+        }
+        if (op == 54) inEntry = code[i + 2] == entry;
+        else if (op == 56) inEntry = 0;
+        if (op == 253 && inEntry) {
+            uint32_t ptr = posvar;
+            if (viaBlock) {
+                ptr = bound++;
+                out[o++] = (5u << 16) | 65u; out[o++] = outvec4ptr; out[o++] = ptr;      // OpAccessChain
+                out[o++] = blockvar; out[o++] = memberidx;
+            }
+            uint32_t v = bound++, w = bound++, z = bound++, v2 = bound++;
+            out[o++] = (4u << 16) | 61u; out[o++] = vec4; out[o++] = v; out[o++] = ptr;          // OpLoad
+            out[o++] = (5u << 16) | 81u; out[o++] = flt; out[o++] = w; out[o++] = v; out[o++] = 3; // OpCompositeExtract .w
+            out[o++] = (5u << 16) | 133u; out[o++] = flt; out[o++] = z; out[o++] = w; out[o++] = eps; // OpFMul
+            out[o++] = (6u << 16) | 82u; out[o++] = vec4; out[o++] = v2; out[o++] = z;           // OpCompositeInsert .z
+            out[o++] = v; out[o++] = 2;
+            out[o++] = (3u << 16) | 62u; out[o++] = ptr; out[o++] = v2;                          // OpStore
+        }
+        for (uint32_t k = 0; k < len; k++) out[o++] = code[i + k];
+        i += len;
+    }
+    out[3] = bound;
+    *out_nw = o;
+    return out;
+}
+
 // vkCreateShaderModule — gated SPIR-V rewrite. emu_on() false, or a module with
 // no texel-buffer image, is EXACT passthrough. A rewrite MoltenVK rejects falls
 // back to the original module (buggy but never a hard failure).
@@ -8805,6 +8912,17 @@ static int klvk_eye_on(void) {
 static VkResult VKAPI_CALL klvk_CreateShaderModule(VkDevice dev,
         const VkShaderModuleCreateInfo *ci, const VkAllocationCallbacks *alloc,
         VkShaderModule *out) {
+    // KL_VK_MOD_DUMP=<dir>, a diagnostic: every module the guest creates, as
+    // <fnv of its words>.spv, to find one shader among hundreds.
+    {
+        const char *dd = kl_env_str("KL_VK_MOD_DUMP", NULL);
+        if (dd && *dd && ci && ci->pCode && !(ci->codeSize & 3u)) {
+            char path[1024];
+            snprintf(path, sizeof path, "%s/%08x.spv", dd, klvk_fnv(ci->pCode, ci->codeSize));
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(ci->pCode, 1, ci->codeSize, f); fclose(f); }
+        }
+    }
     // KL_VK_SUBPASS_NOKILL=1, a diagnostic: the shaders that read a subpass input
     // lose their discards (OpKill -> OpReturn), so that a query counting what
     // they let through counts everything — which tells a query that counts
@@ -8868,6 +8986,20 @@ static VkResult VKAPI_CALL klvk_CreateShaderModule(VkDevice dev,
             ey = *ci; ey.pCode = eye; ey.codeSize = ew * 4; ci = &ey;
         }
     }
+    uint32_t *sky = NULL;
+    VkShaderModuleCreateInfo sk;
+    if (ci && ci->pCode && !(ci->codeSize & 3u) && klvk_sky_far_wanted(ci->pCode, ci->codeSize)) {
+        size_t sw = 0;
+        if ((sky = klvk_spirv_far_position(ci->pCode, ci->codeSize / 4, &sw))) {
+            fprintf(stderr, "  [vk] KL_VK_SKY_FAR: sky vertex shader %08x moved to the far plane "
+                            "(it now fills only what nothing else drew on)\n",
+                    klvk_fnv(ci->pCode, ci->codeSize));
+            sk = *ci; sk.pCode = sky; sk.codeSize = sw * 4; ci = &sk;
+        } else {
+            fprintf(stderr, "  [vk] KL_VK_SKY_FAR: shader %08x matched but its shape is not one "
+                            "this rewrite knows — left as it is\n", klvk_fnv(ci->pCode, ci->codeSize));
+        }
+    }
     uint32_t *msfix = NULL;
     VkShaderModuleCreateInfo mf;
     if (ci && ci->pCode && !(ci->codeSize & 3u) && klvk_subpass_ms_on()) {
@@ -8903,6 +9035,7 @@ static VkResult VKAPI_CALL klvk_CreateShaderModule(VkDevice dev,
         }
     }
     free(msfix);
+    free(sky);
     free(eye);
     return r;
 }
