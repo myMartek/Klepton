@@ -1156,6 +1156,26 @@ static void check_viewport(void) {
     ok(g[4].x == 1.0f && g[4].y == 1.0f,
        "a viewport past the screen is clamped, not trusted");
 
+    // ...but a rect that only OVERHANGS the screen keeps its span: Angry Birds
+    // VR's OculusXR submits eye1 at -64,0 4000 wide in a 3936-wide texture.
+    // The grid's interior must sit where that projection put it, and only the
+    // vertices past the edge are held to it. Clamping the rect squeezed 4000
+    // pixels of picture onto 3936 and moved the eye by 64 (2026-10-18).
+    {
+        const float TW = 3936, TH = 3209;
+        simd_float2 g4[kl_reproject_grid_entries(4, 1)];
+        const float hang[4] = { -64, 0, 4000, TH };
+        kl_reproject_grid_build(g4, 4, 1, hang, TW, TH, TW, TH, NULL, NULL);
+        int good = g4[1].x == 0.0f;                               // past the edge: held
+        for (int i = 1; i <= 3; i++)
+            good &= fabsf(g4[1 + i].x - (-64.0f + 1000.0f * i) / TW) < 1e-6f;
+        good &= g4[1 + 4].x == 1.0f;                              // 3936 = the edge itself
+        const float hang0[4] = { 0, 0, 4000, TH };
+        kl_reproject_grid_build(g4, 4, 1, hang0, TW, TH, TW, TH, NULL, NULL);
+        good &= fabsf(g4[1 + 2].x - 2000.0f / TW) < 1e-6f && g4[1 + 4].x == 1.0f;
+        ok(good, "a viewport overhanging the screen keeps its span; only the edge vertices are held");
+    }
+
     // Zero is the "whole texture" spelling every guest that cannot answer uses
     // — 1.28's legacy VRDevice, the null driver, an OpenXR guest. It must not
     // read as an empty rect, which would draw nothing at all.

@@ -744,14 +744,19 @@ void kl_reproject_grid_build_eye(simd_float2 *out, uint32_t eye,
     float vx = 0, vy = 0, vw = screen_w, vh = screen_h;
     if (vp && vp[2] > 0 && vp[3] > 0) {
         vx = vp[0]; vy = vp[1]; vw = vp[2]; vh = vp[3];
-        // Clamped rather than trusted: a rect reaching past the screen would
-        // send this through the rate map at coordinates it was not built for,
-        // and Metal's answer there is not defined by anything we can check.
-        if (vx < 0) vx = 0;
-        if (vy < 0) vy = 0;
-        if (vx + vw > screen_w) vw = screen_w - vx;
-        if (vy + vh > screen_h) vh = screen_h - vy;
-        if (!(vw > 0) || !(vh > 0)) { vx = vy = 0; vw = screen_w; vh = screen_h; }
+        // A rect reaching past the screen is still the span the guest's
+        // projection covers, so the grid keeps it; only each sample point is
+        // held inside the screen below, because the rate map is not defined
+        // past its edge. Clamping the RECT instead squeezed that span onto the
+        // part inside: Angry Birds VR submits eye0 0..4000 and eye1 -64..3936
+        // of a 3936-wide texture (its OculusXR places the second eye at
+        // texture width minus viewport width), and both became 0..3936 — each
+        // eye stretched by 1.6% and the right one moved 64 px against the
+        // left, a wrong depth that swam with every head movement (2026-10-18).
+        // A rect with no overlap at all is nonsense and means the whole screen.
+        if (!(vx < screen_w) || !(vy < screen_h) || !(vx + vw > 0) || !(vy + vh > 0)) {
+            vx = vy = 0; vw = screen_w; vh = screen_h;
+        }
     }
     out[0] = simd_make_float2((float)nx, (float)ny);
     // Where this eye's block starts — the same arithmetic kl_reproject_build
@@ -772,6 +777,10 @@ void kl_reproject_grid_build_eye(simd_float2 *out, uint32_t eye,
             // the viewport existed, so the foveation measurements stand.
             float sx = vx + vw * (float)x / (float)nx;
             float sy = vy + vh * (float)y / (float)ny;
+            if (sx < 0) sx = 0;
+            if (sy < 0) sy = 0;
+            if (sx > screen_w) sx = screen_w;
+            if (sy > screen_h) sy = screen_h;
             float px = sx, py = sy;
             // No map is the identity, not a reason to give up: an unfoveated
             // eye with a shrunken viewport still has to be corrected, and it is
