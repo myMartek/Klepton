@@ -4256,6 +4256,123 @@ static int klovrp_enq_retire(void);
 // provider (8786 disagreements in a 9000-frame 1.40 run, see EndFrame4), and a
 // compositor keyed on kl_ovrp_last_complete_stage() would then sample the stage
 // the guest is drawing into NEXT — a torn picture with every counter healthy.
+// ---------------------------------------------------------------------------
+// A Vulkan frame filed when the GPU has finished it, not when the guest says it
+// has (KL_VK_FRAME_ASYNC on the OVRPlugin path; default on for LEGO Bricktales).
+//
+// EndFrame waited for the guest's queue to go idle before filing the frame's
+// record (kl_vulkan_frame_done; why the record must not come first is written
+// at that call). The wait stands on the guest's render thread, so a frame cost
+// its CPU time PLUS its GPU time. LEGO Bricktales on the headset: the game's
+// frame call took 9.9 ms on average with the wait (a third of them over the
+// 10 ms display period) and 2.8 ms without it (headset A/B, 2026-10-18). In
+// the hub that did not yet show more pictures (98.5 a second either way).
+//
+// Here EndFrame MARKS the queue (kl_vulkan_frame_mark), files nothing, and
+// hands the record to one worker that waits for the mark, advances the Vulkan
+// serial and then files the record — the order the synchronous path keeps. One
+// frame is in flight: the next EndFrame waits for it first, which is also what
+// keeps a three-stage guest from drawing into the stage a compositor shows.
+// kl_openxr.c has the same thing for OpenXR guests (Half-Life: Alyx).
+//
+// Not deferred: the overlay list (klovrp_record_overlays). It is filed when the
+// guest says so, as before, but no longer after its GPU work has finished.
+static struct {
+    pthread_mutex_t     mu;
+    pthread_cond_t      cv;
+    int                 started, busy;
+    int                 capturing;      // guest thread: end_frame_impl keeps its record here
+    int                 have_rec;
+    kl_ovrp_render_pose rec;
+    unsigned long       frames, late;
+} g_ovdefer = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0, 0, {0}, 0, 0 };
+
+static void *klovrp_defer_thread(void *unused) {
+    (void)unused;
+    pthread_setname_np("Klepton OVR Frame Publish");
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    for (;;) {
+        pthread_mutex_lock(&g_ovdefer.mu);
+        while (!g_ovdefer.busy) pthread_cond_wait(&g_ovdefer.cv, &g_ovdefer.mu);
+        int have = g_ovdefer.have_rec;
+        kl_ovrp_render_pose rec = g_ovdefer.rec;
+        pthread_mutex_unlock(&g_ovdefer.mu);
+
+        int done = kl_vulkan_frame_wait(1000);
+        kl_vulkan_frame_publish();
+        if (have && (unsigned)rec.stage < KLOVRP_MAX_STAGES) {
+            pthread_mutex_lock(&g_frames.mu);
+            g_frames.r[rec.stage] = rec;
+            g_frames.last_complete = rec.stage;
+            g_frames.filed[rec.stage]++;
+            pthread_mutex_unlock(&g_frames.mu);
+        }
+
+        pthread_mutex_lock(&g_ovdefer.mu);
+        g_ovdefer.frames++;
+        if (!done && g_ovdefer.late++ < 8)
+            fprintf(stderr, "  [ovrp] a frame was filed before the GPU reported it "
+                            "finished (no answer within 1 s) — %lu of %lu so far\n",
+                    g_ovdefer.late, g_ovdefer.frames);
+        g_ovdefer.busy = 0;
+        pthread_cond_broadcast(&g_ovdefer.cv);
+        pthread_mutex_unlock(&g_ovdefer.mu);
+    }
+    return NULL;
+}
+
+// Guest thread, at EndFrame of a Vulkan guest: 1 when this frame is to be
+// filed by the worker. Waits for the frame before it first.
+static int klovrp_defer_begin(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_VK_FRAME_ASYNC", t && !strcmp(t, "x6521909757843713"));
+        if (on) fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC: frames are filed by a worker "
+                                "when the GPU has finished them; EndFrame no longer waits\n");
+    }
+    if (!on) return 0;
+    pthread_mutex_lock(&g_ovdefer.mu);
+    while (g_ovdefer.busy) pthread_cond_wait(&g_ovdefer.cv, &g_ovdefer.mu);
+    pthread_mutex_unlock(&g_ovdefer.mu);
+    if (!kl_vulkan_frame_mark()) return 0;
+    g_ovdefer.have_rec = 0;
+    g_ovdefer.capturing = 1;
+    return 1;
+}
+
+static void klovrp_defer_submit(void) {
+    pthread_mutex_lock(&g_ovdefer.mu);
+    g_ovdefer.capturing = 0;
+    if (!g_ovdefer.started) {
+        pthread_t t;
+        pthread_attr_t a;
+        pthread_attr_init(&a);
+        pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        g_ovdefer.started = pthread_create(&t, &a, klovrp_defer_thread, NULL) == 0;
+        pthread_attr_destroy(&a);
+    }
+    int started = g_ovdefer.started;
+    if (started) {
+        g_ovdefer.busy = 1;
+        pthread_cond_broadcast(&g_ovdefer.cv);
+    }
+    pthread_mutex_unlock(&g_ovdefer.mu);
+    if (!started) {
+        // No worker: finish here, the synchronous way.
+        kl_vulkan_frame_wait(1000);
+        kl_vulkan_frame_publish();
+        if (g_ovdefer.have_rec && (unsigned)g_ovdefer.rec.stage < KLOVRP_MAX_STAGES) {
+            pthread_mutex_lock(&g_frames.mu);
+            g_frames.r[g_ovdefer.rec.stage] = g_ovdefer.rec;
+            g_frames.last_complete = g_ovdefer.rec.stage;
+            g_frames.filed[g_ovdefer.rec.stage]++;
+            pthread_mutex_unlock(&g_frames.mu);
+        }
+    }
+}
+
 static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewports,
                                       const int *viewport_of, int named_stage) {
     // The stall watch's stamp (kl_stall.c): an OVRPlugin guest's frame is this
@@ -4410,9 +4527,15 @@ static uint64_t klovrp_end_frame_impl(int guest_frame_index, const int *viewport
             stage = (int)((g_frames.serial - 1) % (unsigned)stages);
         g_frames.pending.stage = stage;
         g_frames.pending.complete = 1;
-        g_frames.r[stage] = g_frames.pending;
-        g_frames.last_complete = stage;
-        g_frames.filed[stage]++;
+        if (g_ovdefer.capturing) {
+            // KL_VK_FRAME_ASYNC: the worker files it once the GPU is done.
+            g_ovdefer.rec = g_frames.pending;
+            g_ovdefer.have_rec = 1;
+        } else {
+            g_frames.r[stage] = g_frames.pending;
+            g_frames.last_complete = stage;
+            g_frames.filed[stage]++;
+        }
         if (!binds) g_frames.guessed++;
 
         // **The measurement that decides how the stage should be derived.**
@@ -4621,6 +4744,7 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // kl_ovrp_last_complete_stage(), and that is not a shortcut — the latter is
     // derived from GL draw observation (kl_glfb_render_stages), which sees
     // nothing at all on a Vulkan guest.
+    int deferred = 0;
     if (kl_vulkan_guest_active()) {
         // File-scope rather than a static in here, because KL_OVRP_POKE's
         // frame form is timed against THIS number: a poke aimed at `f9900`
@@ -4632,7 +4756,10 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         // it. Ordinary runs write no captures at all, so this is the only
         // frame-completion point either way.
         uint64_t t0 = klovrp_mono_ns();
-        kl_vulkan_frame_done(named < 0 ? 0 : named);
+        // KL_VK_FRAME_ASYNC: the wait below is then for the frame BEFORE this
+        // one, and this frame's record goes to the worker.
+        deferred = klovrp_defer_begin();
+        if (!deferred) kl_vulkan_frame_done(named < 0 ? 0 : named);
         // How long the GPU still had to go when the guest said "done" — the
         // width of the window described above, and the number that says
         // whether the guest is GPU-bound.
@@ -4683,8 +4810,10 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     }
     int vp[8], of[2] = { 0, 0 };
     int have = klovrp_submit_viewports(layer_submits, layer_submit_count, vp, of);
-    return klovrp_end_frame_impl(guest_frame_index, have ? vp : NULL,
-                                 have ? of : NULL, named);
+    uint64_t rv = klovrp_end_frame_impl(guest_frame_index, have ? vp : NULL,
+                                        have ? of : NULL, named);
+    if (deferred) klovrp_defer_submit();
+    return rv;
 }
 int kl_ovrp_stage_render_pose(int stage, kl_ovrp_render_pose *out) {
     if ((unsigned)stage >= KLOVRP_MAX_STAGES || !out) return 0;

@@ -242,5 +242,14 @@ int kl_metrics_tick(void) {
     m.seq = g_now.seq + 1;
     g_now = m;
     pthread_mutex_unlock(&g_mu);
+    // What the panel showed, into the log every fifth sample: the panel is in
+    // the headset and a number read off it is otherwise lost with the session.
+    if (m.seq % 5 == 0)
+        fprintf(stderr, "[metrics] %.1f fps shown of %.1f Hz (%.1f repeated), %.1f started, game GPU %.1f ms "
+                        "a frame, composite %.1f ms, GPU busy %.0f%%, CPU %.2f cores (top thread "
+                        "%.0f%%), eye %dx%d\n", (double)m.fps, (double)m.display_hz,
+                (double)m.stale, (double)m.game_fps, (double)m.gpu_game_ms, (double)m.gpu_comp_ms,
+                (double)m.gpu_busy * 100.0, (double)m.cpu_cores, (double)m.cpu_top * 100.0,
+                m.eye_w, m.eye_h);
     return 1;
 }
