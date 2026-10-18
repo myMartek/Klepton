@@ -706,6 +706,15 @@ void kl_jni_locale_parts(char *lang, size_t lang_sz, char *country, size_t count
     klj_locale_parts(lang, lang_sz, country, country_sz);
     // Said once, where the platform calls are traced (KL_PLAT_TRACE): the
     // language the guest is told, and where it came from.
+    // Once in every boot log, so the language a game was told can be read
+    // without a trace run (the start window's choice: KleptonLanguage).
+    static int told;
+    if (!told) {
+        told = 1;
+        const char *dl = getenv("KL_DEVICE_LANG"), *ld = getenv("KL_LOCALE_DEVICE");
+        fprintf(stderr, "  [jni] locale told to the guest: %s_%s (KL_LOCALE_DEVICE=%s, KL_DEVICE_LANG=%s)\n",
+                lang, country, ld ? ld : "(unset)", dl ? dl : "(unset)");
+    }
     static int said;
     if (!said && kl_ovrplat_trace_on()) {
         said = 1;
