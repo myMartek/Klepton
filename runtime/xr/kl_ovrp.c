@@ -30,6 +30,7 @@
 #include "kl_egl.h"
 #include "kl_vulkan.h"
 #include "kl_openxr.h"
+#include "kl_metrics.h"
 
 #define KL_OVRP_MAX 512
 static struct { const char *name; unsigned calls; } g_ovrp[KL_OVRP_MAX];
@@ -4343,19 +4344,44 @@ int kl_ovrp_wait_inflight(double max_ms) {
 
 // Guest thread, at EndFrame of a Vulkan guest: 1 when this frame is to be
 // filed by the worker. Waits for the frame before it first.
+//
+// KL_VK_FRAME_ASYNC_AB=<s> — an A/B in one session: the worker is used in
+// every second span of <s> seconds, counted from the first frame and starting
+// with the title's default, and every metrics sample (KL_STATS_CARD) goes to
+// the log tagged with the side it was taken on. A frame in flight is waited
+// for before a switch, so the two ways never overlap.
 static int klovrp_defer_begin(void) {
     static int on = -1;
+    static double ab_s, ab_t0;
+    static int ab_phase = -1;
     if (on < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
         on = kl_env_on("KL_VK_FRAME_ASYNC", t && !strcmp(t, "x6521909757843713"));
-        if (on) fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC: frames are filed by a worker "
-                                "when the GPU has finished them; EndFrame no longer waits\n");
+        ab_s = kl_env_float("KL_VK_FRAME_ASYNC_AB", 0.0f);
+        if (!(ab_s >= 2.0)) ab_s = 0;
+        if (ab_s > 0)
+            fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC_AB: the frame worker is %s first and "
+                            "switches every %.0f s\n", on ? "on" : "off", ab_s);
+        else if (on) fprintf(stderr, "  [ovrp] KL_VK_FRAME_ASYNC: frames are filed by a worker "
+                                     "when the GPU has finished them; EndFrame no longer waits\n");
     }
-    if (!on) return 0;
+    int use = on;
+    if (ab_s > 0) {
+        double now = (double)klovrp_mono_ns() / 1e9;
+        if (ab_t0 == 0) ab_t0 = now;
+        int phase = (int)((now - ab_t0) / ab_s) & 1;
+        use = phase ? !on : on;
+        if (phase != ab_phase) {
+            ab_phase = phase;
+            kl_metrics_set_tag(use ? "async=on" : "async=off");
+            fprintf(stderr, "  [ovrp] A/B: frame worker %s\n", use ? "ON" : "OFF");
+        }
+    }
     pthread_mutex_lock(&g_ovdefer.mu);
     while (g_ovdefer.busy) pthread_cond_wait(&g_ovdefer.cv, &g_ovdefer.mu);
     pthread_mutex_unlock(&g_ovdefer.mu);
+    if (!use) return 0;
     if (!kl_vulkan_frame_mark()) return 0;
     g_ovdefer.have_rec = 0;
     g_ovdefer.capturing = 1;

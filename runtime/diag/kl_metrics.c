@@ -36,6 +36,7 @@ static struct { double gpu_s; unsigned long n; } g_comp;     // under g_mu
 static kl_metrics g_now;                                     // under g_mu
 static struct { int state, w, h; char path[40], note[24]; } g_up = { .state = -1 };  // under g_mu
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { char now[24]; unsigned changes; } g_tag;     // under g_mu
 
 void kl_metrics_begin(void) {
     if (atomic_exchange(&g_on, 1)) return;
@@ -68,6 +69,13 @@ void kl_metrics_note_upscale(int state, int out_w, int out_h, const char *path, 
     pthread_mutex_unlock(&g_mu);
 }
 void kl_metrics_note_game_frame(void) { g_frames++; }
+
+void kl_metrics_set_tag(const char *tag) {
+    pthread_mutex_lock(&g_mu);
+    snprintf(g_tag.now, sizeof g_tag.now, "%s", tag ? tag : "");
+    g_tag.changes++;
+    pthread_mutex_unlock(&g_mu);
+}
 
 void kl_metrics_upscale_now(kl_metrics *out) {
     if (!out) return;
@@ -241,10 +249,22 @@ int kl_metrics_tick(void) {
     memcpy(m.upscale_note, g_up.note, sizeof m.upscale_note);
     m.seq = g_now.seq + 1;
     g_now = m;
+    static unsigned tag_changes;                             // the heartbeat's thread only
+    char tag[24];
+    snprintf(tag, sizeof tag, "%s", g_tag.changes != tag_changes ? "switch" : g_tag.now);
+    tag_changes = g_tag.changes;
     pthread_mutex_unlock(&g_mu);
     // What the panel showed, into the log every fifth sample: the panel is in
     // the headset and a number read off it is otherwise lost with the session.
-    if (m.seq % 5 == 0)
+    // Every sample while a label is set (kl_metrics_set_tag).
+    if (tag[0])
+        fprintf(stderr, "[metrics %s] %.1f fps shown of %.1f Hz (%.1f repeated), %.1f started, game GPU %.1f ms "
+                        "a frame, composite %.1f ms, GPU busy %.0f%%, CPU %.2f cores (top thread "
+                        "%.0f%%), eye %dx%d\n", tag, (double)m.fps, (double)m.display_hz,
+                (double)m.stale, (double)m.game_fps, (double)m.gpu_game_ms, (double)m.gpu_comp_ms,
+                (double)m.gpu_busy * 100.0, (double)m.cpu_cores, (double)m.cpu_top * 100.0,
+                m.eye_w, m.eye_h);
+    else if (m.seq % 5 == 0)
         fprintf(stderr, "[metrics] %.1f fps shown of %.1f Hz (%.1f repeated), %.1f started, game GPU %.1f ms "
                         "a frame, composite %.1f ms, GPU busy %.0f%%, CPU %.2f cores (top thread "
                         "%.0f%%), eye %dx%d\n", (double)m.fps, (double)m.display_hz,
