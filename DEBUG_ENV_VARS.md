@@ -4742,6 +4742,11 @@ conversion on synthetic hands.
   elsewhere.
 - `KL_OVRP_HANDS_CURL=<gain>` — every finger bend times this (default 1). 1.3
   made claws of a relaxed hand in Angry Birds; the fist assist replaced it.
+- `KL_HAND_SMOOTH=0` — no One Euro filter on the wrist in Surreal's hands mode
+  (the only place it runs; `KleptonPoseSmoother`, see `docs/SURREAL.md`).
+- `KL_HAND_SMOOTH_MIN=<Hz>` — its cutoff for a still hand, position and rotation
+  (default 1). `KL_HAND_SMOOTH_BETA=<Hz per m/s>` — how fast the position cutoff
+  rises with speed (default 8).
 - Pinch (no switch): 1 at 3 cm thumb-to-fingertip, 0 at 5.5 cm (ARKit's tips
   sit inside the pads); on from 0.8, off below 0.3 for three frames; a fist (two
   of middle/ring/little tips within 4.5 cm of their knuckle) reports no pinch.

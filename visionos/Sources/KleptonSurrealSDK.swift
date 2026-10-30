@@ -217,11 +217,12 @@ final class KleptonSurrealSDK: @unchecked Sendable {
     }
 }
 
-/// Takes Surreal Touch controllers out of cursor mode while Surreal's SDK owns them. Until a
-/// control message arrives the controllers drive the visionOS pointer over HID and send no
+/// Takes Surreal Touch controllers out of cursor mode before Surreal's SDK connects them. Until
+/// a control message arrives the controllers drive the visionOS pointer over HID and send no
 /// buttons (see KleptonSurrealBackend.requestControllerMode). This opens this app's own link
-/// to the controller the SDK just connected, subscribes only to the control replies (1006),
-/// never to pose or input, and writes the same mode request and set-controller-mode messages.
+/// to the controllers visionOS already has, subscribes only to the control replies (1006),
+/// never to pose or input, writes the same mode request and set-controller-mode messages, and
+/// lets go again before the SDK starts.
 final class SurrealModeKicker: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, @unchecked Sendable {
     static let shared = SurrealModeKicker()
     private let queue = DispatchQueue(label: "klepton.surreal.mode", qos: .userInitiated)
@@ -238,8 +239,8 @@ final class SurrealModeKicker: NSObject, CBCentralManagerDelegate, CBPeripheralD
     private func trace(_ message: String) { KleptonSurrealSDK.shared.trace("mode: " + message) }
 
     /// Before the SDK starts: send the messages to every Surreal Touch visionOS has connected,
-    /// keep this link open, and call `ready` on the main queue once each has answered the
-    /// set-mode message — or after `timeout`, or at once if none is connected yet.
+    /// close this link, and call `ready` on the main queue once each has answered the set-mode
+    /// message — or after `timeout`, or at once if none is connected yet.
     func prepare(timeout: Double, then ready: @escaping () -> Void) {
         queue.async { [self] in
             onReady = ready
@@ -259,14 +260,6 @@ final class SurrealModeKicker: NSObject, CBCentralManagerDelegate, CBPeripheralD
         control.removeAll()
         trace("ready (\(reason)); closed this link, starting the SDK in 0.5 s")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: ready)
-    }
-
-    func kick(hand: Int) {
-        queue.async { [self] in
-            pending.insert(hand)
-            if central == nil { central = CBCentralManager(delegate: self, queue: queue); return }
-            if central?.state == .poweredOn { run() }
-        }
     }
 
     private func run() {
