@@ -729,6 +729,8 @@ static const char *klovrp_version_str(void) {
         const char *t = kl_driver_target_name();
         if (e && *e)                                        v = e;
         else if (t && strcmp(t, "x2111191602278229") == 0)  v = "1.117.0";
+        // BRINK 1.8.3 ships OVRPlugin 1.115.0; older versions skip OpenXR initialization.
+        else if (t && strcmp(t, "x3635172946605196") == 0)  v = "1.115.0";
         else if (kl_guest_beatsaber_openxr())               v = "1.106.0";
         // Cubism 1.8.0 ships 1.108.0. The 1.60 default makes MetaXRFeature
         // reject OnInstanceCreate before entering the native OpenXR bridge
@@ -13730,6 +13732,9 @@ static const char *const g_ovrp_bool_no[] = {
 static const char *const g_ovrp_result_unsupported[] = {
     // Hand-tracking state, with the rest of the hand group (DreamSpace asks).
     "ovrp_GetHandTrackingState",
+    // Simultaneous Quest controller/hand mode is not implemented on this host.
+    "ovrp_SetSimultaneousHandsAndControllersEnabled",
+    "ovrp_AreHandPosesGeneratedByControllerData",
     // (Insight Passthrough was here — init, its state and the layer style. They
     // have answers of their own now, which are still UNSUPPORTED for every
     // guest passthrough is not offered to: klovrp_pt_on.)

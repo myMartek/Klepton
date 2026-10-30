@@ -243,6 +243,15 @@ static int kl_fmod_trace_default(void) {
     return 0;
 }
 
+static void (*g_brink_set_depth)(int);
+static void kl_brink_set_depth(int mode) {
+    const char *t=kl_driver_target_name(), *e=getenv("KL_XR_DEPTH");
+    if(t && !strcmp(t,"x3635172946605196") && !(e && !strcmp(e,"0"))) {
+        mode=2; // Unity OpenXR Depth24Bit.
+        fprintf(stderr,"  [brink-depth] requesting Unity depth submission mode 2\n");
+    }
+    g_brink_set_depth(mode);
+}
 static void *kl_fmod_interpose(const char *name, void *real) {
     // Install UNCONDITIONALLY when an FMOD symbol resolves — this is the only
     // moment we can substitute the address, and it happens during libUE4's
@@ -254,6 +263,9 @@ static void *kl_fmod_interpose(const char *name, void *real) {
     // never a per-sample path). The one-time install line proves the seam caught
     // FMOD at all, independent of whether the game ever calls the function.
     if (!real) return NULL;
+    if(!strcmp(name,"NativeConfig_SetDepthSubmissionMode")) {
+        g_brink_set_depth=(void (*)(int))real; return (void *)kl_brink_set_depth;
+    }
     void *wrap = NULL;
     if (!strcmp(name, "_ZN4FMOD6Studio6System14loadBankMemoryEPKci28FMOD_STUDIO_LOAD_MEMORY_MODEjPPNS0_4BankE")) {
         g_fmod_loadBankMemory = (int (*)(void *, const char *, int, int, uint32_t, void **))real;
@@ -1129,6 +1141,10 @@ static void kl_dl_trace_shims(void) {
 }
 
 static void *kl_dl_interpose(const char *name, void *real) {
+    if(real && !strcmp(name,"NativeConfig_SetDepthSubmissionMode")) {
+        if(real!=(void *)kl_brink_set_depth) g_brink_set_depth=(void (*)(int))real;
+        return (void *)kl_brink_set_depth;
+    }
     if (strcmp(name, "iplHRTFCreate") == 0) {
         g_real_iplHRTFCreate = (int32_t (*)(void *, kl_ipl_audio_settings *,
                                             void *, void *))real;

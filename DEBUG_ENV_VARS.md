@@ -4764,3 +4764,25 @@ conversion on synthetic hands.
   fast math flushes the literal to 0; in Elixir's potion-glass shader that is a
   loop's exit value, and the endless loop hung the GPU (the Mac's WindowServer
   went down with it, the headset picture stayed black).
+
+## BRINK Traveler (`x3635172946605196`)
+
+Community fix 84. Everything below is bound to this title unless it says otherwise.
+
+- `KL_XR_DEPTH=0` — no `XR_KHR_composition_layer_depth` and no Unity depth
+  submission, so no per-pixel depth for the real hands. Default on. Needs
+  `KL_XR_LAYERS=0`, which this title defaults to.
+- `KL_BRINK_REAL_HANDS=0` — keep the game's own hand mesh. Default: hidden, with
+  tracking, colliders and the wrist UI kept.
+- `KL_BRINK_UI_HEIGHT=<m>` — how far above the tracked palm the wrist menu sits
+  (default 0.05, at most 0.12; outside that the menu is left where it is).
+- `KL_BRINK_LOOK_PINCH=0` — no distance selection through visionOS's selection
+  ray. Default on.
+- This title also defaults `KL_OVERLAYS` and `KL_AUTOBOOT` to on, and sets
+  `KL_FOVEATION=off`, `KL_OVRP_EYE_MAX=4096`, `KL_CP_QUALITY=1.0`,
+  `KL_CP_FOVEATION=1` and `KL_AUDIO_PREFER=opensl`, each only if not given on the
+  launch line.
+- `KL_PERF_LOG=1` — any title: fresh fps, display rate, GPU and eye size to the
+  log every fifth metrics tick.
+- `KL_KEEP_START_WINDOW=1` — any title: the start window stays open after the
+  immersive space does.

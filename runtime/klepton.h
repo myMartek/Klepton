@@ -191,6 +191,8 @@ uint64_t kl_mem_available_bytes(void);
 // compares against Linux's values (see kl_libc.c).
 int kl_errno_to_linux(int e);
 int kl_errno_from_linux(int e);
+// Publish a host error to both Darwin errno and the cached bionic errno slot.
+void kl_errno_set(int darwin_errno);
 
 // KL_TRACE_FS reporting for guest file operations (see kl_libc.c).
 void kl_fs_trace_open(const char *path, int flags, int fd);

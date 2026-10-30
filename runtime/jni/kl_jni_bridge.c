@@ -271,22 +271,27 @@ static klj_val klj_Method_getDeclaringClass(void *env, void *self, const klj_val
     return r;
 }
 
-void *klj_proxy_invoke_named(void *proxy, const char *iface,
-                             const char *name, const char *sig) {
+void *klj_proxy_invoke_named_args(void *proxy, const char *iface,
+                                  const char *name, const char *sig, void *args) {
     klj_object *o = klj_as_object(proxy);
     klj_proxy *p = (o && strcmp(o->cls, KLJ_CLASS_PROXY) == 0) ? o->data : NULL;
     void *fn = p && p->unity_rh
         ? kl_jni_native("com/unity3d/player/ReflectionHelper", "nativeProxyInvoke", NULL) : NULL;
-    if (!fn) return klj_proxy_invoke(proxy, iface, name, sig, NULL);
+    if (!fn) return klj_proxy_invoke(proxy, iface, name, sig, args);
     if (p->disabled) return NULL;
     // static native Object nativeProxyInvoke(long ptr, String methodName, Object[] args)
     void *(*invoke)(void *, void *, int64_t, void *, void *) = fn;
     klj_PushLocalFrame(NULL, 0);
     void *r = invoke(kl_jni_env(), klj_class_object("com/unity3d/player/ReflectionHelper"),
                      p->native_ptr, kl_jni_new_string(name),
-                     klj_new_array('L', "java/lang/Object", 0));
+                     args ? args : klj_new_array('L', "java/lang/Object", 0));
     klj_PopLocalFrame(NULL, NULL);
     return r;
+}
+
+void *klj_proxy_invoke_named(void *proxy, const char *iface,
+                             const char *name, const char *sig) {
+    return klj_proxy_invoke_named_args(proxy, iface, name, sig, NULL);
 }
 
 // Run everything the guest posted to the main looper. On Android this is what
