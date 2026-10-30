@@ -577,7 +577,7 @@ if KLT['data_panel']:
 # The Swift half of the language split: the App/UI, and the Compositor Services
 # renderer adds. A list rather than an id pair each, for the same reason
 # the guest libraries are one.
-SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swift",
+SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swift", "KleptonBrinkSelection.swift",
          "KleptonAudio.swift", "KleptonShell.swift", "KleptonTuning.swift",
          "KleptonChroma.swift", "KleptonMic.swift", "KleptonFrameGen.swift",
          "KleptonLauncher.swift", "KleptonHL1.swift", "KleptonGameData.swift",

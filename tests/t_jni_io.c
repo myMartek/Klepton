@@ -76,12 +76,48 @@ static int descriptors(void) {
     return count;
 }
 
+// The gallery request must complete with Denied through Unity's Java proxy.
+static int gallery_callbacks;
+static void *gallery_result(void *e,void *cls,int64_t ptr,void *name,void *args) {
+    assert(e==env && cls==kl_jni_class("com/unity3d/player/ReflectionHelper") && ptr==42);
+    const char *text=JNI(GetStringUTFChars,const char *(*)(void *,void *,uint8_t *))(e,name,NULL);
+    assert(strcmp(text,"OnPermissionResult")==0);
+    JNI(ReleaseStringUTFChars,void (*)(void *,void *,const char *))(e,name,text);
+    assert(JNI(GetArrayLength,int32_t (*)(void *,void *))(e,args)==1);
+    void *value=JNI(GetObjectArrayElement,void *(*)(void *,void *,int32_t))(e,args,0);
+    assert(JNI(CallIntMethodA,int32_t (*)(void *,void *,void *,const jvalue *))
+        (e,value,method("java/lang/Integer","intValue","()I"),NULL)==0);
+    gallery_callbacks++;return NULL;
+}
+static void gallery_permissions(void) {
+    void *rh=kl_jni_class("com/unity3d/player/ReflectionHelper");
+    kl_jni_method native={"nativeProxyInvoke","(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",(void *)gallery_result};
+    assert(JNI(RegisterNatives,int32_t (*)(void *,void *,const kl_jni_method *,int32_t))(env,rh,&native,1)==0);
+    void *pm=JNI(GetStaticMethodID,void *(*)(void *,void *,const char *,const char *))
+        (env,rh,"newProxyInstance","(Lcom/unity3d/player/UnityPlayer;JLjava/lang/Class;)Ljava/lang/Object;");
+    jvalue pa[]={{.l=NULL},{.j=42},{.l=kl_jni_class("com/yasirkula/unity/NativeGalleryPermissionReceiver")}};
+    void *proxy=JNI(CallStaticObjectMethodA,void *(*)(void *,void *,void *,const jvalue *))(env,rh,pm,pa);
+    const char *sigs[]={
+        "(Lcom/unity3d/player/UnityPlayerActivity;Lcom/yasirkula/unity/NativeGalleryPermissionReceiver;ZI)V",
+        "(Lcom.unity3d.player.UnityPlayerActivity;Lcom.yasirkula.unity.NativeGalleryPermissionReceiver;ZI)V",
+        "(Landroid/content/Context;Lcom/yasirkula/unity/NativeGalleryPermissionReceiver;ZI)V"};
+    for(int i=0;i<3;i++) {
+        void *cls=kl_jni_class("com/yasirkula/unity/NativeGallery");
+        void *m=JNI(GetStaticMethodID,void *(*)(void *,void *,const char *,const char *))(env,cls,"RequestPermission",sigs[i]);
+        jvalue args[]={{.l=NULL},{.l=proxy},{.i=1},{.i=0}};
+        JNI(CallStaticVoidMethodA,void (*)(void *,void *,void *,const jvalue *))(env,cls,m,args);
+        assert(gallery_callbacks==i+1);exception(NULL);
+    }
+    puts("gallery permission callback: PASS (Denied, each request signature)");
+}
+
 int main(void) {
     char root[] = "build/jni-output-XXXXXX", path[1024], missing[1024];
     assert(mkdtemp(root));
     kl_jni_set_files_dir(root);
     env = kl_jni_env(); jni = *(void ***)env;
     kl_jni_local_frame_push();
+    gallery_permissions();
     snprintf(path, sizeof path, "%s/output.bin", root);
     FILE *f = fopen(path, "wb");
     assert(f && fwrite("old trailing data", 1, 17, f) == 17);

@@ -1046,6 +1046,174 @@ static Il2CppObject *mprobe_objects(Il2CppObject *type, uint32_t *count) {
     return arr;
 }
 
+// BRINK's renderers are separate from its tracking, colliders and wrist UI.
+// Suppress only the named HandModelRenderer through Unity's rendering API.
+// Repeat the lookup after scene changes; never retain a managed object pointer.
+static void brink_real_hands(unsigned frame) {
+    extern const char *kl_driver_target_name(void);
+    if (frame < 600 || frame % 120) return;
+    const char *target = kl_driver_target_name();
+    if (!target || strcmp(target, "x3635172946605196") ||
+        !kl_env_on("KL_BRINK_REAL_HANDS", 1) || !mprobe_init()) return;
+    static int resolved;
+    static const MethodInfo *set_hidden;
+    static void *field;
+    static void (*field_get)(void *, void *, void *);
+    Il2CppClass *k = find_class("", "BrinkHandVisual");
+    if (!k) return;
+    if (!resolved) {
+        resolved = 1;
+        kl_image *img = kl_find_image("libil2cpp.so");
+        void *(*get_field)(Il2CppClass *, const char *) =
+            (void *)kl_sym(img, "il2cpp_class_get_field_from_name");
+        field_get = (void *)kl_sym(img, "il2cpp_field_get_value");
+        if (get_field) field = get_field(k, "HandModelRenderer");
+        set_hidden = find_method("UnityEngine", "Renderer", "set_forceRenderingOff", 1);
+        if (!field || !field_get || !set_hidden)
+            fprintf(stderr, "  [brink] hand mesh API unavailable; leaving graphics unchanged\n");
+    }
+    if (!field || !field_get || !set_hidden) return;
+    Il2CppObject *type = il.type_get_object(il.class_get_type(k));
+    uint32_t n = 0;
+    Il2CppObject *arr = mprobe_objects(type, &n);
+    if (!arr || n > 16) return;
+    for (uint32_t i=0; i<n; i++) {
+        Il2CppObject *obj = ((Il2CppObject **)((char *)arr + ARR_DATA))[i];
+        Il2CppObject *renderer = NULL, *exc = NULL;
+        if (!obj) continue;
+        field_get(obj, field, &renderer);
+        if (!renderer) continue;
+        uint8_t yes = 1; void *args[] = { &yes };
+        il.runtime_invoke(set_hidden, renderer, args, &exc);
+        static unsigned reported;
+        if (!exc && reported < 2) {
+            reported++;
+            fprintf(stderr, "  [brink] hand mesh %u hidden; tracking and wrist UI retained\n", i);
+        }
+    }
+}
+
+// Anchor the COMPLETE hand menu (grab icon, button tray, and colliders) to
+// the matching tracked hand, not the virtual Touch controller's grip offset.
+// OpenXR's dorsal +Y remains +Y in Unity. Measure the palm from the skeleton;
+// never offset the tracked joints themselves or repeatedly add a displacement.
+static void brink_wrist_ui(unsigned frame) {
+    extern const char *kl_driver_target_name(void);
+    if (frame < 600 || frame % 120) return;
+    const char *t = kl_driver_target_name();
+    if (!t || strcmp(t, "x3635172946605196") || !mprobe_init()) return;
+    float height = kl_env_float("KL_BRINK_UI_HEIGHT", 0.05f);
+    if (height <= 0 || height > 0.12f) return;
+    Il2CppClass *dk = find_class("UnityEngine.XR.Hands", "XRHandSkeletonDriver");
+    Il2CppClass *hk = find_class("", "BrinkHand");
+    if (!dk || !hk) return;
+    static int resolved;
+    static void *jf, *mf, *ef, *grab_f, *icon_f;
+    static void (*fg)(void *, void *, void *);
+    static const MethodInfo *root_m, *events_m, *side_m, *tr_m, *id_m;
+    static const MethodInfo *pos_m, *up_m, *parent_m, *setpos_m;
+    if (!resolved) {
+        resolved = 1;
+        kl_image *img = kl_find_image("libil2cpp.so");
+        void *(*field)(Il2CppClass *, const char *) = (void *)kl_sym(img, "il2cpp_class_get_field_from_name");
+        fg = (void *)kl_sym(img, "il2cpp_field_get_value");
+        if (field) {
+            jf=field(dk,"m_JointTransforms"); mf=field(hk,"Menu"); ef=field(hk,"HandTrackingEvents");
+            Il2CppClass *mk=find_class("","BrinkHandMenu"), *ik=find_class("","BrinkHandIcon");
+            if(mk) grab_f=field(mk,"GrabIcon");
+            if(ik) icon_f=field(ik,"Icon");
+        }
+        root_m=find_method("UnityEngine.XR.Hands","XRHandSkeletonDriver","get_rootTransform",0);
+        events_m=find_method("UnityEngine.XR.Hands","XRHandSkeletonDriver","get_handTrackingEvents",0);
+        side_m=find_method("UnityEngine.XR.Hands","XRHandTrackingEvents","get_handedness",0);
+        tr_m=find_method("UnityEngine","Component","get_transform",0);
+        id_m=find_method("UnityEngine","Object","GetInstanceID",0);
+        pos_m=find_method("UnityEngine","Transform","get_position",0);
+        up_m=find_method("UnityEngine","Transform","get_up",0);
+        parent_m=find_method("UnityEngine","Transform","SetParent",2);
+        setpos_m=find_method("UnityEngine","Transform","set_position",1);
+    }
+    if (!jf||!mf||!ef||!fg||!root_m||!events_m||!side_m||!tr_m||!id_m||!pos_m||!up_m||!parent_m||!setpos_m) return;
+    Il2CppObject *anchors[2]={0}; float centers[2][3], normals[2][3];
+    uint32_t n=0;
+    Il2CppObject *drivers=mprobe_objects(il.type_get_object(il.class_get_type(dk)),&n);
+    if (!drivers || n>16) return;
+    for (uint32_t i=0;i<n;i++) {
+        Il2CppObject *d=((Il2CppObject **)((char *)drivers+ARR_DATA))[i];
+        Il2CppObject *events=invoke_on(d,events_m,NULL,"tracked hand events");
+        if (!events) continue;
+        Il2CppObject *side=invoke_on(events,side_m,NULL,"tracked hand side");
+        if (!side) continue;
+        int h=*(int *)il.object_unbox(side)-1;
+        if (h<0||h>1) continue;
+        Il2CppObject *root=invoke_on(d,root_m,NULL,"tracked wrist");
+        Il2CppObject *joints=NULL; fg(d,jf,&joints);
+        if (!root||!joints||il.array_length(joints)!=26) continue;
+        Il2CppObject **js=(Il2CppObject **)((char *)joints+ARR_DATA);
+        // Unity XRHandJointID.ToIndex(): wrist 0, palm 1; middle metacarpal 11,
+        // proximal 12. Prefer the real palm joint, else its anatomical midpoint.
+        Il2CppObject *p0=js[1]?js[1]:js[11], *p1=js[1]?js[1]:js[12];
+        if (!p0||!p1) continue;
+        Il2CppObject *v=invoke_on(p0,pos_m,NULL,"palm position");
+        if (!v) continue;
+        float a[3]; memcpy(a,il.object_unbox(v),sizeof a);
+        v=invoke_on(p1,pos_m,NULL,"palm position");
+        if (!v) continue;
+        float *b=il.object_unbox(v);
+        for(int c=0;c<3;c++) centers[h][c]=(a[c]+b[c])*0.5f;
+        v=invoke_on(root,up_m,NULL,"hand dorsal normal");
+        if (!v) continue;
+        memcpy(normals[h],il.object_unbox(v),sizeof normals[h]);
+        anchors[h]=root;
+    }
+    static int done[64]; static unsigned used;
+    Il2CppObject *hands=mprobe_objects(il.type_get_object(il.class_get_type(hk)),&n);
+    if (!hands||n>16) return;
+    for(uint32_t i=0;i<n;i++) {
+        Il2CppObject *hand=((Il2CppObject **)((char *)hands+ARR_DATA))[i], *menu=NULL,*events=NULL;
+        fg(hand,mf,&menu); fg(hand,ef,&events);
+        if(!menu||!events) continue;
+        Il2CppObject *side=invoke_on(events,side_m,NULL,"menu hand side");
+        if(!side) continue;
+        int h=*(int *)il.object_unbox(side)-1;
+        if(h<0||h>1||!anchors[h]) continue;
+        Il2CppObject *tr=invoke_on(menu,tr_m,NULL,"complete hand menu");
+        if(!tr) continue;
+        Il2CppObject *idobj=invoke_on(tr,id_m,NULL,"menu id");
+        if(!idobj) continue;
+        int id=*(int *)il.object_unbox(idobj), seen=0;
+        for(unsigned j=0;j<used && j<64;j++) if(done[j]==id) seen=1;
+        if(seen) continue;
+        // Align the visible grab/tool icon itself, including its authored
+        // offset inside the complete menu. This also brings every sibling
+        // button and interaction collider along by exactly the same amount.
+        float root_minus_icon[3]={0};
+        Il2CppObject *grab=NULL,*renderer=NULL;
+        if(grab_f&&icon_f) {
+            fg(menu,grab_f,&grab);
+            if(grab) fg(grab,icon_f,&renderer);
+        }
+        if(renderer) {
+            Il2CppObject *icontr=invoke_on(renderer,tr_m,NULL,"visible wrist icon");
+            Il2CppObject *rp=invoke_on(tr,pos_m,NULL,"menu world position");
+            if(icontr&&rp) {
+                memcpy(root_minus_icon,il.object_unbox(rp),sizeof root_minus_icon);
+                Il2CppObject *ip=invoke_on(icontr,pos_m,NULL,"visible icon world position");
+                if(ip) { float *v=il.object_unbox(ip); for(int c=0;c<3;c++) root_minus_icon[c]-=v[c]; }
+                else memset(root_minus_icon,0,sizeof root_minus_icon);
+            }
+        }
+        uint8_t keep_world=1; void *pa[]={anchors[h],&keep_world}; Il2CppObject *exc=NULL;
+        il.runtime_invoke(parent_m,tr,pa,&exc);
+        if(exc) continue;
+        float target[3]; for(int c=0;c<3;c++) target[c]=centers[h][c]+height*normals[h][c]+root_minus_icon[c];
+        void *args[]={target}; il.runtime_invoke(setpos_m,tr,args,&exc);
+        if(exc) continue;
+        done[used%64]=id; used++;
+        fprintf(stderr,"  [brink] %s complete menu %d anchored above tracked palm by %.3fm; grab icon and button hitboxes included\n",h?"right":"left",id,height);
+    }
+}
+
 // KL_PROBE_CALL=<Namespace.Class>::<Method> — call one of the guest's own
 // parameterless methods, once, at frame KL_PROBE_CALL_FROM (default 3000).
 //
@@ -1788,7 +1956,201 @@ static void probe_rails(unsigned frame) {
             frame, one, two, left, right, other);
 }
 
+
+// The system supplies a selection ray only for a deliberate pinch. Consume it
+// on Unity's thread, preserving the anatomical hand stream and normal gestures.
+#include <pthread.h>
+#include <math.h>
+static pthread_mutex_t brink_selection_mu=PTHREAD_MUTEX_INITIALIZER;
+static struct { float v[6]; int hand,kind; float movement[2]; } brink_selection_queue[8];
+static unsigned brink_selection_read,brink_selection_write;
+void kl_brink_selection_push(float ox,float oy,float oz,float dx,float dy,float dz,int hand,int kind,float mx,float my) {
+    float v[6]={ox,oy,oz,dx,dy,dz};
+    for(int i=0;i<6;i++) if(!isfinite(v[i])) return;
+    float len=sqrtf(dx*dx+dy*dy+dz*dz); if(len<0.1f||len>10) return;
+    pthread_mutex_lock(&brink_selection_mu);
+    if(brink_selection_write-brink_selection_read>=8) ++brink_selection_read;
+    unsigned at=brink_selection_write++%8;
+    memcpy(brink_selection_queue[at].v,v,sizeof v);brink_selection_queue[at].hand=hand;
+    brink_selection_queue[at].kind=kind;brink_selection_queue[at].movement[0]=mx;brink_selection_queue[at].movement[1]=my;
+    pthread_mutex_unlock(&brink_selection_mu);
+}
+static int brink_bool(Il2CppObject *o,const MethodInfo *m) {
+    Il2CppObject *v=m?invoke_on(o,m,NULL,"look-pinch enabled"):NULL;
+    return v && *(unsigned char *)il.object_unbox(v);
+}
+static int brink_vec(Il2CppObject *o,const MethodInfo *m,float in[3],float out[3]) {
+    void *args[]={in};Il2CppObject *v=invoke_on(o,m,args,"look-pinch transform");
+    if(!v)return 0;memcpy(out,il.object_unbox(v),12);return 1;
+}
+
+
+static const MethodInfo *brink_selection_children(void) {
+    static const MethodInfo *cached;static int attempted;
+    if(attempted)return cached;attempted=1;
+    kl_image *img=kl_find_image("libil2cpp.so");if(!img)return NULL;
+    const MethodInfo *(*next)(Il2CppClass*,void**)=kl_sym(img,"il2cpp_class_get_methods");
+    const char *(*name)(const MethodInfo*)=kl_sym(img,"il2cpp_method_get_name");
+    uint32_t (*count)(const MethodInfo*)=kl_sym(img,"il2cpp_method_get_param_count");
+    void *(*param)(const MethodInfo*,uint32_t)=kl_sym(img,"il2cpp_method_get_param");
+    char *(*type_name)(void*)=kl_sym(img,"il2cpp_type_get_name");
+    void (*free_name)(void*)=kl_sym(img,"il2cpp_free");
+    Il2CppClass *klass=find_class("UnityEngine","GameObject");
+    if(!klass||!next||!name||!count||!param||!type_name)return NULL;
+    void *it=NULL;const MethodInfo *m;
+    while((m=next(klass,&it))) {
+        if(strcmp(name(m),"GetComponentsInChildren")||count(m)!=2)continue;
+        char *a=type_name(param(m,0)),*b=type_name(param(m,1));
+        int match=a&&b&&!strcmp(a,"System.Type")&&!strcmp(b,"System.Boolean");
+        if(free_name){if(a)free_name(a);if(b)free_name(b);}
+        if(match){cached=m;fprintf(stderr,"  [brink-select] resolved GameObject.GetComponentsInChildren(Type,bool)\n");break;}
+    }
+    return cached;
+}
+
+static Il2CppObject *brink_selection_components(Il2CppObject *owner,Il2CppObject *type) {
+    const MethodInfo *go_m=find_method("UnityEngine","Component","get_gameObject",0);
+    const MethodInfo *children=brink_selection_children();
+    Il2CppObject *go=go_m?invoke_on(owner,go_m,NULL,"button game object"):NULL;
+    if(!go||!children)return NULL;
+    unsigned char no=0;void *a[]={type,&no};
+    return invoke_on(go,children,a,"distance UI components");
+}
+
+static int brink_renderer_hit(Il2CppObject *owner,const float ray[6],float *closest) {
+    Il2CppClass *rk=find_class("UnityEngine","Renderer");
+    const MethodInfo *children=brink_selection_children();
+    const MethodInfo *bounds=find_method("UnityEngine","Renderer","get_bounds",0);
+    const MethodInfo *enabled=find_method("UnityEngine","Renderer","get_enabled",0);
+    if(!rk||!children||!bounds)return 0;
+    Il2CppObject *type=il.type_get_object(il.class_get_type(rk));
+    Il2CppObject *renderers=brink_selection_components(owner,type);
+    unsigned n=renderers?il.array_length(renderers):0;if(n>2048)return 0;
+    int found=0;
+    for(unsigned i=0;i<n;i++) {
+        Il2CppObject *r=((Il2CppObject**)((char*)renderers+ARR_DATA))[i];
+        if(!r||(enabled&&!brink_bool(r,enabled)))continue;
+        Il2CppObject *boxed=invoke_on(r,bounds,NULL,"distance button bounds");if(!boxed)continue;
+        float *b=il.object_unbox(boxed),lo=0,hi=*closest;int valid=1;
+        if(b[3]+b[4]+b[5]<1e-5f)continue;
+        for(int c=0;c<3;c++) {
+            float extent=fmaxf(b[c+3],0.002f),mn=b[c]-extent,mx=b[c]+extent;
+            if(fabsf(ray[c+3])<1e-6f){if(ray[c]<mn||ray[c]>mx){valid=0;break;}}
+            else {float t0=(mn-ray[c])/ray[c+3],t1=(mx-ray[c])/ray[c+3];if(t0>t1){float t=t0;t0=t1;t1=t;}lo=fmaxf(lo,t0);hi=fminf(hi,t1);if(lo>hi){valid=0;break;}}
+        }
+        if(valid&&hi>0&&lo<*closest){*closest=lo;found=1;}
+    }
+    return found;
+}
+
+static void brink_look_pinch(void) {
+    extern const char *kl_driver_target_name(void);
+    const char *t=kl_driver_target_name();if(!t||strcmp(t,"x3635172946605196"))return;
+    float input[6],movement[2]; int hand,kind;
+    pthread_mutex_lock(&brink_selection_mu);
+    if(brink_selection_read==brink_selection_write){pthread_mutex_unlock(&brink_selection_mu);return;}
+    unsigned at=brink_selection_read++%8;memcpy(input,brink_selection_queue[at].v,sizeof input);hand=brink_selection_queue[at].hand;kind=brink_selection_queue[at].kind;memcpy(movement,brink_selection_queue[at].movement,sizeof movement);
+    pthread_mutex_unlock(&brink_selection_mu);
+    if(!mprobe_init())return;
+    const MethodInfo *cam_m=find_method("UnityEngine","Camera","get_main",0);
+    const MethodInfo *tr_m=find_method("UnityEngine","Component","get_transform",0);
+    const MethodInfo *point_m=find_method("UnityEngine","Transform","TransformPoint",1);
+    const MethodInfo *dir_m=find_method("UnityEngine","Transform","TransformDirection",1);
+    const MethodInfo *active_m=find_method("UnityEngine","Behaviour","get_isActiveAndEnabled",0);
+    const MethodInfo *children_m=brink_selection_children();
+    const MethodInfo *ray_m=find_method("UnityEngine","Collider","Raycast",3);
+    Il2CppClass *bk=find_class("","ButtonBase"), *ck=find_class("UnityEngine","Collider");
+    if(!cam_m||!tr_m||!point_m||!dir_m||!active_m||!children_m||!ray_m||!bk||!ck){fprintf(stderr,"  [brink-select] managed selection API unavailable\n");return;}
+    Il2CppObject *cam=invoke(cam_m,NULL,"selection camera"),*tr=cam?invoke_on(cam,tr_m,NULL,"camera transform"):NULL;
+    if(!tr)return;
+    float ray[6];if(!brink_vec(tr,point_m,input,ray)||!brink_vec(tr,dir_m,input+3,ray+3))return;
+    float len=sqrtf(ray[3]*ray[3]+ray[4]*ray[4]+ray[5]*ray[5]);if(len<1e-6f)return;
+    for(int i=3;i<6;i++)ray[i]/=len;
+    uint32_t n=0;Il2CppObject *objects=mprobe_objects(il.type_get_object(il.class_get_type(bk)),&n);
+    Il2CppObject *chosen=NULL;float closest=100;
+    const MethodInfo *enabled=il.class_get_method_from_name(bk,"get_Enabled",0);
+    const MethodInfo *select=il.class_get_method_from_name(bk,"Select",2),*deselect=il.class_get_method_from_name(bk,"Deselect",1);
+    if(objects&&n<2048&&select&&deselect) for(uint32_t i=0;i<n;i++) {
+        Il2CppObject *button=((Il2CppObject **)((char*)objects+ARR_DATA))[i];
+        if(!button||!brink_bool(button,active_m)||!brink_bool(button,enabled))continue;
+        if(brink_renderer_hit(button,ray,&closest)) chosen=button;
+        Il2CppObject *type=il.type_get_object(il.class_get_type(ck));
+        Il2CppObject *cols=brink_selection_components(button,type);if(!cols)continue;
+        unsigned nc=il.array_length(cols);if(nc>64)continue;
+        for(unsigned j=0;j<nc;j++) {
+            Il2CppObject *col=((Il2CppObject **)((char*)cols+ARR_DATA))[j];if(!col)continue;
+            // RaycastHit layout: point, normal, faceID, distance, uv, colliderID.
+            // Reserve more than its 44-byte native value-type payload.
+            float hit[32]={0};void *ra[]={ray,hit,&closest};
+            Il2CppObject *ok=invoke_on(col,ray_m,ra,"button raycast");
+            if(ok&&*(unsigned char*)il.object_unbox(ok)&&hit[7]>0&&hit[7]<closest){chosen=button;closest=hit[7];}
+        }
+    }
+    if(kind==1) {
+        Il2CppClass *sk=find_class("","LocationsMenuScroller"),*ik=find_class("","LocationsMenuItem");
+        const MethodInfo *center=sk?il.class_get_method_from_name(sk,"GetCenteredItem",0):NULL;
+        const MethodInfo *scroll=sk?il.class_get_method_from_name(sk,"ScrollToItem",1):NULL;
+        const MethodInfo *pos=find_method("UnityEngine","Transform","get_position",0);
+        const MethodInfo *inverse=find_method("UnityEngine","Transform","InverseTransformPoint",1);
+        kl_image *img=kl_find_image("libil2cpp.so");
+        void *(*field)(Il2CppClass*,const char*)=img?(void*)kl_sym(img,"il2cpp_class_get_field_from_name"):NULL;
+        void (*get)(Il2CppObject*,void*,void*)=img?(void*)kl_sym(img,"il2cpp_field_get_value"):NULL;
+        void *container_f=sk&&field?field(sk,"ItemsContainer"):NULL;
+        uint32_t ns=0,ni=0;
+        Il2CppObject *scrollers=sk?mprobe_objects(il.type_get_object(il.class_get_type(sk)),&ns):NULL;
+        Il2CppObject *items=ik?mprobe_objects(il.type_get_object(il.class_get_type(ik)),&ni):NULL;
+        if(scrollers&&items&&ns<16&&ni<1024&&center&&scroll&&pos&&inverse&&container_f&&get)
+        for(unsigned si=0;si<ns;si++) {
+            Il2CppObject *sc=((Il2CppObject**)((char*)scrollers+ARR_DATA))[si];
+            if(!brink_bool(sc,active_m))continue;
+            Il2CppObject *current=invoke_on(sc,center,NULL,"centered destination"),*container=NULL;
+            get(sc,container_f,&container);if(!current||!container)continue;
+            // Require this pinch's gaze ray to hit the carousel, not scenery.
+            Il2CppObject *ct=il.type_get_object(il.class_get_type(ck));
+            Il2CppObject *cols=brink_selection_components(sc,ct);int hit_carousel=0;
+            unsigned nc=cols?il.array_length(cols):0;
+            if(nc<2048)for(unsigned j=0;j<nc&&!hit_carousel;j++) {
+                Il2CppObject *col=((Il2CppObject**)((char*)cols+ARR_DATA))[j];float hit[32]={0},far=100;void *ra[]={ray,hit,&far};
+                Il2CppObject *ok=col?invoke_on(col,ray_m,ra,"carousel raycast"):NULL;
+                hit_carousel=ok&&*(unsigned char*)il.object_unbox(ok);
+            }
+            if(!hit_carousel){float far=100;hit_carousel=brink_renderer_hit(sc,ray,&far);}
+            if(!hit_carousel)continue;
+            Il2CppObject *curtr=invoke_on(current,tr_m,NULL,"destination transform");
+            Il2CppObject *cp=curtr?invoke_on(curtr,pos,NULL,"destination position"):NULL;
+            float cur[3];if(!cp||!brink_vec(container,inverse,il.object_unbox(cp),cur))continue;
+            float direction=fabsf(movement[0])>=fabsf(movement[1])?-movement[0]:movement[1];
+            float best=1e9f;Il2CppObject *next=NULL;
+            for(unsigned j=0;j<ni;j++) {
+                Il2CppObject *item=((Il2CppObject**)((char*)items+ARR_DATA))[j];if(item==current||!brink_bool(item,active_m))continue;
+                Il2CppObject *it=invoke_on(item,tr_m,NULL,"destination transform");
+                const MethodInfo *child=find_method("UnityEngine","Transform","IsChildOf",1);void *ia[]={container};
+                Il2CppObject *is_child=it&&child?invoke_on(it,child,ia,"carousel membership"):NULL;
+                if(!is_child||!*(unsigned char*)il.object_unbox(is_child))continue;
+                Il2CppObject *ip=invoke_on(it,pos,NULL,"destination position");float local[3];
+                if(!ip||!brink_vec(container,inverse,il.object_unbox(ip),local))continue;
+                float gap=(local[0]-cur[0])*(direction>0?1:-1);
+                if(gap>0.001f&&gap<best){best=gap;next=item;}
+            }
+            if(next){void *args[]={next};invoke_on(sc,scroll,args,"distance destination swipe");fprintf(stderr,"  [brink-select] distance swipe advanced carousel\n");}
+            else fprintf(stderr,"  [brink-select] carousel swipe reached boundary\n");
+            return;
+        }
+        fprintf(stderr,"  [brink-select] swipe gaze missed an active carousel\n");return;
+    }
+    static unsigned select_trace;
+    if(select_trace++<10) fprintf(stderr,"  [brink-select] candidates=%u world ray o=(%.2f %.2f %.2f) d=(%.2f %.2f %.2f)\n",n,ray[0],ray[1],ray[2],ray[3],ray[4],ray[5]);
+    if(chosen) {
+        unsigned char no=0,yes=1;void *a[]={&no,&yes};invoke_on(chosen,select,a,"look-pinch press");
+        void *d[]={&no};invoke_on(chosen,deselect,d,"look-pinch release");
+        fprintf(stderr,"  [brink-select] hand%d activated %s at %.3fm\n",hand,il.class_get_name(il.object_get_class(chosen)),closest);
+    } else fprintf(stderr,"  [brink-select] hand%d ray did not hit an enabled ButtonBase\n",hand);
+}
+
 void kl_mprobe_tick(unsigned frame) {
+    brink_look_pinch();
+    brink_real_hands(frame);
+    brink_wrist_ui(frame);
     shave_input_bridge();
     {
         static int on = -1;

@@ -326,6 +326,8 @@ final class KleptonCompositor {
     // is about the lifecycle rather than the picture.
     private var queue: MTLCommandQueue?
     private var pipeline: MTLRenderPipelineState!
+    private var guestDepthPipeline: MTLRenderPipelineState?
+    private var loggedGuestDepth = false
     private var depthState: MTLDepthStencilState?
     /// The guest's quad layers in the order it submitted them: no test, and
     /// depth still written. See `overlaysInSubmitOrder`.
@@ -969,8 +971,9 @@ final class KleptonCompositor {
             // originFromHead. The guest derives its eye positions from this
             // pose and the offsets pushEyeOffsets sent, and those two have to
             // be stated about one origin or every near object sits wrong.
-            let (p, q) = Self.decompose(
-                Self.headFrom(anchor.originFromAnchorTransform, midpoint: eyeMidpointInDevice))
+            let selectionHead = Self.headFrom(anchor.originFromAnchorTransform, midpoint: eyeMidpointInDevice)
+            controllers.updateSelectionHead(selectionHead)
+            let (p, q) = Self.decompose(selectionHead)
             // Date the pose with the instant it is about. It was predicted to
             // `presentationTime`, so that — not "now" — is the clock the head
             // velocity has to be differenced on. The two differ by this
@@ -1134,6 +1137,12 @@ final class KleptonCompositor {
             amplification = device.supportsVertexAmplificationCount(2) ? 2 : 1
             desc.maxVertexAmplificationCount = amplification
             pipeline = try device.makeRenderPipelineState(descriptor: desc)
+            // Without this pipeline encodeComposite never looks for guest depth.
+            if klTargetName() == "x3635172946605196" {
+                desc.fragmentFunction = lib.makeFunction(name: "kl_reproject_depth_f")
+                guestDepthPipeline = try? device.makeRenderPipelineState(descriptor: desc)
+                desc.fragmentFunction = lib.makeFunction(name: "kl_reproject_f")
+            }
             // The same pass, blending — for a projection layer stacked on others
             // that asks for it by its alpha. kl_reproject_f hands out the
             // guest's alpha (and drops what is fully transparent) when the
@@ -4152,7 +4161,32 @@ final class KleptonCompositor {
                     uniforms[n].grid_eye = 1
                 }
             }
-            enc.setRenderPipelineState(probePipeline ?? pipeline)
+            var depthTextures: [MTLTexture] = []
+            var depthParams: [SIMD4<Float>] = []
+            if haveRendered && probePipeline == nil && guestDepthPipeline != nil {
+                for vi in viewIndices {
+                    let d = vi == 0 ? rendered.depth.0 : rendered.depth.1
+                    var w: Int32 = 0, h: Int32 = 0
+                    if d.layer_plus_one > 0,
+                       let raw = kl_glfb_layer_mtl_texture(d.layer_plus_one - 1, d.stage, &w, &h) {
+                        let t = arrayView(Unmanaged<MTLTexture>.fromOpaque(raw).takeUnretainedValue())
+                        if t.textureType == .type2DArray && d.slice >= 0 && Int(d.slice) < t.arrayLength {
+                            depthTextures.append(t)
+                            depthParams.append(SIMD4(d.near_z,d.far_z,d.min_depth,d.max_depth))
+                            depthParams.append(SIMD4(Float(d.slice),0,0,0))
+                        }
+                    }
+                }
+            }
+            let useGuestDepth = depthTextures.count == viewIndices.count && !depthTextures.isEmpty
+            enc.setRenderPipelineState(useGuestDepth ? guestDepthPipeline! : (probePipeline ?? pipeline))
+            if useGuestDepth {
+                enc.setFragmentTexture(depthTextures[0], index: 2)
+                enc.setFragmentTexture(depthTextures.count > 1 ? depthTextures[1] : depthTextures[0], index: 3)
+                depthParams.withUnsafeBytes { enc.setFragmentBytes($0.baseAddress!,length:$0.count,index:2) }
+                uniforms.withUnsafeBytes { enc.setFragmentBytes($0.baseAddress!,length:$0.count,index:0) }
+                if !loggedGuestDepth { loggedGuestDepth=true; NSLog("[cp] guest per-pixel depth active for real-hand occlusion") }
+            }
             if let depthState { enc.setDepthStencilState(depthState) }
             enc.setFragmentTexture(bind0, index: 0)
             enc.setFragmentTexture(bind1, index: 1)

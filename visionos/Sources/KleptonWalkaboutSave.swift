@@ -1,11 +1,12 @@
-// Walkabout Mini Golf: every lost ball and every Foxhunt putter of the courses
+// Walkabout Mini Golf: every lost ball and every earned putter of the courses
 // the player has, and the earned cosmetics of the packs they bought, written
 // into the game's own save.
 //
 // Lost balls are found by playing — one hidden on each of a course's 18 holes —
-// and a hard course's putter by solving its Foxhunt. Nothing here is a purchase:
-// a course sold separately counts only when the save says it was bought, and the
-// putters a Putter Pass or a promotion gives are not in the tables below at all.
+// and a hard course's putter by solving its Foxhunt, or on Homestar Runner, which
+// has none, in its activities. Nothing here is a purchase: a course sold
+// separately counts only when the save says it was bought, and the putters a
+// Putter Pass or a promotion gives are not in the tables below at all.
 //
 // Where the game keeps it (Walkabout 6.8, read from the game itself on the Mac,
 // 2026-10-17). The game has two saves and since 6.x reads the newer one:
@@ -35,8 +36,8 @@
 // global-metadata.dat. They are found there by their SHA-256, in the copy of the
 // game the player installed, so the game's constants are never part of this
 // source. The tables were read from the course catalogue of the same build
-// (CourseInfoAsset.LostBallIds and puttersData); a later course is simply not
-// unlocked until the tables learn it.
+// (CourseInfoAsset.LostBallIds and puttersData, and the activities' putters); a
+// later course is simply not unlocked until the tables learn it.
 import CommonCrypto
 import Foundation
 
@@ -88,6 +89,8 @@ enum KLWalkaboutUnlock {
         ("GLE", true, [873, 874, 875, 876, 877, 886, 879, 887, 885, 880, 878, 882, 883, 884, 888, 881, 889, 890]),
         ("PXE", true, [897, 896, 903, 904, 437, 902, 400, 900, 898, 894, 901, 893, 341, 899, 895, 336, 892, 891]),
     ]
+    /// The putters of a course. HRH has no Foxhunt: its three are activity awards
+    /// (50 Dangeresque Mystery, 51 Trogdor Wave 5, 52 Duck Pond Wave 4).
     static let foxhunts: [(loc: String, easy: String, dlc: Bool, putters: [Int])] = [
         ("TTH", "TTE", false, [7]),
         ("CBH", "CBE", false, [8]),
@@ -129,6 +132,7 @@ enum KLWalkaboutUnlock {
         ("TCH", "TCE", true, [47]),
         ("HWH", "HWE", true, [48]),
         ("BHH", "BHE", true, [49]),
+        ("HRH", "HRE", true, [50, 51, 52]),
         ("GLH", "GLE", true, [53]),
         ("PXH", "PXE", true, [54]),
     ]
