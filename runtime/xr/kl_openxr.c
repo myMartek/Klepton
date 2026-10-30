@@ -754,6 +754,8 @@ KL_XR_ENTRY_POINTS(X)
 // makes that assertion by name.
 static int klxr_is_scene_entry(const char *name);   // the room, defined with the spaces
 static int klxr_scene_on(void);
+static int klxr_is_hand_entry(const char *name);    // XR_EXT_hand_tracking, BRINK Traveler only
+static int klxr_hands_on(void);
 static int klxr_GetInstanceProcAddr(void *instance, const char *name, void **function) {
     (void)instance;
     if (!function) KLXR_RET(KLXR_ERROR_FUNCTION_UNSUPPORTED);
@@ -762,6 +764,7 @@ static int klxr_GetInstanceProcAddr(void *instance, const char *name, void **fun
 
     klxr_row *row = klxr_row_for(name);
     if (row && klxr_is_scene_entry(name) && !klxr_scene_on()) row = NULL;
+    if (row && klxr_is_hand_entry(name) && !klxr_hands_on()) row = NULL;
     if (!row) {
         // Printed once per distinct name and not counted, because it is neither
         // a resolution nor a call. This is the line that will name any
@@ -884,9 +887,10 @@ enum { KLXR_GATE_ALWAYS = 0,      // unconditional
        KLXR_GATE_VULKAN = 2,      // ...only when MoltenVK is actually reachable
        KLXR_GATE_USER_PRESENCE = 3,    // ...missioniss only (see below)
        KLXR_GATE_PERF_METRICS = 4,     // ...not for Moss from Steam (see below)
-       KLXR_GATE_FRAME_CONTROLLER = 5,
-       KLXR_GATE_HITMAN3 = 6,
-       KLXR_GATE_BRINK_HANDS = 7, KLXR_GATE_BRINK_DEPTH = 8 };
+       KLXR_GATE_FRAME_CONTROLLER = 5,     // ...Moss from Steam only (see below)
+       KLXR_GATE_HITMAN3 = 6,              // ...HITMAN 3 VR: Reloaded only (see below)
+       KLXR_GATE_BRINK_HANDS = 7,          // ...BRINK Traveler only
+       KLXR_GATE_BRINK_DEPTH = 8 };        // ...BRINK Traveler, unless KL_XR_DEPTH=0
 
 static const struct { const char *name; uint32_t version; int gate; } g_extensions[] = {
     { "XR_KHR_opengl_es_enable",       10, KLXR_GATE_ALWAYS },
@@ -1094,6 +1098,13 @@ static void klxr_ext_extra_init(void) {
 static struct { const char *name; uint32_t version; }
        g_ext_live[KLXR_EXT_ALL + KLXR_EXT_EXTRA_MAX];
 static uint32_t g_ext_nlive;
+
+static int klxr_ext_gate_open(int gate);
+static int klxr_hands_on(void) { return klxr_ext_gate_open(KLXR_GATE_BRINK_HANDS); }
+static int klxr_is_hand_entry(const char *name) {
+    return !strcmp(name, "xrCreateHandTrackerEXT") || !strcmp(name, "xrDestroyHandTrackerEXT") ||
+           !strcmp(name, "xrLocateHandJointsEXT");
+}
 
 static int klxr_ext_gate_open(int gate) {
     switch (gate) {
@@ -1634,7 +1645,7 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
     klxr_log_chain("xrGetSystemProperties", props->next);
     struct klxr_out_chain { int32_t type; void *next; };
     struct klxr_hand_props { int32_t type; void *next; uint32_t supportsHandTracking; };
-    for (struct klxr_out_chain *c = props->next, *next; c; c = next) {
+    for (struct klxr_out_chain *c = klxr_hands_on() ? props->next : NULL, *next; c; c = next) {
         next = c->next;
         if (c->type == XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT)
             ((struct klxr_hand_props *)c)->supportsHandTracking = 1;
@@ -4643,7 +4654,7 @@ static XrResult klxr_SuggestInteractionProfileBindings(
         }
     }
 
-    if (!strcmp(profile, KLXR_HAND_PROFILE))
+    if (active && !strcmp(profile, KLXR_HAND_PROFILE))
         fprintf(stderr, "  [xr] BRINK native hand profile: anatomy-based grip, pinch, poke enabled\n");
     unsigned took = 0, unknown = 0;
     for (uint32_t i = 0; i < bindings->countSuggestedBindings; i++) {
@@ -8000,12 +8011,14 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
                 // the eye texture the base was mirrored into. Flattening only —
                 // the per-layer composite maps no layer into another's space,
                 // which is the whole point of it.
+                static int depth_on = -1;
+                if (depth_on < 0) depth_on = klxr_ext_gate_open(KLXR_GATE_BRINK_DEPTH);
                 static unsigned depth_probe;
-                if(depth_probe++<4) {
+                if(depth_on && depth_probe++<4) {
                     const XrCompositionLayerDepthInfoKHR *p=proj->views[v].next;
                     fprintf(stderr,"  [brink-depth] chain eye%u layers=%d next=%p type=%d\n",v,layers_on,(void*)p,p?p->type:0);
                 }
-                if (!layers_on && klxr_ext_gate_open(KLXR_GATE_BRINK_DEPTH)) {
+                if (!layers_on && depth_on) {
                     const XrCompositionLayerDepthInfoKHR *di = proj->views[v].next;
                     for (int nc=0; di && nc<32; ++nc, di=di->next) {
                         if (di->type != 1000010000) continue;

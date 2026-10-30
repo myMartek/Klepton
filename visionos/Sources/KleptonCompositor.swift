@@ -1137,9 +1137,12 @@ final class KleptonCompositor {
             amplification = device.supportsVertexAmplificationCount(2) ? 2 : 1
             desc.maxVertexAmplificationCount = amplification
             pipeline = try device.makeRenderPipelineState(descriptor: desc)
-            desc.fragmentFunction = lib.makeFunction(name: "kl_reproject_depth_f")
-            guestDepthPipeline = try? device.makeRenderPipelineState(descriptor: desc)
-            desc.fragmentFunction = lib.makeFunction(name: "kl_reproject_f")
+            // Without this pipeline encodeComposite never looks for guest depth.
+            if klTargetName() == "x3635172946605196" {
+                desc.fragmentFunction = lib.makeFunction(name: "kl_reproject_depth_f")
+                guestDepthPipeline = try? device.makeRenderPipelineState(descriptor: desc)
+                desc.fragmentFunction = lib.makeFunction(name: "kl_reproject_f")
+            }
             // The same pass, blending — for a projection layer stacked on others
             // that asks for it by its alpha. kl_reproject_f hands out the
             // guest's alpha (and drops what is fully transparent) when the
