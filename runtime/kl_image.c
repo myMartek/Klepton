@@ -27,6 +27,8 @@ int kl_untested_profile(void);   // guest/kl_driver.c
 #include "klepton.h"
 #include "kl_x18.h"
 #include "kl_guestpatch.h"
+#include "kl_aot_hooks.h"
+#include "kl_extension.h"
 
 
 // ---------- ELF64 subset ----------
@@ -148,6 +150,7 @@ struct kl_image {
     void       *dl_handle;     // set when the image arrived as a translated
                                // Mach-O dylib; then dyld owns the mapping
     int         tls_mod;       // index into g_tls_mod + 1; 0 = no PT_TLS
+    const struct mach_header_64 *aot_header;
 };
 
 static void record_missing(kl_image *img, const char *nm) {
@@ -526,7 +529,19 @@ static uint64_t sym_value(kl_image *img, uint32_t idx, const char **name_out) {
     for (unsigned i = 0; i < g_interpose_n; i++)
         if (!strcmp(nm, g_interpose[i].name))
             return (uint64_t)(uintptr_t)g_interpose[i].fn;
-    if (s->st_shndx != 0) return (uint64_t)(uintptr_t)(img->base + s->st_value);
+    if (s->st_shndx != 0) {
+        // C++ inline data (including its one-time initialization guard) must be
+        // shared across Scotland2 modules. Otherwise a later mod gets another
+        // copy of an already registered dependency's class metadata. Keep this
+        // scoped to module opens and default-visible weak/unique OBJECTs;
+        // protected/hidden storage and source-adapted function bodies stay local.
+        unsigned binding=s->st_info>>4,type=s->st_info&15,visibility=s->st_other&3;
+        if (kl_extension_strict_load() && type==1 && visibility==0 && (binding==2 || binding==10)) {
+            void *shared=kl_guest_sym_global(nm);
+            if(shared)return (uint64_t)(uintptr_t)shared;
+        }
+        return (uint64_t)(uintptr_t)(img->base + s->st_value);
+    }
     void *ext = kl_shim_lookup(nm);
     // Not a shim: try other already-loaded guest images. Android's linker binds
     // an .so's imports against its DT_NEEDED chain; our chain is the image
@@ -931,6 +946,11 @@ kl_image *kl_load_dylib(const char *path) {
                     real, rec->ctr_patched, rec->ctr_value, KLX_CTR_EL0_VALUE);
     }
 
+    if (kl_aot_attach(mh, elf) != 0) {
+        err("%s: %s",real,kl_aot_error());
+        free(img); dlclose(h); return NULL;
+    }
+    img->aot_header=mh;
     if (kl_env_on("KL_TRACE_IMAGES", 0))
         fprintf(stderr, "  [klepton] dylib %s: mach header %p, guest image %p span %#zx\n",
                 real, (const void *)mh, (void *)img->base, img->span);
@@ -1597,6 +1617,7 @@ int kl_rebind(kl_image *img, const char *name, void *from, void *to) {
 
 void kl_unload(kl_image *img) {
     if (!img) return;
+    if (img->aot_header) kl_aot_detach(img->aot_header);
     if (img->dl_handle) dlclose(img->dl_handle);   // translated: dyld owns it
     else                munmap(img->base - img->map_off - img->x18_pre_arena_size,
                                img->x18_pre_arena_size + img->map_size +

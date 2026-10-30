@@ -127,6 +127,7 @@ unsigned long long kl_vulkan_xr_image(unsigned w, unsigned h, unsigned l,
     (void)w; (void)h; (void)l; (void)m; (void)f; (void)depth; return 0;
 }
 void *kl_vulkan_xr_image_mtl(unsigned long long img) { (void)img; return NULL; }
+void  kl_vulkan_xr_image_not_eye(unsigned long long img) { (void)img; }
 int   kl_vulkan_fove_indirect_selftest(void) { return -1; }
 // Not an entry point but a variable, read by kl_mtl_foveate.m (part of every
 // runtime link) and declared there, not in the header — so "every entry point

@@ -42,6 +42,7 @@ int getentropy(void *buf, size_t buflen);
 #include <ctype.h>
 #include "klepton.h"
 #include "guest/kl_obbmap.h"
+#include "guest/kl_extension.h"
 #include "kl_va.h"
 #include <sys/ucontext.h>   /* Darwin mcontext for the x18-veneer signal repair */
 #include "kl_x18.h"         /* KLX_TSD_SLOT */
@@ -3030,7 +3031,26 @@ enum {
 };
 
 #define KL_FUTEX_BUCKETS 256
-static struct { pthread_mutex_t m; pthread_cond_t c; } g_futex[KL_FUTEX_BUCKETS];
+typedef struct kl_futex_waiter {
+    struct kl_futex_waiter *next;
+    const int32_t *address;
+    uint32_t mask;
+    int notified;
+} kl_futex_waiter;
+static struct { pthread_mutex_t m; pthread_cond_t c; kl_futex_waiter *waiters; } g_futex[KL_FUTEX_BUCKETS];
+
+// Rust's reader/writer lock falls back to waking readers only if WAKE reports
+// zero writers. Reporting the requested count creates a phantom writer and can
+// strand every reader. Track actual selected waiters, including hash collisions.
+static long futex_wake_locked(unsigned bucket,const int32_t *address,uint32_t count,uint32_t mask) {
+    long woken=0;
+    for (kl_futex_waiter *w=g_futex[bucket].waiters;w && (uint32_t)woken<count;w=w->next)
+        if (!w->notified && w->address==address && (w->mask&mask)) {
+            w->notified=1; ++woken;
+        }
+    if (woken) pthread_cond_broadcast(&g_futex[bucket].c);
+    return woken;
+}
 
 static void futex_init(void) {
     for (int i = 0; i < KL_FUTEX_BUCKETS; i++) {
@@ -3239,8 +3259,8 @@ static int futex_op_cmp(int cmp, int32_t oldval, int32_t cmparg) {
     return 0;
 }
 
-static long kl_futex_impl(int32_t *uaddr, int op, uint32_t val, const struct timespec *ts,
-                          int32_t *uaddr2, uint32_t val3) {
+static long kl_futex_legacy(int32_t *uaddr, int op, uint32_t val, const struct timespec *ts,
+                            int32_t *uaddr2, uint32_t val3) {
     int      base = op & ~(KL_FUTEX_PRIVATE_FLAG | KL_FUTEX_CLOCK_REALTIME);
     unsigned b    = futex_bucket(uaddr);
 
@@ -3344,6 +3364,148 @@ static long kl_futex_impl(int32_t *uaddr, int op, uint32_t val, const struct tim
         return -1;
     }
     }
+}
+
+static long kl_futex_exact(int32_t *uaddr, int op, uint32_t val, const struct timespec *ts,
+                           int32_t *uaddr2, uint32_t val3) {
+    int      base = op & ~(KL_FUTEX_PRIVATE_FLAG | KL_FUTEX_CLOCK_REALTIME);
+    unsigned b    = futex_bucket(uaddr);
+
+    if (!uaddr) { errno=EFAULT; return -1; }
+    if ((uintptr_t)uaddr%4) { errno=EINVAL; return -1; }
+    if ((base==KL_FUTEX_WAKE || base==KL_FUTEX_WAKE_BITSET || base==KL_FUTEX_WAKE_OP) && (int32_t)val<0) { errno=EINVAL; return -1; }
+
+    switch (base) {
+    case KL_FUTEX_WAIT:
+    case KL_FUTEX_WAIT_BITSET: {
+        if (base==KL_FUTEX_WAIT_BITSET && !val3) { errno=EINVAL; return -1; }
+        if (ts && (ts->tv_sec<0 || ts->tv_nsec<0 || ts->tv_nsec>=1000000000L)) { errno=EINVAL; return -1; }
+        // A Linux futex syscall is not a pthread cancellation point. Darwin's
+        // condvar is: keep a canceled thread from leaving a stack waiter linked
+        // into the bucket or abandoning its mutex while cancellation unwinds.
+        int cancellation;
+        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE,&cancellation);
+        pthread_mutex_lock(&g_futex[b].m);
+        if ((uint32_t)__atomic_load_n(uaddr, __ATOMIC_SEQ_CST) != val) {
+            pthread_mutex_unlock(&g_futex[b].m);
+            pthread_setcancelstate(cancellation,NULL);
+            errno = EAGAIN;
+            return -1;
+        }
+        kl_futex_waiter waiter={.next=g_futex[b].waiters,.address=uaddr,
+            .mask=base==KL_FUTEX_WAIT_BITSET?val3:UINT32_MAX};
+        g_futex[b].waiters=&waiter;
+        int r=0;
+        if (!ts) {
+            while (!waiter.notified && !r) r = pthread_cond_wait(&g_futex[b].c, &g_futex[b].m);
+        } else {
+            // FUTEX_WAIT's timeout is relative; FUTEX_WAIT_BITSET's is an
+            // absolute deadline, on CLOCK_MONOTONIC unless FUTEX_CLOCK_REALTIME
+            // is set. pthread_cond_timedwait only speaks CLOCK_REALTIME, so a
+            // monotonic deadline is carried across as the interval that remains.
+            struct timespec now, abs;
+            clock_gettime(CLOCK_REALTIME, &now);
+            if (base == KL_FUTEX_WAIT) {
+                if (__builtin_add_overflow(now.tv_sec,ts->tv_sec,&abs.tv_sec)) r=EINVAL;
+                abs.tv_nsec = now.tv_nsec + ts->tv_nsec;
+            } else if (op & KL_FUTEX_CLOCK_REALTIME) {
+                abs = *ts;
+            } else {
+                struct timespec mono;
+                clock_gettime(CLOCK_MONOTONIC, &mono);
+                if (__builtin_add_overflow(now.tv_sec,ts->tv_sec-mono.tv_sec,&abs.tv_sec)) r=EINVAL;
+                abs.tv_nsec = now.tv_nsec + (ts->tv_nsec - mono.tv_nsec);
+            }
+            if (!r && abs.tv_sec==INT64_MAX && abs.tv_nsec>=1000000000L) r=EINVAL;
+            if (!r) ts_normalise(&abs);
+            while (!waiter.notified && !r) r = pthread_cond_timedwait(&g_futex[b].c, &g_futex[b].m, &abs);
+        }
+        kl_futex_waiter **link=&g_futex[b].waiters;
+        while (*link!=&waiter) link=&(*link)->next;
+        *link=waiter.next;
+        if (waiter.notified) r=0;
+        pthread_mutex_unlock(&g_futex[b].m);
+        pthread_setcancelstate(cancellation,NULL);
+        if (r) { errno = r; return -1; }
+        return 0;
+    }
+    case KL_FUTEX_WAKE:
+    case KL_FUTEX_WAKE_BITSET: {
+        if (base==KL_FUTEX_WAKE_BITSET && !val3) { errno=EINVAL; return -1; }
+        pthread_mutex_lock(&g_futex[b].m);
+        long woken=futex_wake_locked(b,uaddr,val,base==KL_FUTEX_WAKE_BITSET?val3:UINT32_MAX);
+        pthread_mutex_unlock(&g_futex[b].m);
+        return woken;
+    }
+
+    // "Modify a second word, wake on the first, and conditionally wake on the
+    // second too" — one syscall so the release side of a semaphore needs no
+    // lock. Qt's QSemaphore::release() is built on it, and refusing it is a
+    // wake that never arrives: libshell's 2D frontend deadlocked in
+    // QImage::smoothScaled (Qt parallelises the scale across QThreadPool and
+    // joins on a QSemaphore) while constructing its very first panel. Nothing
+    // in the hang mentions futex — see the trap record.
+    case KL_FUTEX_WAKE_OP: {
+        if (!uaddr2) { errno=EFAULT; return -1; }
+        if ((uintptr_t)uaddr2%4 || (int32_t)(uintptr_t)ts<0) { errno=EINVAL; return -1; }
+        if (!uaddr2) { errno = EFAULT; return -1; }
+        // `ts` is not a pointer for this op — the kernel reuses the timeout
+        // slot as the second wake count.
+        uint32_t val2   = (uint32_t)(uintptr_t)ts;
+        int      opcode = (int)((val3 >> 28) & 0xf);
+        int      cmp    = (int)((val3 >> 24) & 0xf);
+        int32_t  oparg  = (int32_t)((val3 >> 12) & 0xfff);
+        int32_t  cmparg = (int32_t)(val3 & 0xfff);
+        if (opcode & KL_FUTEX_OP_OPARG_SHIFT) {
+            opcode &= ~KL_FUTEX_OP_OPARG_SHIFT;
+            if ((uint32_t)oparg>=32) { errno=EINVAL; return -1; }
+            oparg = (int32_t)(1u << oparg);
+        }
+        if (opcode>KL_FUTEX_OP_XOR || cmp>KL_FUTEX_OP_CMP_GE) { errno=ENOSYS; return -1; }
+        // Both encoded operands are signed 12-bit values.
+        if (!(val3>>31)) oparg=(int32_t)((uint32_t)oparg<<20)>>20;
+        cmparg=(int32_t)((uint32_t)cmparg<<20)>>20;
+        unsigned b2 = futex_bucket(uaddr2);
+        unsigned first=b<b2?b:b2,last=b<b2?b2:b;
+        pthread_mutex_lock(&g_futex[first].m);
+        if (last!=first) pthread_mutex_lock(&g_futex[last].m);
+        int32_t oldval = futex_op_apply(opcode, uaddr2, oparg);
+        long woken=futex_wake_locked(b,uaddr,val,UINT32_MAX);
+        if (futex_op_cmp(cmp,oldval,cmparg)) woken+=futex_wake_locked(b2,uaddr2,val2,UINT32_MAX);
+        if (last!=first) pthread_mutex_unlock(&g_futex[last].m);
+        pthread_mutex_unlock(&g_futex[first].m);
+        return woken;
+    }
+    default: {
+        // A silent refusal at its most expensive: a futex op we do not
+        // implement is a WAKE that never arrives, and ENOSYS is returned to a
+        // caller that has already decided a waiter needs waking. Nothing near
+        // the hang mentions futex. Name the op, once each.
+        static _Atomic unsigned seen;
+        unsigned bit = 1u << (base & 31);
+        if (!(atomic_fetch_or(&seen, bit) & bit))
+            fprintf(stderr, "  [futex] unimplemented op %d (raw 0x%x) — refused; "
+                            "a waiter on %p will not be woken\n", base, op, (void *)uaddr);
+        errno = ENOSYS;
+        return -1;
+    }
+    }
+}
+
+// KL_FUTEX_EXACT=1: WAKE reports the waiters it really woke and arguments are
+// checked as the kernel checks them. Only a build with mods turns it on: the
+// default for every other game stays the broadcast above until it is tested
+// across the library.
+static int kl_futex_exact_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_FUTEX_EXACT", 0);
+    return on;
+}
+
+static long kl_futex_impl(int32_t *uaddr, int op, uint32_t val, const struct timespec *ts,
+                          int32_t *uaddr2, uint32_t val3) {
+    return kl_futex_exact_on() ? kl_futex_exact(uaddr, op, val, ts, uaddr2, val3)
+                               : kl_futex_legacy(uaddr, op, val, ts, uaddr2, val3);
 }
 
 // ...and WHO asked. A refused syscall is a wrong answer the caller does not
@@ -3455,10 +3617,13 @@ long klb_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
     // futex is the only syscall here that reads past the fourth argument, so a5
     // and a6 must be carried through: without them FUTEX_WAKE_OP cannot be
     // implemented at all.
-    if (n == KL_SYS_futex)
-        return kl_futex((int32_t *)(uintptr_t)a1, (int)a2, (uint32_t)a3,
-                        (const struct timespec *)(uintptr_t)a4,
-                        (int32_t *)(uintptr_t)a5, (uint32_t)a6);
+    if (n == KL_SYS_futex) {
+        long result=kl_futex((int32_t *)(uintptr_t)a1, (int)a2, (uint32_t)a3,
+                            (const struct timespec *)(uintptr_t)a4,
+                            (int32_t *)(uintptr_t)a5, (uint32_t)a6);
+        if (result<0 && kl_futex_exact_on()) kl_errno_set(errno);
+        return result;
+    }
     // getrandom, and it is FATAL to refuse rather than merely unimplemented:
     // VRChat loads libpython3.12.so, and CPython seeds its hash randomization
     // from this before it will run at all — a refusal here is
@@ -3522,12 +3687,22 @@ long klb_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
         struct kiov { void *base; size_t len; };
         const struct kiov *loc = (const struct kiov *)(uintptr_t)a2, *rem = (const struct kiov *)(uintptr_t)a4;
         unsigned long nl = (unsigned long)a3, nr = (unsigned long)a5;
+        if(kl_extension_active() && (a6 || nl>1024 || nr>1024)) { kl_errno_set(EINVAL);return -1; }
         if ((pid_t)a1 != getpid()) {
             syscall_warn_once(n, __builtin_return_address(0));
             kl_errno_set(EPERM);
             return -1;
         }
         if ((nl && !loc) || (nr && !rem)) { kl_errno_set(EFAULT); return -1; }
+        size_t local_total=0,remote_total=0;
+        for(unsigned long i=0;kl_extension_active() && i<nl;++i) {
+            if(loc[i].len>(size_t)LONG_MAX-local_total) {kl_errno_set(EINVAL);return -1;}
+            local_total+=loc[i].len;
+        }
+        for(unsigned long i=0;kl_extension_active() && i<nr;++i) {
+            if(rem[i].len>(size_t)LONG_MAX-remote_total) {kl_errno_set(EINVAL);return -1;}
+            remote_total+=rem[i].len;
+        }
         long total = 0;
         unsigned long li = 0, ri = 0;
         size_t lo = 0, ro = 0;
@@ -4242,3 +4417,10 @@ void kl_fs_trace_open(const char *path, int flags, int fd) {
 }
 
 kl_file_watch_fn kl_file_watch;
+
+// Same self-process, fault-safe implementation for the libc and raw syscall
+// doors. Unity 6.3 imports this spelling directly when inspecting local memory.
+ssize_t klb_process_vm_readv(pid_t pid,const void *local,unsigned long nl,
+                            const void *remote,unsigned long nr,unsigned long flags) {
+    return klb_syscall(KL_SYS_process_vm_readv,pid,(long)local,nl,(long)remote,nr,flags);
+}

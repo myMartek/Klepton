@@ -2,6 +2,30 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>KLScotland2Diagnostics</key>
+    <string>$(KL_SCOTLAND2_DIAGNOSTICS)</string>
+    <key>KLScotland2Profile</key>
+    <string>$(KL_SCOTLAND2_PROFILE)</string>
+    <key>KLAllowTestSwitches</key>
+    <string>$(KL_ALLOW_TEST_SWITCHES)</string>
+    <key>KLScotland2Test</key>
+    <string>$(KL_SCOTLAND2_TEST)</string>
+    <key>KLScotland2MetaCore</key>
+    <string>$(KL_SCOTLAND2_METACORE)</string>
+    <key>KLScotland2CoreMods</key>
+    <string>$(KL_SCOTLAND2_COREMODS)</string>
+    <key>KLScotland2SongDownloader</key>
+    <string>$(KL_SCOTLAND2_SONGDOWNLOADER)</string>
+    <key>KLScotland2SongCore</key>
+    <string>$(KL_SCOTLAND2_SONGCORE)</string>
+    <key>KLScotland2BSML</key>
+    <string>$(KL_SCOTLAND2_BSML)</string>
+    <key>KLScotland2Lapiz</key>
+    <string>$(KL_SCOTLAND2_LAPIZ)</string>
+    <key>KLScotland2CustomTypes</key>
+    <string>$(KL_SCOTLAND2_CUSTOMTYPES)</string>
+    <key>KLScotland2Hooks</key>
+    <string>$(KL_SCOTLAND2_HOOKS)</string>
 	<key>CFBundleIconName</key>
 	<string>$(KL_APPICON_NAME)</string>
 	<key>GCSupportedGameControllers</key>

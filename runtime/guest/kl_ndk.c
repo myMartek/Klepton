@@ -25,6 +25,8 @@
 #include "kl_jni.h"
 #include "kl_env.h"
 #include "kl_openxr.h"   // the XR surface-swapchain seam, for ANativeWindow_fromSurface
+#include "kl_ovrp.h"
+#include "kl_extension.h"
 
 // ================================================================== ALooper
 enum {
@@ -38,6 +40,11 @@ enum { ALOOPER_EVENT_INPUT = 1 << 0 };
 #define KL_LOOPER_MAX_FDS 16
 
 typedef int (*kl_looper_cb)(int fd, int events, void *data);
+typedef struct kl_frame_callback {
+    void (*run)(long, void*);
+    void *data;
+    struct kl_frame_callback *next;
+} kl_frame_callback;
 
 typedef struct kl_looper {
     int             refs;
@@ -49,6 +56,8 @@ typedef struct kl_looper {
     } fds[KL_LOOPER_MAX_FDS];
     int             nfds;
     pthread_mutex_t lock;
+    kl_frame_callback *frames, *frames_tail;
+    int64_t frame_deadline;
 } kl_looper;
 
 static pthread_key_t  g_looper_key;
@@ -129,6 +138,44 @@ static void kl_ALooper_wake(kl_looper *l) {
     (void)n;   // EAGAIN just means a wake is already pending, which is the point
 }
 
+// The NDK door is per looper, unlike the older Java frame-clock bridge.
+// Invoke one-shot callbacks on their owning looper thread, outside its lock,
+// so a callback can safely post itself for the following display interval.
+static int64_t kl_frame_now(void) {
+    struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);
+    return (int64_t)ts.tv_sec*1000000000+ts.tv_nsec;
+}
+static kl_looper *kl_AChoreographer_getInstance(void) { return kl_ALooper_forThread(); }
+static void kl_AChoreographer_postFrameCallback(kl_looper *l,void (*run)(long,void*),void *data) {
+    if(!l || !run)return;
+    kl_frame_callback *frame=malloc(sizeof *frame);
+    if(!frame)return;
+    *frame=(kl_frame_callback){run,data,NULL};
+    double hz=kl_ovrp_display_frequency();
+    if(!(hz>=30 && hz<=240))hz=72;
+    pthread_mutex_lock(&l->lock);
+    if(l->frames_tail)l->frames_tail->next=frame;
+    else { l->frames=frame;l->frame_deadline=kl_frame_now()+(int64_t)(1e9/hz); }
+    l->frames_tail=frame;
+    pthread_mutex_unlock(&l->lock);
+    kl_ALooper_wake(l);
+}
+static int kl_frame_dispatch(kl_looper *l) {
+    int64_t now=kl_frame_now();
+    pthread_mutex_lock(&l->lock);
+    kl_frame_callback *frames=NULL;
+    if(l->frames && now>=l->frame_deadline) {
+        frames=l->frames;l->frames=l->frames_tail=NULL;l->frame_deadline=0;
+    }
+    pthread_mutex_unlock(&l->lock);
+    int fired=frames!=NULL;
+    while(frames) {
+        kl_frame_callback *next=frames->next;
+        frames->run((long)now,frames->data);free(frames);frames=next;
+    }
+    return fired;
+}
+
 static int kl_ALooper_addFd(kl_looper *l, int fd, int ident, int events,
                             kl_looper_cb cb, void *data) {
     if (!l) return -1;
@@ -169,6 +216,11 @@ static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **
     void         *data[KL_LOOPER_MAX_FDS + 1];
 
     pthread_mutex_lock(&l->lock);
+    if(l->frames) {
+        int64_t remaining=l->frame_deadline-kl_frame_now();
+        int frame_timeout=remaining<=0?0:(int)((remaining+999999)/1000000);
+        if(timeoutMillis<0 || timeoutMillis>frame_timeout)timeoutMillis=frame_timeout;
+    }
     pfd[0] = (struct pollfd){l->wake_r, POLLIN, 0};
     int n = 1;
     for (int i = 0; i < l->nfds; i++, n++) {
@@ -182,12 +234,14 @@ static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **
 
     int r = poll(pfd, (nfds_t)n, timeoutMillis);
     if (r < 0)  return errno == EINTR ? ALOOPER_POLL_WAKE : ALOOPER_POLL_ERROR;
-    if (r == 0) return ALOOPER_POLL_TIMEOUT;
+    if (r == 0) return kl_frame_dispatch(l)?ALOOPER_POLL_CALLBACK:ALOOPER_POLL_TIMEOUT;
 
     if (pfd[0].revents & POLLIN) {         // drain the wake pipe
         char buf[64];
         while (read(l->wake_r, buf, sizeof buf) > 0) { }
-        return ALOOPER_POLL_WAKE;
+        // Process ready input FDs before frame callbacks, as on Android.
+        // Only with the mods: every other game keeps the early return.
+        if (!kl_extension_active()) return ALOOPER_POLL_WAKE;
     }
     for (int i = 1; i < n; i++) {
         if (!pfd[i].revents) continue;
@@ -197,7 +251,7 @@ static int kl_looper_poll(int timeoutMillis, int *outFd, int *outEvents, void **
         if (outData)   *outData   = data[i];
         return ident[i];
     }
-    return ALOOPER_POLL_WAKE;
+    return kl_frame_dispatch(l)?ALOOPER_POLL_CALLBACK:ALOOPER_POLL_WAKE;
 }
 
 static int64_t kl_now_ms(void) {
@@ -930,6 +984,8 @@ static void kl_ANativeActivity_setWindowFlags(void *act, unsigned add, unsigned 
 static const struct { const char *name; void *fn; } g_ndk[] = {
 #define N(sym, fn) {sym, (void *)(fn)}
     N("ALooper_forThread",  kl_ALooper_forThread),
+    N("AChoreographer_getInstance", kl_AChoreographer_getInstance),
+    N("AChoreographer_postFrameCallback", kl_AChoreographer_postFrameCallback),
     N("ALooper_prepare",    kl_ALooper_prepare),
     N("ALooper_acquire",    kl_ALooper_acquire),
     N("ALooper_release",    kl_ALooper_release),

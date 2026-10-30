@@ -1239,6 +1239,7 @@ struct BootView: View {
                     PlayerNameView()
                     if !klIsAlyx() { GameLanguageView() }
                     WalkaboutUnlockView()
+                    ModCreditsView()
                     if micUpFront { GroupBox { MicView() } }
                     // Everything a player does not need to understand to play: the
                     // dials of the port itself, and the report of this run.
@@ -1519,6 +1520,59 @@ struct BootView: View {
         // The test switches first: none of these overwrites a value that is set, so a switch under
         // Advanced › Test wins over the picture setting it retunes (the foveation profile, 2026-10-13).
         KleptonTestSwitches.applyEnvironment()
+        // The selected app configuration enables the original loader by default.
+        // An explicit KL_SCOTLAND2=0 still permits a baseline comparison.
+        if Bundle.main.object(forInfoDictionaryKey: "KLScotland2Test") as? String == "1" {
+            let modernScotland2 = Bundle.main.object(forInfoDictionaryKey: "KLScotland2Profile") as? String == "1.45.3"
+            setenv("KL_SCOTLAND2", "1", 0)
+            let sc2Diagnostics = Bundle.main.object(forInfoDictionaryKey: "KLScotland2Diagnostics") as? String ?? "1"
+            setenv("KL_SCOTLAND2_DIAGNOSTICS", sc2Diagnostics, 0)
+            if Bundle.main.object(forInfoDictionaryKey: "KLScotland2Hooks") as? String == "1" {
+                setenv("KL_SCOTLAND2_ABI", "1", 0)
+                setenv("KL_SCOTLAND2_AOT_PROBE", "1", 0)
+                setenv("KL_SCOTLAND2_FLAMINGO", "1", 0)
+                if modernScotland2 { setenv("KL_SCOTLAND2_FLAMINGO_LIBRARY", "libflamingo.so", 0) }
+                setenv("KL_SCOTLAND2_FLAMINGO_PROBE", "1", 0)
+                setenv("KL_SCOTLAND2_SCENE_HOOK", "1", 0)
+            }
+            if Bundle.main.object(forInfoDictionaryKey: "KLScotland2CustomTypes") as? String == "1" {
+                setenv("KL_SCOTLAND2_CUSTOMTYPES_PROBE", "1", 0)
+            }
+            if Bundle.main.object(forInfoDictionaryKey: "KLScotland2Lapiz") as? String == "1" {
+                setenv("KL_SCOTLAND2_LAPIZ_PROBE", "1", 0)
+            }
+            if Bundle.main.object(forInfoDictionaryKey: "KLScotland2BSML") as? String == "1" {
+                setenv("KL_SCOTLAND2_BSML_PROBE", "1", 0)
+                if !modernScotland2 { setenv("KL_SCOTLAND2_FILESYSTEM", "1", 0) }
+            }
+            if Bundle.main.object(forInfoDictionaryKey: "KLScotland2SongCore") as? String == "1" {
+                setenv("KL_SCOTLAND2_SONGCORE_PROBE", "1", 0)
+            }
+            if Bundle.main.object(forInfoDictionaryKey: "KLScotland2MetaCore") as? String == "1" {
+                setenv("KL_SCOTLAND2_NATIVE_GATES", "1", 0)
+                setenv("KL_SCOTLAND2_METACORE_PROBE", "1", 0)
+                if let ca = Bundle.main.path(forResource: "cacert", ofType: "pem", inDirectory: "Scotland2Metadata/certificates") {
+                    setenv("KL_SCOTLAND2_CA_BUNDLE", ca, 0)
+                }
+            }
+            if Bundle.main.object(forInfoDictionaryKey: "KLScotland2SongDownloader") as? String == "1" {
+                setenv("KL_SCOTLAND2_SONGDOWNLOADER_PROBE", "1", 0)
+                if !modernScotland2 { setenv("KL_SCOTLAND2_DOWNLOAD_BOUNDARIES", "1", 0) }
+            }
+            if Bundle.main.object(forInfoDictionaryKey: "KLScotland2CoreMods") as? String == "1" {
+                setenv("KL_SCOTLAND2_REMAINING_CORE", "1", 0)
+            }
+            // The mods' runtime additions (exact futex wake counts and the
+            // extension's exports) are tested with the mods only.
+            setenv("KL_FUTEX_EXACT", "1", 0)
+            #if KL_SCOTLAND2
+            // The song search's Apple Music history, written for the mod while the game starts. Only while the
+            // mods really run: with KL_SCOTLAND2=0 (the baseline comparison) nothing asks for Apple Music.
+            if klEnvOn("KL_SCOTLAND2", default: false) { KleptonAppleMusic.refreshInBackground() }
+            #endif
+            setenv("KL_SONGS", "0", 1)
+            setenv("KL_GUEST_JIT", "0", 1)
+        }
         // Before the picture settings: it turns the game's own foveation off.
         KLRealityPresentSetting.applyEnvironment()
         KleptonRendering.shared.applyEnvironment()
@@ -1583,9 +1637,8 @@ struct BootView: View {
             // because an unimplemented JNI call aborts the process by design.
             // If this run dies, the next launch still shows how far it got.
             let poll = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-                if let t = try? String(contentsOfFile: logPath, encoding: .utf8) {
-                    DispatchQueue.main.async { log = t }
-                }
+                let t = KleptonLogTail.read(logPath)
+                DispatchQueue.main.async { if log != t { log = t } }
             }
             RunLoop.current.add(poll, forMode: .common)
 
@@ -1658,7 +1711,7 @@ struct BootView: View {
             }
             poll.invalidate()
 
-            let text = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
+            let text = KleptonLogTail.read(logPath)
             DispatchQueue.main.async {
                 prepTimer?.invalidate(); prepTimer = nil; prepTotal = 0
                 log = text

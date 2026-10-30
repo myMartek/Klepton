@@ -6,6 +6,7 @@
 //                          kl_dl.c) and AAPCS64 variadic thunks (kl_va_thunks.S)
 //   3. local statics    — small bionic-isms defined right here
 #include <stdio.h>
+#include "kl_extension.h"
 #include <stdlib.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -2015,6 +2016,15 @@ static int kl_vsnprintf_chk(char *d, size_t n, int flags, size_t dl,
     return vsnprintf(d, n, fmt, (va_list)m);
 }
 static size_t kl_malloc_usable_size(const void *p) { return malloc_size(p); }
+// custom-types' GC crash diagnostics request Android allocator XML. Darwin's
+// allocator has no equivalent schema; fail explicitly without inventing a dump
+// or dereferencing the guest FILE. This does not disable the GC diagnostics.
+static int kl_malloc_info(int options, void *stream) {
+    (void)stream;
+    int error = options ? EINVAL : ENOTSUP;
+    errno = error; kl_errno_set(error);
+    return -1;
+}
 
 // jemalloc's extended allocation API. Android's system allocator IS jemalloc, so
 // guest libraries link these directly (Meta's MR Utility Kit — libmrutilitykit
@@ -2145,6 +2155,7 @@ X(klb_close) X(klb_lseek) X(klb_pread)
 X(klb_sysconf) X(klb_fopen) X(klb_access) X(klb_mkdir) X(klb_unlink) X(klb_rename) X(klb_link)
 X(klh_android_log_print)
 X(klb_getpwuid) X(klb_getpwuid_r) X(klb_execl) X(klb_system) X(klb_syscall) X(klb_swprintf)
+X(klb_process_vm_readv)
 X(klb_vprintf) X(klb_vsscanf) X(klb_memrchr) X(klb_memalign)
 X(klb_getrandom) X(klb_isnan)
 X(klb_isnanf) X(klb_isinf) X(klb_isinff) X(klb_isfinite) X(klb_isfinitef)
@@ -2431,6 +2442,9 @@ static int klb_putenv(char *s) {
 static const kl_entry g_shim[] = {
 #include "kl_libc_table.h"
 
+    // Released ZIP support also needs zlib's C error-string function.
+    E("zError", zError),
+
     // stdio needing guest-FILE translation
     E("__sF", g_sF),
     E("fputc", kl_fputc), E("fputs", kl_fputs), E("fwrite", kl_fwrite), E("fread", kl_fread),
@@ -2467,6 +2481,7 @@ static const kl_entry g_shim[] = {
     E("strtold", klv_strtold), E("wcstold", klv_wcstold), E("strtold_l", klv_strtold_l),
     E("swprintf", klv_swprintf), E("vswprintf", kl_vswprintf_g), E("execl", klb_execl), E("system", klb_system),
     E("syscall", klb_syscall),
+    E("process_vm_readv", klb_process_vm_readv),
 
     // guest va_list consumers
     E("vfprintf", kl_vfprintf), E("vsnprintf", kl_vsnprintf), E("vasprintf", kl_vasprintf),
@@ -2741,7 +2756,7 @@ static const kl_entry g_shim[] = {
 
     // Steam Link (SDL3) additions — plain forwards plus the small wrappers above
     E("getentropy", getentropy), E("tzset", tzset), E("strncasecmp", strncasecmp),
-    E("malloc_usable_size", kl_malloc_usable_size), E("execv", kl_execv),
+    E("malloc_usable_size", kl_malloc_usable_size), E("malloc_info", kl_malloc_info), E("execv", kl_execv),
     E("mallocx", kl_mallocx),
     E("rallocx", kl_rallocx), E("sallocx", kl_sallocx), E("dallocx", kl_dallocx),
     E("sdallocx", kl_sdallocx), E("nallocx", kl_nallocx), E("xallocx", kl_xallocx),
@@ -2820,6 +2835,15 @@ void kl_shim_set_guest_gl(kl_image *img) { g_guest_gl = img; }
 
 void *kl_shim_lookup(const char *name) {
     if (kl_shim_override) { void *o = kl_shim_override(name); if (o) return o; }
+    // Added for the Beat Saber mod port. Without the mods these stay
+    // unresolved, as before, until they are tested across the library.
+    if (!kl_extension_active() &&
+        (!strcmp(name, "process_vm_readv") || !strcmp(name, "malloc_info") ||
+         !strcmp(name, "zError") || !strncmp(name, "AChoreographer_", 15)))
+        return NULL;
+    // The optional extension owns its small, explicit guest export surface.
+    void *extension = kl_extension_symbol(name);
+    if (extension) return extension;
     for (size_t i = 0; i < sizeof g_shim / sizeof g_shim[0]; i++)
         if (strcmp(g_shim[i].name, name) == 0) return g_shim[i].fn;
     // Tier 4: the NDK surface lives in its own table — it is a different
