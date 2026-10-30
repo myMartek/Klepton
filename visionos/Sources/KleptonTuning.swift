@@ -1410,7 +1410,7 @@ struct PlayerNameView: View {
     }
 }
 
-// Walkabout Mini Golf only: every lost ball and Foxhunt putter of the courses
+// Walkabout Mini Golf only: every lost ball and earned putter of the courses
 // the player has, written into the game's save (KleptonWalkaboutSave.swift).
 // Greyed out until the game has made a save of its own, i.e. after its first
 // start; asks once more before it writes, because the game cannot take it back.
@@ -1447,8 +1447,8 @@ struct WalkaboutUnlockView: View {
                     Button(klT("Unlock all putters and balls", "Alle Putter und Bälle freischalten")) { asking = true }
                         .disabled(!hasSave || working)
                     Text(hasSave
-                         ? klT("Puts every lost ball and every Foxhunt putter of the courses you own into your save, as if you had found them. Courses sold separately count only if you bought them; Putter Pass putters stay as they are.",
-                               "Trägt alle verlorenen Bälle und alle Foxhunt-Putter der Kurse, die du besitzt, in deinen Spielstand ein, als hättest du sie gefunden. Einzeln verkaufte Kurse zählen nur, wenn du sie gekauft hast; Putter-Pass-Putter bleiben, wie sie sind.")
+                         ? klT("Puts every lost ball and every Foxhunt and activity putter of the courses you own into your save, as if you had found them. Courses sold separately count only if you bought them; Putter Pass putters stay as they are.",
+                               "Trägt alle verlorenen Bälle und alle Foxhunt- und Activity-Putter der Kurse, die du besitzt, in deinen Spielstand ein, als hättest du sie gefunden. Einzeln verkaufte Kurse zählen nur, wenn du sie gekauft hast; Putter-Pass-Putter bleiben, wie sie sind.")
                          : klT("Possible only after the game has been started once: it needs the game's own save.",
                                "Geht erst, nachdem das Spiel einmal gestartet wurde: Dafür braucht es den Spielstand des Spiels."))
                         .font(.caption).foregroundStyle(.secondary)
@@ -1461,8 +1461,8 @@ struct WalkaboutUnlockView: View {
                 Button(klT("Unlock", "Freischalten"), role: .destructive) { unlock() }
                 Button(klT("Cancel", "Abbrechen"), role: .cancel) {}
             } message: {
-                Text(klT("Every lost ball and every Foxhunt putter of your courses is written into your save. This cannot be undone.",
-                         "Alle verlorenen Bälle und alle Foxhunt-Putter deiner Kurse werden in deinen Spielstand geschrieben. Das kann nicht rückgängig gemacht werden."))
+                Text(klT("Every lost ball and every Foxhunt and activity putter of your courses is written into your save. This cannot be undone.",
+                         "Alle verlorenen Bälle und alle Foxhunt- und Activity-Putter deiner Kurse werden in deinen Spielstand geschrieben. Das kann nicht rückgängig gemacht werden."))
             }
         }
     }
