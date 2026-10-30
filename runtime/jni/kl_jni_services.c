@@ -1873,6 +1873,13 @@ static klj_val klj_Environment_getExternalStorageDirectory(void *env, void *self
     return (klj_val){.l = klj_new_file("/sdcard")};   // short form; see getExternalFilesDir
 }
 
+// The guest's writable data volume is the app container on this host.
+// Return its real directory so StatFs measures available storage accurately.
+static klj_val klj_Environment_getDataDirectory(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = klj_new_file(kl_jni_files_dir())};
+}
+
 // ---- android.os.StatFs ----
 //
 // "How much room is left?", asked the way every Android app asks it. Guests
@@ -3037,6 +3044,7 @@ const klj_binding klj_bind_services[] = {
     // Unreal Engine 4's GameActivity — see klj_UE4_GetFontDirectory.
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_GetFontDirectory",
      "()Ljava/lang/String;", klj_UE4_GetFontDirectory},
+    {"android/os/Environment", "getDataDirectory", "()Ljava/io/File;", klj_Environment_getDataDirectory},
     {"android/os/Environment", "getExternalStorageState", "()Ljava/lang/String;", klj_Environment_getExternalStorageState},
     {"android/os/Environment", "getExternalStorageDirectory", "()Ljava/io/File;", klj_Environment_getExternalStorageDirectory},
     {"android/os/Environment", "isExternalStorageManager", "()Z", klj_Environment_isExternalStorageManager},

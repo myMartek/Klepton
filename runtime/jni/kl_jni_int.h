@@ -345,6 +345,9 @@ void         klj_stream_free(void *p);
 // ReflectionHelper proxy goes through ReflectionHelper.nativeProxyInvoke(ptr,
 // name, args); any other proxy falls back to klj_proxy_invoke. Only the callers
 // that know their proxy can be Unity 6's use it (Photon's AudioInAEC callback).
+// Deliver boxed arguments to either Unity ReflectionHelper or JNIBridge proxies.
+void        *klj_proxy_invoke_named_args(void *proxy, const char *iface,
+                                       const char *name, const char *sig, void *args);
 void        *klj_proxy_invoke_named(void *proxy, const char *iface,
                                     const char *name, const char *sig);
 void        *klj_proxy_invoke(void *proxy, const char *iface,

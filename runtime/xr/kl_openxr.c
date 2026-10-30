@@ -108,6 +108,12 @@ enum {
     XR_TYPE_HAPTIC_ACTION_INFO          = 59,
     XR_TYPE_REFERENCE_SPACE_CREATE_INFO = 37,
     XR_TYPE_SPACE_LOCATION              = 42,
+    XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT = 1000051000,
+    XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT = 1000051001,
+    XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT = 1000051002,
+    XR_TYPE_HAND_JOINT_LOCATIONS_EXT = 1000051003,
+    XR_TYPE_HAND_JOINT_VELOCITIES_EXT = 1000051004,
+    XR_TYPE_HAND_TRACKING_AIM_STATE_FB = 1000111001,
     XR_TYPE_ACTION_STATE_BOOLEAN        = 23,
     XR_TYPE_ACTION_STATE_FLOAT          = 24,
     XR_TYPE_ACTION_STATE_VECTOR2F       = 25,
@@ -390,6 +396,9 @@ typedef struct { int32_t type; const void *next;
 typedef struct { int32_t type; const void *next;
                  XrPosef pose; XrFovf fov;
                  XrSwapchainSubImage subImage; } XrCompositionLayerProjectionView;
+typedef struct { int32_t type; const void *next; XrSwapchainSubImage subImage;
+                 float minDepth, maxDepth, nearZ, farZ;
+} XrCompositionLayerDepthInfoKHR;
 typedef struct { int32_t type; const void *next;
                  uint64_t layerFlags; void *space;
                  uint32_t viewCount;
@@ -569,6 +578,7 @@ enum { KLXR_VIEW_CONFIG_PRIMARY_STEREO = 2 };
     X(xrPollEvent)                                                             \
     /* spaces */                                                               \
     X(xrCreateReferenceSpace) X(xrDestroySpace)                                \
+    X(xrCreateHandTrackerEXT) X(xrDestroyHandTrackerEXT) X(xrLocateHandJointsEXT) \
     X(xrGetReferenceSpaceBoundsRect) X(xrLocateSpace)                          \
     X(xrEnumerateReferenceSpaces)                                              \
     /* swapchains */                                                           \
@@ -874,12 +884,21 @@ enum { KLXR_GATE_ALWAYS = 0,      // unconditional
        KLXR_GATE_VULKAN = 2,      // ...only when MoltenVK is actually reachable
        KLXR_GATE_USER_PRESENCE = 3,    // ...missioniss only (see below)
        KLXR_GATE_PERF_METRICS = 4,     // ...not for Moss from Steam (see below)
-       KLXR_GATE_FRAME_CONTROLLER = 5,     // ...Moss from Steam only (see below)
-       KLXR_GATE_HITMAN3 = 6 };            // ...HITMAN 3 VR: Reloaded only (see below)
+       KLXR_GATE_FRAME_CONTROLLER = 5,
+       KLXR_GATE_HITMAN3 = 6,
+       KLXR_GATE_BRINK_HANDS = 7, KLXR_GATE_BRINK_DEPTH = 8 };
 
 static const struct { const char *name; uint32_t version; int gate; } g_extensions[] = {
     { "XR_KHR_opengl_es_enable",       10, KLXR_GATE_ALWAYS },
     { "XR_KHR_android_create_instance", 3, KLXR_GATE_ALWAYS },
+    { "XR_KHR_composition_layer_depth", 6, KLXR_GATE_BRINK_DEPTH },
+    { "XR_EXT_hand_tracking", 4, KLXR_GATE_BRINK_HANDS },
+    // The Unity Meta Hand Tracking Aim feature requests this alongside the
+    // core skeleton. No new entry points: it extends xrLocateHandJointsEXT's
+    // XrHandJointLocationsEXT.next output chain.
+    { "XR_FB_hand_tracking_aim", 2, KLXR_GATE_BRINK_HANDS },
+    // Native hand grip/pinch/poke bindings; BRINK-only and sourced from ARKit.
+    { "XR_EXT_hand_interaction", 1, KLXR_GATE_BRINK_HANDS },
     // XR_KHR_convert_timespec_time is the cheapest honest claim in this table:
     // our XrTime IS CLOCK_MONOTONIC nanoseconds (klxr_now), so the conversion is
     // arithmetic and cannot be wrong. Without it the guest logs "not available
@@ -1078,6 +1097,15 @@ static uint32_t g_ext_nlive;
 
 static int klxr_ext_gate_open(int gate) {
     switch (gate) {
+    case KLXR_GATE_BRINK_DEPTH: {
+        const char *e = getenv("KL_XR_DEPTH");
+        return klxr_ext_gate_open(KLXR_GATE_BRINK_HANDS) && !(e && !strcmp(e,"0"));
+    }
+    case KLXR_GATE_BRINK_HANDS: {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        return t && !strcmp(t, "x3635172946605196");
+    }
     case KLXR_GATE_REFRESH: {
         const char *e = getenv("KL_XR_REFRESH_EXT");
         return !(e && !strcmp(e, "0"));
@@ -1604,6 +1632,13 @@ static XrResult klxr_GetSystemProperties(void *instance, XrSystemId system_id,
     // them untouched is how we report the feature absent: the guest zeroes the
     // struct before the call, so an unwritten supported flag reads as false.
     klxr_log_chain("xrGetSystemProperties", props->next);
+    struct klxr_out_chain { int32_t type; void *next; };
+    struct klxr_hand_props { int32_t type; void *next; uint32_t supportsHandTracking; };
+    for (struct klxr_out_chain *c = props->next, *next; c; c = next) {
+        next = c->next;
+        if (c->type == XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT)
+            ((struct klxr_hand_props *)c)->supportsHandTracking = 1;
+    }
 
     int ew = 0, eh = 0;
     kl_ovrp_eye_texture_size(&ew, &eh);
@@ -2680,6 +2715,108 @@ static XrResult klxr_PollEvent_inner(void *instance, XrEventDataBuffer *data) {
     return KLXR_SUCCESS;
 }
 
+// ----------------------------- ARKit hand skeleton delivery (26 OpenXR joints)
+#define KLXR_HAND_JOINT_COUNT 26
+static pthread_mutex_t g_hand_joint_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct {
+    float poses[KLXR_HAND_JOINT_COUNT][8]; // xyz, xyzw, radius in tracking space
+    uint32_t valid[KLXR_HAND_JOINT_COUNT];
+    int active;
+    int64_t last_ns;
+} klxr_hand_sample;
+static klxr_hand_sample g_hand_samples[2];
+
+void kl_openxr_set_hand_joints(int hand, const float *pose8,
+                              const uint32_t *valid, int count) {
+    if (hand < 0 || hand > 1) return;
+    pthread_mutex_lock(&g_hand_joint_lock);
+    klxr_hand_sample *s = &g_hand_samples[hand];
+    s->active = (pose8 && valid && count == KLXR_HAND_JOINT_COUNT && valid[1] != 0);
+    if (s->active) {
+        memcpy(s->poses, pose8, sizeof s->poses);
+        memcpy(s->valid, valid, sizeof s->valid);
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        s->last_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    } else {
+        memset(s->valid, 0, sizeof s->valid);
+        s->last_ns = 0;
+    }
+    pthread_mutex_unlock(&g_hand_joint_lock);
+}
+
+enum {
+    KLXR_SRC_NONE = 0,
+    KLXR_SRC_BUTTON,          // a bit of the RAW buttons word
+    KLXR_SRC_TOUCH,           // ...of the RAW touches word
+    KLXR_SRC_BUTTON_OTHER,    // a bit of EITHER hand's buttons word (see klxr_eval_other)
+    KLXR_SRC_INDEX_TRIGGER,
+    KLXR_SRC_HAND_TRIGGER,
+    KLXR_SRC_STICK_X,
+    KLXR_SRC_STICK_Y,
+    KLXR_SRC_STICK_VEC,       // the whole stick, read as a Vector2f
+    KLXR_SRC_POSE,            // .../input/grip/pose — the hilt
+    KLXR_SRC_POSE_AIM,        // .../input/aim/pose  — the ray
+    KLXR_SRC_HAPTIC,
+    KLXR_SRC_HAND_GRIP,
+    KLXR_SRC_HAND_AIM,
+    KLXR_SRC_HAND_PINCH_POSE,
+    KLXR_SRC_HAND_POKE,
+    KLXR_SRC_HAND_PINCH,
+    KLXR_SRC_HAND_READY,
+    KLXR_SRC_HAND_GRASP,
+};
+
+// Native hand-interaction actions read the same atomic sample as XR_EXT_hand_tracking.
+// Hand grip/aim/pinch/poke are ANATOMICAL, independent of virtual Touch controllers.
+static int klxr_native_hand_sample(int hand, klxr_hand_sample *out) {
+    if (hand < 0 || hand > 1 || !out) return 0;
+    pthread_mutex_lock(&g_hand_joint_lock);
+    *out = g_hand_samples[hand];
+    pthread_mutex_unlock(&g_hand_joint_lock);
+    if (!out->active) return 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    return now >= out->last_ns && now - out->last_ns < 500000000LL &&
+           (out->valid[1] & 1) && (out->valid[1] & 2);
+}
+static float klxr_native_pinch(const klxr_hand_sample *s, int tip) {
+    if (!(s->valid[5] & 1) || !(s->valid[tip] & 1)) return 0;
+    float dx=s->poses[5][0]-s->poses[tip][0];
+    float dy=s->poses[5][1]-s->poses[tip][1];
+    float dz=s->poses[5][2]-s->poses[tip][2];
+    float d=sqrtf(dx*dx + dy*dy + dz*dz);
+    return isfinite(d) ? fmaxf(0, fminf(1, (0.05f-d)/0.02f)) : 0;
+}
+static int klxr_native_hand_pose(int hand, int kind, XrPosef *pose) {
+    klxr_hand_sample s;
+    if (!pose || !klxr_native_hand_sample(hand, &s)) return 0;
+    int j = 0;
+    switch (kind) {
+        case KLXR_SRC_HAND_GRIP: j = (s.valid[0] & 3) == 3 ? 0 : 1; break;
+        case KLXR_SRC_HAND_AIM:  j = 7; break;     // index knuckle basis
+        case KLXR_SRC_HAND_PINCH_POSE: j = 10; break;
+        case KLXR_SRC_HAND_POKE: j = 10; break;    // physical fingertip
+        default: return 0;
+    }
+    if ((s.valid[j] & 3) != 3) return 0;
+    const float *v=s.poses[j];
+    pose->position=(XrVector3f){v[0],v[1],v[2]};
+    pose->orientation=(XrQuaternionf){v[3],v[4],v[5],v[6]};
+    float n = v[3]*v[3]+v[4]*v[4]+v[5]*v[5]+v[6]*v[6];
+    if (!isfinite(n) || n < 0.01f) return 0;
+    if (kind == KLXR_SRC_HAND_PINCH_POSE && (s.valid[5] & 1)) {
+        pose->position.x = (v[0] + s.poses[5][0]) * 0.5f;
+        pose->position.y = (v[1] + s.poses[5][1]) * 0.5f;
+        pose->position.z = (v[2] + s.poses[5][2]) * 0.5f;
+    }
+    return 1;
+}
+static int klxr_native_kind(int kind) {
+    return kind >= KLXR_SRC_HAND_GRIP && kind <= KLXR_SRC_HAND_GRASP;
+}
+
 // ------------------------------------------------------------------- spaces
 //
 // A space is a coordinate frame with a handle. There are two kinds and we serve
@@ -2726,7 +2863,7 @@ static int klxr_local_floor_on(void) {
     if (on < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        on = kl_env_on("KL_XR_LOCAL_FLOOR", t && (!strcmp(t, "x9449316705178989") ||
+        on = kl_env_on("KL_XR_LOCAL_FLOOR", t && (!strcmp(t, "x3635172946605196") || !strcmp(t, "x9449316705178989") ||
                                                   !strcmp(t, "x6946182742093178") ||
                                                   !strcmp(t, "x24151641901194680")));
     }
@@ -2739,7 +2876,7 @@ static int klxr_local_floor_on(void) {
 typedef struct {
     uint32_t magic;
     klxr_session *session;
-    int     reference_type;       // one of the three above, 0 for an action space
+    int     reference_type;       // any supported reference type, 0 for an action space
     XrPosef offset;               // poseInReferenceSpace / poseInActionSpace
     void   *action;               // action spaces only: what this is anchored to
     XrPath  subaction_path;       // ...and which hand of it
@@ -3492,6 +3629,7 @@ static float klxr_local_height(void) {
 // publishes pose only has them derived (kl_ovrp), and the first sample after a
 // gap has no basis at all. That case must reach the guest as velocityFlags == 0
 // and not as a velocity of zero, which asserts the controller is stationary.
+static int klxr_action_space_kind(const klxr_space *sp, int hand);
 static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
                                   float *lin, float *ang, int *motion_known,
                                   const klxr_head_delta *pred) {
@@ -3544,6 +3682,14 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         int is_aim = 0;
         int hand = klxr_action_space_hand(sp, &is_aim);
         float pos[3], quat[4], v[3], a[3];
+        int hand_kind = klxr_action_space_kind(sp, hand);
+        if (klxr_native_kind(hand_kind)) {
+            int ok = klxr_native_hand_pose(hand, hand_kind, &base);
+            if (tracked) *tracked = ok;
+            if (!ok) return (XrPosef){ {0,0,0,1}, {0,0,0} };
+            // No velocity measurement: don't borrow a virtual controller's velocity.
+            goto klxr_space_offset;
+        }
         int present = hand >= 0 && kl_ovrp_hand_motion(hand, pos, quat, v, a);
         if (tracked) *tracked = present;
         if (!present) return base;
@@ -3556,6 +3702,7 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         if (motion_known) *motion_known = kl_ovrp_hand_motion_known(hand);
     }
 
+klxr_space_offset:
     // ...and the pose the guest asked its space to sit at within that reference
     // space. Every space this guest creates is at the identity, so composing it
     // costs nothing here — but a field we store and never read is a trap for
@@ -3579,7 +3726,7 @@ static XrPosef klxr_space_pose(const klxr_space *sp, const klxr_head_delta *pred
     return klxr_space_pose_ex(sp, NULL, NULL, NULL, NULL, pred);
 }
 
-// The three reference spaces klxr_space_pose can place, and no others —
+// The supported reference spaces klxr_space_pose can place, and no others —
 // xrCreateReferenceSpace refuses everything outside this set, so this list and
 // that check are the same fact.
 static XrResult klxr_EnumerateReferenceSpaces(void *session, uint32_t capacity,
@@ -3606,9 +3753,9 @@ static XrResult klxr_CreateReferenceSpace(void *session,
         KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     klxr_log_chain("xrCreateReferenceSpace", info->next);
 
-    // VIEW, LOCAL and STAGE are the three every runtime must offer. The vendor
-    // ones (UNBOUNDED_MSFT and friends) are extensions we do not advertise, and
-    // refusing by name here is what makes a guest that wanted one say so.
+    // BRINK/Unity calls LOCAL_FLOOR every frame (OpenXR 1.1, value 1000426000).
+    // This frontend can serve it in its existing floor-aligned tracking frame.
+    // Keep rejecting unknown vendor spaces rather than silently lying.
     if (info->referenceSpaceType != KLXR_REF_SPACE_VIEW &&
         info->referenceSpaceType != KLXR_REF_SPACE_LOCAL &&
         info->referenceSpaceType != KLXR_REF_SPACE_STAGE &&
@@ -4046,6 +4193,7 @@ enum { KLXR_ACTION_TYPE_BOOLEAN = 1, KLXR_ACTION_TYPE_FLOAT = 2,
 // only adds the profile to the driveable set and lets it be reported back as the
 // current interaction profile, which the guest needs to accept its own bindings.
 #define KLXR_PICO_PROFILE   "/interaction_profiles/pico/neo3_controller"
+#define KLXR_HAND_PROFILE   "/interaction_profiles/ext/hand_interaction_ext"
 
 // The profile the CURRENT run answers as bound, decided from the guest's own
 // suggestions (see the note above). Empty until one is suggested; the getter
@@ -4056,25 +4204,11 @@ static char g_active_profile[96];
 static int klxr_profile_driveable(const char *profile) {
     return strcmp(profile, KLXR_ACTIVE_PROFILE) == 0 ||
            strcmp(profile, KLXR_VALVE_PROFILE) == 0 ||
-           strcmp(profile, KLXR_PICO_PROFILE) == 0;
+           strcmp(profile, KLXR_PICO_PROFILE) == 0 ||
+           (strcmp(profile, KLXR_HAND_PROFILE) == 0 && klxr_ext_gate_open(KLXR_GATE_BRINK_HANDS));
 }
 
 // What one binding path reads, once decoded.
-enum {
-    KLXR_SRC_NONE = 0,
-    KLXR_SRC_BUTTON,          // a bit of the RAW buttons word
-    KLXR_SRC_TOUCH,           // ...of the RAW touches word
-    KLXR_SRC_BUTTON_OTHER,    // a bit of EITHER hand's buttons word (see klxr_eval_other)
-    KLXR_SRC_INDEX_TRIGGER,
-    KLXR_SRC_HAND_TRIGGER,
-    KLXR_SRC_STICK_X,
-    KLXR_SRC_STICK_Y,
-    KLXR_SRC_STICK_VEC,       // the whole stick, read as a Vector2f
-    KLXR_SRC_POSE,            // .../input/grip/pose — the hilt
-    KLXR_SRC_POSE_AIM,        // .../input/aim/pose  — the ray
-    KLXR_SRC_HAPTIC,
-};
-
 // The decode table, and the whole of the judgement in this file's input path.
 //
 // `bit[hand]` is the ovrpButton/ovrpTouch RAW bit for the named control on that
@@ -4213,6 +4347,13 @@ static const char *klxr_src_name(int kind) {
         case KLXR_SRC_POSE:          return "grip pose";
         case KLXR_SRC_POSE_AIM:      return "aim pose";
         case KLXR_SRC_HAPTIC:        return "haptic";
+        case KLXR_SRC_HAND_GRIP:     return "ARKit palm grip";
+        case KLXR_SRC_HAND_AIM:      return "ARKit index aim";
+        case KLXR_SRC_HAND_PINCH_POSE:return "ARKit pinch pose";
+        case KLXR_SRC_HAND_POKE:     return "ARKit index poke";
+        case KLXR_SRC_HAND_PINCH:    return "ARKit pinch value";
+        case KLXR_SRC_HAND_READY:    return "ARKit hand ready";
+        case KLXR_SRC_HAND_GRASP:    return "ARKit grasp value";
         default:                     return "unbound";
     }
 }
@@ -4428,8 +4569,15 @@ static int klxr_action_space_hand(const klxr_space *sp, int *is_aim) {
             if (a->kind[h] != KLXR_SRC_NONE) { if (hand >= 0) return -1; hand = h; }
     }
     if (hand < 0) return -1;
-    if (is_aim) *is_aim = a->kind[hand] == KLXR_SRC_POSE_AIM;
+    if (is_aim) *is_aim = a->kind[hand] == KLXR_SRC_POSE_AIM ||
+                            a->kind[hand] == KLXR_SRC_HAND_AIM;
     return hand;
+}
+
+static int klxr_action_space_kind(const klxr_space *sp, int hand) {
+    if (!sp || hand < 0 || hand > 1) return KLXR_SRC_NONE;
+    klxr_action *a = klxr_action_of(sp->action);
+    return a ? a->kind[hand] : KLXR_SRC_NONE;
 }
 
 // The binding suggestions, and this is the interesting one: it is the guest
@@ -4474,15 +4622,29 @@ static XrResult klxr_SuggestInteractionProfileBindings(
         // explicit, and an app that rebinds mid-session (a settings screen)
         // would otherwise accumulate both maps and read whichever won the
         // last write. Cheap to get right here and impossible to notice later.
-        for (int i = 0; i < KLXR_ACTION_MAX; i++)
-            if (g_actions[i].magic)
-                for (int h = 0; h < 2; h++) {
-                    g_actions[i].kind[h] = KLXR_SRC_NONE;
-                    g_actions[i].bit[h] = 0;
-                    g_actions[i].bind[h] = 0;
-                }
+        if (klxr_ext_gate_open(KLXR_GATE_BRINK_HANDS)) {
+            // BRINK submits separate controller and anatomical-hand maps.
+            // Preserve its complementary actions as in the confirmed port.
+            for (uint32_t i = 0; i < bindings->countSuggestedBindings; i++) {
+                klxr_action *a = klxr_action_of(bindings->suggestedBindings[i].action);
+                if (!a) continue;
+                int h = klxr_path_hand(klxr_path_str(bindings->suggestedBindings[i].binding), NULL);
+                if (h >= 0) { a->kind[h] = KLXR_SRC_NONE; a->bit[h] = 0; a->bind[h] = 0; }
+            }
+        } else {
+            // Keep 824's replacement semantics for every other guest.
+            for (int i = 0; i < KLXR_ACTION_MAX; i++)
+                if (g_actions[i].magic)
+                    for (int h = 0; h < 2; h++) {
+                        g_actions[i].kind[h] = KLXR_SRC_NONE;
+                        g_actions[i].bit[h] = 0;
+                        g_actions[i].bind[h] = 0;
+                    }
+        }
     }
 
+    if (!strcmp(profile, KLXR_HAND_PROFILE))
+        fprintf(stderr, "  [xr] BRINK native hand profile: anatomy-based grip, pinch, poke enabled\n");
     unsigned took = 0, unknown = 0;
     for (uint32_t i = 0; i < bindings->countSuggestedBindings; i++) {
         const XrActionSuggestedBinding *b = &bindings->suggestedBindings[i];
@@ -4500,6 +4662,23 @@ static XrResult klxr_SuggestInteractionProfileBindings(
                     bit  = g_xr_sources[s].bit[hand];
                     break;
                 }
+            // XR_EXT_hand_interaction has its own, ANATOMICAL action sources.
+            // It must not inherit Oculus Touch grip/aim offsets or threshold bits.
+            if (!strcmp(profile, KLXR_HAND_PROFILE)) {
+                kind = KLXR_SRC_NONE; bit = 0;
+                if (!strcmp(suffix, "/input/grip/pose")) kind = KLXR_SRC_HAND_GRIP;
+                else if (!strcmp(suffix, "/input/aim/pose")) kind = KLXR_SRC_HAND_AIM;
+                else if (!strcmp(suffix, "/input/pinch_ext/pose")) kind = KLXR_SRC_HAND_PINCH_POSE;
+                else if (!strcmp(suffix, "/input/poke_ext/pose")) kind = KLXR_SRC_HAND_POKE;
+                else if (!strcmp(suffix, "/input/pinch_ext/value") ||
+                         !strcmp(suffix, "/input/aim_activate_ext/value"))
+                    kind = KLXR_SRC_HAND_PINCH;
+                else if (!strcmp(suffix, "/input/grasp_ext/value")) kind = KLXR_SRC_HAND_GRASP;
+                else if (!strcmp(suffix, "/input/pinch_ext/ready_ext") ||
+                         !strcmp(suffix, "/input/aim_activate_ext/ready_ext") ||
+                         !strcmp(suffix, "/input/grasp_ext/ready_ext"))
+                    kind = KLXR_SRC_HAND_READY;
+            }
             // Unreal binds a "grip click" key to the BARE /input/squeeze – the
             // Touch profile has no squeeze/click, the runtime is to make the
             // press out of the value. Moss from Steam suggests it for both
@@ -4735,7 +4914,13 @@ typedef struct {
 static const klxr_hand_input *klxr_eval_other;
 static float klxr_eval(const klxr_action *a, int bind, int hand, const klxr_hand_input *in) {
     uint32_t bit = bind == hand ? a->bit[bind] : klxr_mirror_bits(a->bit[bind]);
-    switch (a->kind[bind]) {
+    int kind = a->kind[bind];
+    if (kind == KLXR_SRC_HAND_PINCH || kind == KLXR_SRC_HAND_GRASP) {
+        klxr_hand_sample s;
+        if (!klxr_native_hand_sample(hand, &s)) return 0;
+        return klxr_native_pinch(&s, kind == KLXR_SRC_HAND_GRASP ? 15 : 10);
+    }
+    switch (kind) {
         case KLXR_SRC_BUTTON:        return (in->buttons & bit) ? 1.0f : 0.0f;
         case KLXR_SRC_BUTTON_OTHER: {
             // A and B are in the right hand's word and X and Y in the left's (kl_ovrp.h), so one mask over
@@ -4754,6 +4939,11 @@ static float klxr_eval(const klxr_action *a, int bind, int hand, const klxr_hand
         // isActive from the same field as everything else. STICK_VEC behaves
         // like POSE here too — its real value is a vector and is handled in
         // klxr_SyncActions — and 1 on the way in is only the activity marker.
+        case KLXR_SRC_HAND_GRIP:
+        case KLXR_SRC_HAND_AIM:
+        case KLXR_SRC_HAND_PINCH_POSE:
+        case KLXR_SRC_HAND_POKE:
+        case KLXR_SRC_HAND_READY:
         case KLXR_SRC_STICK_VEC:
         case KLXR_SRC_POSE:
         case KLXR_SRC_POSE_AIM:
@@ -4799,6 +4989,10 @@ static XrResult klxr_SyncActions(void *session, const XrActionsSyncInfo *info) {
             int b = klxr_bind_hand(a, h);
             int kind = a->kind[b];
             int active = kind != KLXR_SRC_NONE && in[h].present;
+            if (klxr_native_kind(kind)) {
+                klxr_hand_sample hs;
+                active = klxr_native_hand_sample(h, &hs);
+            }
             float v = 0.0f, w = 0.0f;
             if (active) {
                 if (kind == KLXR_SRC_STICK_VEC) {
@@ -7259,6 +7453,7 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     // kl_ovrp_frame_end_external: taking these from the submission rather than
     // from our latch is what stops the compositor correcting a delta the guest
     // has already corrected.
+    kl_ovrp_render_pose depth_meta = {0};
     int   have_layer_pose = 0;
     // Zeroed, not merely assigned below: eye 1's four tangents are written only
     // when the captured layer's SECOND view is walked, and the record is
@@ -7805,6 +8000,46 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
                 // the eye texture the base was mirrored into. Flattening only —
                 // the per-layer composite maps no layer into another's space,
                 // which is the whole point of it.
+                static unsigned depth_probe;
+                if(depth_probe++<4) {
+                    const XrCompositionLayerDepthInfoKHR *p=proj->views[v].next;
+                    fprintf(stderr,"  [brink-depth] chain eye%u layers=%d next=%p type=%d\n",v,layers_on,(void*)p,p?p->type:0);
+                }
+                if (!layers_on && klxr_ext_gate_open(KLXR_GATE_BRINK_DEPTH)) {
+                    const XrCompositionLayerDepthInfoKHR *di = proj->views[v].next;
+                    for (int nc=0; di && nc<32; ++nc, di=di->next) {
+                        if (di->type != 1000010000) continue;
+                        klxr_swapchain *ds = klxr_swapchain_of(di->subImage.swapchain);
+                        XrRect2Di dr=di->subImage.imageRect, cr=proj->views[v].subImage.imageRect;
+                        static unsigned depth_probe2;
+                        if(depth_probe2++<4) fprintf(stderr,"  [brink-depth] depth=%p stage=%d array=%u near=%g far=%g range=%g..%g rect=%dx%d+%d+%d color=%dx%d+%d+%d\n",(void*)ds,ds?ds->last_released:-99,di->subImage.imageArrayIndex,di->nearZ,di->farZ,di->minDepth,di->maxDepth,dr.extent.width,dr.extent.height,dr.offset.x,dr.offset.y,cr.extent.width,cr.extent.height,cr.offset.x,cr.offset.y);
+                        if (ds && ds->session && ds->session->gfx==KLXR_GFX_VULKAN &&
+                            klxr_format_is_depth(ds->session, ds->format) && ds->last_released>=0 &&
+                            ds->last_released<ds->count && ds->width==sc->width && ds->height==sc->height &&
+                            !dr.offset.x && !dr.offset.y && !cr.offset.x && !cr.offset.y &&
+                            dr.extent.width==(int)ds->width && dr.extent.height==(int)ds->height &&
+                            cr.extent.width==dr.extent.width && cr.extent.height==dr.extent.height &&
+                            di->subImage.imageArrayIndex<ds->array_size &&
+                            di->minDepth>=0 && di->maxDepth<=1 && di->maxDepth>di->minDepth &&
+                            di->nearZ>0 && di->farZ>0 && di->nearZ!=di->farZ) {
+                            void *mt=kl_vulkan_xr_image_mtl(ds->vk_img[ds->last_released]);
+                            if (mt) {
+                                int id=klxr_layer_id(ds);
+                                kl_glfb_note_layer_mtl_texture(id,ds->last_released,mt,ds->width,ds->height);
+                                depth_meta.depth[v].layer_plus_one=id+1;
+                                depth_meta.depth[v].stage=ds->last_released;
+                                depth_meta.depth[v].slice=di->subImage.imageArrayIndex;
+                                depth_meta.depth[v].near_z=di->nearZ;
+                                depth_meta.depth[v].far_z=di->farZ;
+                                depth_meta.depth[v].min_depth=di->minDepth;
+                                depth_meta.depth[v].max_depth=di->maxDepth;
+                                static unsigned dn;
+                                if(dn++<2) fprintf(stderr,"  [brink-depth] submitted eye %u depth sc%d stage%d near=%g far=%g range=%g..%g\n",v,id,ds->last_released,di->nearZ,di->farZ,di->minDepth,di->maxDepth);
+                            }
+                        }
+                        break;
+                    }
+                }
                 if (!layers_on) {
                     base_tan[v][0] = tanf(f->angleLeft);
                     base_tan[v][1] = tanf(f->angleRight);
@@ -8083,15 +8318,13 @@ static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
     }
     klxr_pose_trace_report(s);
     if (drawn_stage >= 0) {
-        if (defer)
-            pub.have_rec = kl_ovrp_frame_end_prepare(drawn_stage,
-                                                     have_layer_pose ? layer_pose : NULL,
-                                                     have_layer_pose ? layer_tan : NULL,
-                                                     &pub.rec);
-        else
-            kl_ovrp_frame_end_external(drawn_stage,
-                                       have_layer_pose ? layer_pose : NULL,
-                                       have_layer_pose ? layer_tan : NULL);
+        kl_ovrp_render_pose rec;
+        int have_rec=kl_ovrp_frame_end_prepare(drawn_stage,
+                            have_layer_pose ? layer_pose : NULL,
+                            have_layer_pose ? layer_tan : NULL, &rec);
+        if(have_rec) memcpy(rec.depth,depth_meta.depth,sizeof rec.depth);
+        if(defer) { pub.have_rec=have_rec; if(have_rec) pub.rec=rec; }
+        else if(have_rec) kl_ovrp_frame_end_commit(&rec);
     }
 
     // ...and this frame's PROJECTION layers, in the order the guest submitted
@@ -8524,6 +8757,193 @@ static XrResult klxr_ResultToString(void *instance, XrResult value, char *buffer
 }
 
 // ---------------------------------------------------------------- XR_FB_passthrough
+// XR_EXT_hand_tracking. Separate handles from XrSpaces; locate joints in the
+// caller's actual baseSpace using the runtime's existing space algebra.
+typedef struct {
+    int32_t type; const void *next; int32_t hand; int32_t handJointSet;
+} XrHandTrackerCreateInfoEXT;
+typedef struct {
+    int32_t type; const void *next; void *baseSpace; int64_t time;
+} XrHandJointsLocateInfoEXT;
+typedef struct {
+    uint64_t locationFlags; XrPosef pose; float radius;
+} XrHandJointLocationEXT;
+typedef struct {
+    int32_t type; void *next; uint32_t isActive; uint32_t jointCount;
+    XrHandJointLocationEXT *jointLocations;
+} XrHandJointLocationsEXT;
+typedef struct {
+    int32_t type; void *next; uint32_t jointCount; void *jointVelocities;
+} XrHandJointVelocitiesEXT;
+// Khronos XR_FB_hand_tracking_aim output chain, 8-byte aligned for flags.
+typedef struct {
+    int32_t type; void *next; uint64_t status; XrPosef aimPose;
+    float pinchStrengthIndex, pinchStrengthMiddle;
+    float pinchStrengthRing, pinchStrengthLittle;
+} XrHandTrackingAimStateFB;
+static float klxr_finger_pinch_strength(const klxr_hand_sample *sample, int tip) {
+    if (!(sample->valid[5] & 1) || !(sample->valid[tip] & 1)) return 0;
+    float dx = sample->poses[5][0] - sample->poses[tip][0];
+    float dy = sample->poses[5][1] - sample->poses[tip][1];
+    float dz = sample->poses[5][2] - sample->poses[tip][2];
+    float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (!isfinite(dist)) return 0;
+    // Same 3-5 cm pinch envelope used by Klepton's existing controller path.
+    float value = (0.05f - dist) / 0.02f;
+    return fminf(1, fmaxf(0, value));
+}
+
+enum { KLXR_HAND_TRACKER_MAGIC = 0x48584b4c };
+static struct { uint32_t magic; klxr_session *session; int hand; } g_hand_trackers[8];
+
+static XrResult klxr_CreateHandTrackerEXT(void *session,
+        const XrHandTrackerCreateInfoEXT *info, void **out) {
+    KLXR_TRACE("xrCreateHandTrackerEXT");
+    klxr_session *s = klxr_sess(session);
+    if (!s) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!info || !out || info->type != XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT)
+        KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    if ((info->hand != 1 && info->hand != 2) || info->handJointSet != 0)
+        KLXR_RET(KLXR_ERROR_FEATURE_UNSUPPORTED);
+    for (size_t i = 0; i < sizeof g_hand_trackers / sizeof g_hand_trackers[0]; i++) {
+        if (!g_hand_trackers[i].magic) {
+            g_hand_trackers[i].magic = KLXR_HAND_TRACKER_MAGIC;
+            g_hand_trackers[i].session = s;
+            g_hand_trackers[i].hand = info->hand - 1;
+            *out = &g_hand_trackers[i];
+            fprintf(stderr, "  [xr] hand tracker created: %s\n", info->hand == 1 ? "left" : "right");
+            return KLXR_SUCCESS;
+        }
+    }
+    KLXR_RET(KLXR_ERROR_FEATURE_UNSUPPORTED);
+}
+static int klxr_hand_tracker_index(void *handle) {
+    for (size_t i = 0; i < sizeof g_hand_trackers / sizeof g_hand_trackers[0]; i++)
+        if (handle == &g_hand_trackers[i] && g_hand_trackers[i].magic == KLXR_HAND_TRACKER_MAGIC
+            && klxr_sess(g_hand_trackers[i].session)) return (int)i;
+    return -1;
+}
+static XrResult klxr_DestroyHandTrackerEXT(void *tracker) {
+    KLXR_TRACE("xrDestroyHandTrackerEXT");
+    int idx = klxr_hand_tracker_index(tracker);
+    if (idx < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    memset(&g_hand_trackers[idx], 0, sizeof g_hand_trackers[idx]);
+    return KLXR_SUCCESS;
+}
+static XrResult klxr_LocateHandJointsEXT(void *tracker,
+        const XrHandJointsLocateInfoEXT *info, XrHandJointLocationsEXT *out) {
+    KLXR_TRACE("xrLocateHandJointsEXT");
+    int idx = klxr_hand_tracker_index(tracker);
+    if (idx < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    if (!info || !out || info->type != XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT ||
+        out->type != XR_TYPE_HAND_JOINT_LOCATIONS_EXT ||
+        out->jointCount != KLXR_HAND_JOINT_COUNT || !out->jointLocations)
+        KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    klxr_space *base = klxr_space_of(info->baseSpace);
+    if (!base) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
+    out->isActive = 0;
+    klxr_hand_sample sample;
+    pthread_mutex_lock(&g_hand_joint_lock);
+    sample = g_hand_samples[g_hand_trackers[idx].hand];
+    pthread_mutex_unlock(&g_hand_joint_lock);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    // Never show frozen fingers after ARKit tracking is lost.
+    if (!sample.active || now - sample.last_ns > 500000000LL) {
+        for (uint32_t j = 0; j < out->jointCount; j++)
+            out->jointLocations[j].locationFlags = 0;
+        struct klxr_hand_chain { int32_t type; void *next; };
+        for (struct klxr_hand_chain *n = out->next; n; n = n->next) {
+            if (n->type == XR_TYPE_HAND_TRACKING_AIM_STATE_FB)
+                ((XrHandTrackingAimStateFB *)n)->status = 0;
+        }
+        return KLXR_SUCCESS;
+    }
+    int base_tracked = 1;
+    XrPosef base_pose = klxr_space_pose_ex(base, &base_tracked, NULL, NULL, NULL, NULL);
+    if (!base_tracked) {
+        for (uint32_t j = 0; j < out->jointCount; j++)
+            out->jointLocations[j].locationFlags = 0;
+        return KLXR_SUCCESS;
+    }
+    out->isActive = 1;
+    static unsigned report_joints[2];
+    int hand_idx = g_hand_trackers[idx].hand;
+    if (++report_joints[hand_idx] == 1 || report_joints[hand_idx] % 600 == 0) {
+        unsigned count_valid = 0;
+        for (int j = 0; j < KLXR_HAND_JOINT_COUNT; j++)
+            if (sample.valid[j]) count_valid++;
+        fprintf(stderr, "  [xr] hand joints %s: active, wrist (%.3f %.3f %.3f), "
+                        "valid=%u/26\n", hand_idx == 0 ? "L" : "R",
+                sample.poses[1][0], sample.poses[1][1], sample.poses[1][2], count_valid);
+        float controller[3], quat[4], vel[3], ang[3];
+        if (kl_ovrp_hand_motion(hand_idx, controller, quat, vel, ang))
+            fprintf(stderr, "  [xr] BRINK wrist-vs-controller %s: delta "
+                            "(%.3f %.3f %.3f) m\n", hand_idx == 0 ? "L" : "R",
+                    controller[0] - sample.poses[1][0],
+                    controller[1] - sample.poses[1][1],
+                    controller[2] - sample.poses[1][2]);
+    }
+    for (int j = 0; j < KLXR_HAND_JOINT_COUNT; j++) {
+        const float *v = sample.poses[j];
+        XrHandJointLocationEXT *joint = &out->jointLocations[j];
+        joint->locationFlags = sample.valid[j];
+        if (!sample.valid[j]) continue;
+        XrPosef world = { { v[3], v[4], v[5], v[6] }, { v[0], v[1], v[2] } };
+        joint->pose = klxr_pose_rel(base_pose, world);
+        joint->radius = v[7];
+    }
+    // Iterate the typed output chain correctly. Unity may request aim pose
+    // and velocity output simultaneously, in either order.
+    struct klxr_hand_out_next { int32_t type; void *next; };
+    for (struct klxr_hand_out_next *node = out->next, *next; node; node = next) {
+        next = node->next;
+        if (node->type == XR_TYPE_HAND_JOINT_VELOCITIES_EXT) {
+            XrHandJointVelocitiesEXT *vel = (XrHandJointVelocitiesEXT *)node;
+            if (vel->jointCount == KLXR_HAND_JOINT_COUNT && vel->jointVelocities) {
+                // We have no measured velocities: zero validity, not fake data.
+                memset(vel->jointVelocities, 0, KLXR_HAND_JOINT_COUNT * 32);
+            }
+        } else if (node->type == XR_TYPE_HAND_TRACKING_AIM_STATE_FB) {
+            XrHandTrackingAimStateFB *aim = (XrHandTrackingAimStateFB *)node;
+            aim->status = 0;
+            aim->pinchStrengthIndex = klxr_finger_pinch_strength(&sample, 10);
+            aim->pinchStrengthMiddle = klxr_finger_pinch_strength(&sample, 15);
+            aim->pinchStrengthRing = klxr_finger_pinch_strength(&sample, 20);
+            aim->pinchStrengthLittle = klxr_finger_pinch_strength(&sample, 25);
+            // Use the SAME measured and calibrated virtual aim controller
+            // geometry as the working OpenXR /input/aim/pose action so UI
+            // interaction does not suddenly aim in a different direction.
+            float p[3], q[4], v[3], ang[3];
+            if (kl_ovrp_hand_motion(hand_idx, p, q, v, ang)) {
+                XrPosef stage_aim = {
+                    { q[0], q[1], q[2], q[3] }, { p[0], p[1], p[2] }
+                };
+                klxr_pose_corrections(&stage_aim, 1, hand_idx);
+                aim->aimPose = klxr_pose_rel(base_pose, stage_aim);
+                // COMPUTED and VALID. Index pinch status is derived from
+                // measured fingertip separation, not synthesized triggers.
+                aim->status = 0x1 | 0x2;
+                if (aim->pinchStrengthIndex >= 0.55f) aim->status |= 0x4;
+                if (aim->pinchStrengthMiddle >= 0.55f) aim->status |= 0x8;
+                if (aim->pinchStrengthRing >= 0.55f) aim->status |= 0x10;
+                if (aim->pinchStrengthLittle >= 0.55f) aim->status |= 0x20;
+                static unsigned logAim[2];
+                if (++logAim[hand_idx] % 600 == 1) {
+                    fprintf(stderr, "  [xr] FB hand aim %s: index=%.2f bits=0x%llx"
+                                    " aim pos (%.3f %.3f %.3f)\n",
+                            hand_idx ? "R" : "L", (double)aim->pinchStrengthIndex,
+                            (unsigned long long)aim->status,
+                            aim->aimPose.position.x, aim->aimPose.position.y,
+                            aim->aimPose.position.z);
+                }
+            }
+        }
+    }
+    return KLXR_SUCCESS;
+}
+
 // Stub passthrough: some guests require the extension and drive these, but nothing
 // here composites a passthrough layer (visionOS supplies the environment). The
 // handles are sentinels the guest only ever hands back to us; start/pause/style
@@ -8650,6 +9070,9 @@ static void klxr_install(void) {
         {"xrStructureTypeToString",     (void *)klxr_StructureTypeToString},
         // spaces — xrLocateSpace is deliberately still a refusal, see above
         {"xrCreateReferenceSpace", (void *)klxr_CreateReferenceSpace},
+        {"xrCreateHandTrackerEXT", (void *)klxr_CreateHandTrackerEXT},
+        {"xrDestroyHandTrackerEXT", (void *)klxr_DestroyHandTrackerEXT},
+        {"xrLocateHandJointsEXT", (void *)klxr_LocateHandJointsEXT},
         {"xrDestroySpace",         (void *)klxr_DestroySpace},
         {"xrGetReferenceSpaceBoundsRect",
                                    (void *)klxr_GetReferenceSpaceBoundsRect},
@@ -9471,6 +9894,7 @@ int kl_openxr_space_selftest(FILE *f) {
     klxr_space view  = klxr_st_space(KLXR_REF_SPACE_VIEW, 0, 0, 0);
     klxr_space stage = klxr_st_space(KLXR_REF_SPACE_STAGE, 0, 0, 0);
     klxr_space local = klxr_st_space(KLXR_REF_SPACE_LOCAL, 0, 0, 0);
+    klxr_space floor = klxr_st_space(KLXR_REF_SPACE_LOCAL_FLOOR, 0, 0, 0);
     float eh = kl_ovrp_eye_height();
     int ok = 1;
 
@@ -9529,6 +9953,12 @@ int kl_openxr_space_selftest(FILE *f) {
                                                klxr_space_pose(&local, NULL));
         ok &= klxr_st_pos(f, "LOCAL in STAGE is the standing height",
                           local_in_stage.position, 0, eh, 0);
+        // Local-floor is the floor-height equivalent of LOCAL, not LOCAL's
+        // eye-height offset. This is currently the same frame as STAGE.
+        XrPosef floor_in_stage = klxr_pose_rel(klxr_space_pose(&stage, NULL),
+                                               klxr_space_pose(&floor, NULL));
+        ok &= klxr_st_pos(f, "LOCAL_FLOOR in STAGE stays on the floor",
+                          floor_in_stage.position, 0, 0, 0);
 
         // poseInReferenceSpace. In VIEW it must be ROTATED by the head, not
         // merely added to it: a metre in

@@ -135,7 +135,8 @@ enum Immersive {
     /// hand-gesture affordance that fades in beneath it — stay on top of the
     /// guest's picture.
     ///
-    /// Hidden by default. The overlay is drawn by the system *over* the
+    /// Hidden by default except for BRINK's real-hand interface. The overlay is
+    /// drawn by the system *over* the
     /// immersive scene, and both guests here put their own interactive content
     /// exactly where it lands: Beat Saber's lower menu row and Steam Link's
     /// dashboard toolbar are both near the bottom of the field, so the overlay
@@ -150,7 +151,11 @@ enum Immersive {
     /// back, which is what a run wants when the question is whether the system
     /// still thinks our space is on screen at all.
     static var systemOverlays: Visibility {
-        klEnvOn("KL_OVERLAYS", default: false) ? .automatic : .hidden
+        // BRINK uses the user's real hands: retain visionOS's palm-up Home
+        // indicator and palm-flip Control Center gestures. Other targets keep
+        // their existing preference; an explicit KL_OVERLAYS override wins.
+        let brink = (Bundle.main.bundleIdentifier ?? "").hasSuffix(".x3635172946605196")
+        return klEnvOn("KL_OVERLAYS", default: brink) ? .automatic : .hidden
     }
 }
 
@@ -1010,9 +1015,8 @@ struct BootView: View {
     /// `boot()` — but behind the Settings button, because none of it is what a
     /// person who tapped a game wants to read. Two rules differ from the report:
     ///
-    ///  - **It never starts by itself.** Every game waits for Start, so the
-    ///    settings that are read once at the start of a run can always be
-    ///    changed first. (`KL_AUTOBOOT=1` on a scripted launch still boots.)
+    ///  - Games normally wait for Start so settings can be changed first.
+    ///    BRINK's installed build auto-starts; KL_AUTOBOOT=0 restores its button.
     ///  - **The window goes away once the picture is up** — see where
     ///    `openImmersiveSpace` returns. It stays if the start fails, because
     ///    then it is the only place the reason can be read.
@@ -1025,8 +1029,8 @@ struct BootView: View {
             } else if showSettings { settingsPage } else { startFront }
         }
         .task {
-            // Scripted launches only — see the comment above.
-            if !isLauncher, klEnvOn("KL_AUTOBOOT", default: false) { boot() }
+            // BRINK opens as a game from its Home icon; explicit overrides remain available.
+            if !isLauncher, klEnvOn("KL_AUTOBOOT", default: klTargetName() == "x3635172946605196") { boot() }
         }
     }
 
@@ -1757,7 +1761,7 @@ struct BootView: View {
                                 KLRun.shared.watchKeyboard(openWindow)
                                 showSettings = false
                                 if Self.handTuneAfterStart { handTune = true }
-                                else { dismissWindow() }
+                                else if !klEnvOn("KL_KEEP_START_WINDOW", default: false) { dismissWindow() }
                             }
                             guard case .error = r, attempt < 5 else { break }
                             try? await Task.sleep(nanoseconds: 2_000_000_000)

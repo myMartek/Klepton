@@ -997,6 +997,18 @@ extension KleptonRendering {
     /// `apply` runs after. Never over a value given on the launch line.
     func applyEnvironment() {
         guard !klIsAlyx() else { return }
+        if klTargetName() == "x3635172946605196" {
+            // BRINK's saved ultra setting severely blurred peripheral scenery.
+            // Preserve explicit launch overrides for performance comparisons.
+            setenv("KL_FOVEATION", "off", 0)
+            setenv("KL_OVRP_EYE_MAX", "4096", 0)
+            setenv("KL_CP_QUALITY", "1.0", 0)
+            // Keep the high-resolution compositor and its real-hand depth path.
+            setenv("KL_CP_FOVEATION", "1", 0)
+            setenv("KL_XR_LAYERS", "0", 0)
+            // 824 uses per-source audio arbitration instead of the old stream yield.
+            setenv("KL_AUDIO_PREFER", "opensl", 0)
+        }
         // Foveated rendering for a Vulkan guest. kl_fove reads KL_FOVEATION the
         // first time it is asked, which is after this. A GL guest never asks.
         let launchLine = ProcessInfo.processInfo.environment["KL_FOVEATION"]

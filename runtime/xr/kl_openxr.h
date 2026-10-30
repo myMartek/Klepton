@@ -181,4 +181,10 @@ void kl_openxr_set_predict(int on);
 // What the next frame will do: 1 predicts, 0 answers the latched head.
 int  kl_openxr_predict(void);
 
+// Live ARKit -> OpenXR 26-joint bridge. 8 floats per joint: xyz, xyzw, radius.
+// Valid[i] is an OpenXR XrSpaceLocationFlags value (0 or 0xF).
+// NULL/0 marks a hand temporarily untracked. Called by the visionOS render loop.
+void kl_openxr_set_hand_joints(int hand, const float *pose8,
+                              const uint32_t *valid, int count);
+
 #endif

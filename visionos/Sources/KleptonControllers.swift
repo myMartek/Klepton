@@ -454,6 +454,53 @@ final class KleptonControllers {
     // stream, while buttons are polled synchronously on the render thread, so
     // the two halves genuinely do cross threads and the lock is not defensive.
     private let lock = NSLock()
+    private var selectionHeadInverse = matrix_identity_float4x4
+    private var selectionHeadValid = false
+    private struct BrinkSelectionState {
+        var origin: SIMD3<Float>
+        var direction: SIMD3<Float>
+        var initialHand: SIMD3<Float>?
+        var headInverse: simd_float4x4
+        var gesture = KLBrinkSelectionGesture()
+        var hand: Int32
+    }
+    private var selectionPinches: [SpatialEventCollection.Event.ID: BrinkSelectionState] = [:]
+    func updateSelectionHead(_ head: simd_float4x4) {
+        lock.lock(); selectionHeadInverse = simd_inverse(head); selectionHeadValid = true; lock.unlock()
+    }
+    private func handleBrinkSelection(_ events: SpatialEventCollection) {
+        guard klTargetName() == "x3635172946605196", klEnvOn("KL_BRINK_LOOK_PINCH", default: true) else { return }
+        for event in events where event.kind == .indirectPinch {
+            lock.lock()
+            let inv = selectionHeadInverse
+            let hp = event.inputDevicePose?.pose3D.position
+            let handPosition = hp.map { SIMD3<Float>(Float($0.x),Float($0.y),Float($0.z)) }
+            if selectionPinches[event.id] == nil, event.phase == .active, selectionHeadValid, let ray = event.selectionRay {
+                selectionPinches[event.id] = BrinkSelectionState(
+                    origin: SIMD3(Float(ray.origin.x),Float(ray.origin.y),Float(ray.origin.z)),
+                    direction: SIMD3(Float(ray.direction.x),Float(ray.direction.y),Float(ray.direction.z)),
+                    initialHand: handPosition, headInverse: inv, hand: event.chirality == .left ? 0 : 1)
+            }
+            guard var state = selectionPinches[event.id] else { lock.unlock(); continue }
+            var delta = SIMD2<Float>.zero
+            if let h = handPosition, let start = state.initialHand {
+                let movement = state.headInverse * SIMD4<Float>(h-start,0)
+                delta = SIMD2(movement.x,movement.y)
+            }
+            let action = state.gesture.update(translation:delta, ended:event.phase == .ended, cancelled:event.phase == .cancelled)
+            if event.phase == .active { selectionPinches[event.id] = state }
+            else { selectionPinches.removeValue(forKey:event.id) }
+            lock.unlock()
+            if let action {
+                let o = inv * SIMD4<Float>(state.origin,1)
+                let d = inv * SIMD4<Float>(state.direction,0)
+                switch action {
+                case .tap: kl_brink_selection_push(o.x,o.y,-o.z,d.x,d.y,-d.z,state.hand,0,0,0)
+                case .swipe(let movement): kl_brink_selection_push(o.x,o.y,-o.z,d.x,d.y,-d.z,state.hand,1,movement.x,movement.y)
+                }
+            }
+        }
+    }
 
     /// The most recent anchor per hand — **the object, not the pose it carried**.
     ///
@@ -2279,6 +2326,7 @@ final class KleptonControllers {
     /// indirect pinch is.
     func handleSpatialEvents(_ events: SpatialEventCollection) {
         guard mode == .standard else { return }
+        handleBrinkSelection(events)
         if Self.discretePinch { handleDiscreteSpatialEvents(events); return }
         for e in events {
             guard e.kind == .indirectPinch else { continue }
@@ -2313,6 +2361,57 @@ final class KleptonControllers {
         }
     }
     private var loggedNoChirality = false
+
+    // ARKit world-space joints -> 26 OpenXR XR_EXT_hand_tracking joints. No
+    // controller/grip corrections: these are the ANATOMICAL joint poses, not
+    // simulated Touch controller transforms. The compositor provides anchors
+    // for the same presentation instant as its head and controller poses.
+    private var openXRAxes = [[Int](repeating: -1, count: 26), [Int](repeating: -1, count: 26)]
+    private func publishOpenXRJoints(_ anchor: HandAnchor?, hand: Int) {
+        guard let anchor, anchor.isTracked, let skeleton = anchor.handSkeleton else {
+            kl_openxr_set_hand_joints(Int32(hand), nil, nil, 0)
+            return
+        }
+        // Order is XR_HAND_JOINT_*_EXT [0..25]. ARKit has no palm joint, so
+        // estimate palm position between wrist and middle-finger metacarpal.
+        let names: [HandSkeleton.JointName] = [
+            .wrist, .wrist,
+            .thumbKnuckle, .thumbIntermediateBase, .thumbIntermediateTip, .thumbTip,
+            .indexFingerMetacarpal, .indexFingerKnuckle,
+            .indexFingerIntermediateBase, .indexFingerIntermediateTip, .indexFingerTip,
+            .middleFingerMetacarpal, .middleFingerKnuckle,
+            .middleFingerIntermediateBase, .middleFingerIntermediateTip, .middleFingerTip,
+            .ringFingerMetacarpal, .ringFingerKnuckle,
+            .ringFingerIntermediateBase, .ringFingerIntermediateTip, .ringFingerTip,
+            .littleFingerMetacarpal, .littleFingerKnuckle,
+            .littleFingerIntermediateBase, .littleFingerIntermediateTip, .littleFingerTip
+        ]
+        var pose8 = [Float](repeating: 0, count: 26 * 8)
+        var flags = [UInt32](repeating: 0, count: 26)
+        for i in 0..<26 {
+            let joint = skeleton.joint(names[i])
+            let world = anchor.originFromAnchorTransform * joint.anchorFromJointTransform
+            let t = world.columns.3
+            let q = simd_quatf(world)
+            let k = i * 8
+            pose8[k + 0] = t.x; pose8[k + 1] = t.y; pose8[k + 2] = t.z
+            pose8[k + 3] = q.imag.x; pose8[k + 4] = q.imag.y
+            pose8[k + 5] = q.imag.z; pose8[k + 6] = q.real
+            pose8[k + 7] = (i == 5 || i % 5 == 0) ? 0.007 : 0.009
+            flags[i] = joint.isTracked ? 0xF : 0x3 // inferred poses remain valid
+        }
+        guard klConvertOpenXRHand(&pose8, flags: &flags, hand: hand,
+                                  axes: &openXRAxes[hand]) else {
+            kl_openxr_set_hand_joints(Int32(hand), nil, nil, 0)
+            return
+        }
+        pose8.withUnsafeBufferPointer { poses in
+            flags.withUnsafeBufferPointer { valid in
+                kl_openxr_set_hand_joints(Int32(hand), poses.baseAddress,
+                                          valid.baseAddress, 26)
+            }
+        }
+    }
 
     /// Merge every source and push the result across to kl_ovrp.
     ///
@@ -2349,6 +2448,10 @@ final class KleptonControllers {
         }
         pollButtons()
         pollGamepad()
+        // Publish per-finger data independently of the emulated controllers.
+        // This must run even when only the Touch-style trigger is in use.
+        publishOpenXRJoints(leftHand, hand: 0)
+        publishOpenXRJoints(rightHand, hand: 1)
 
         // **Hands are the fallback for NO controllers, not for a missing one.**
         // With a single Sense controller in use (Walkabout is played one-handed)
@@ -2657,3 +2760,62 @@ final class KleptonControllers {
         lock.lock(); state[hand] = st; lock.unlock()
     }
 }
+
+// BEGIN OPENXR HAND FRAME MATH
+// OpenXR: +Z points away from the tip, +Y is dorsal. ARKit's frames are
+// not OpenXR frames. Infer a joint's dorsal local axis on an open finger and
+// retain it through curling, rather than allowing the axis to flip mid-gesture.
+private func klConvertOpenXRHand(_ poses: inout [Float], flags: inout [UInt32],
+                                hand: Int, axes: inout [Int]) -> Bool {
+    guard poses.count == 208, poses.allSatisfy({ $0.isFinite }) else { return false }
+    func p(_ j: Int) -> SIMD3<Float> { SIMD3(poses[j*8], poses[j*8+1], poses[j*8+2]) }
+    var points = (0..<26).map { p($0) }
+    points[0] = (points[11] + points[12]) * 0.5 // center of middle metacarpal BONE
+    let forward = points[12] - points[1]
+    let across = points[7] - points[22]
+    var dorsal = simd_cross(across, forward) * (hand == 0 ? Float(1) : Float(-1))
+    guard simd_length_squared(dorsal) > 1e-10 else { return false }
+    dorsal = simd_normalize(dorsal)
+    let next = [12,11,3,4,5,5,7,8,9,10,10,12,13,14,15,15,17,18,19,20,20,22,23,24,25,25]
+    let tips: Set<Int> = [5,10,15,20,25]
+    var rotations = [simd_quatf]()
+    for j in 0..<26 {
+        var backward = tips.contains(j) ? points[j-1] - points[j] : points[j] - points[next[j]]
+        guard simd_length_squared(backward) > 1e-10 else { return false }
+        backward = simd_normalize(backward)
+        let source = tips.contains(j) ? j-1 : j
+        let k = source * 8
+        let raw = simd_quatf(ix: poses[k+3], iy: poses[k+4], iz: poses[k+5], r: poses[k+6])
+        guard simd_length_squared(raw.vector) > 0.5 else { return false }
+        let basis = simd_float3x3(simd_normalize(raw))
+        if axes[j] < 0 && abs(simd_dot(backward, dorsal)) < 0.3 {
+            var score: Float = 0
+            for a in 0..<3 {
+                let d = simd_dot(basis[a], dorsal)
+                if abs(d) > score { score = abs(d); axes[j] = a*2 + (d < 0 ? 1 : 0) }
+            }
+        }
+        var up = dorsal
+        if j > 1 && axes[j] >= 0 {
+            up = basis[axes[j]/2] * (axes[j]%2 == 0 ? Float(1) : Float(-1))
+        }
+        up -= backward * simd_dot(up, backward)
+        if simd_length_squared(up) < 1e-8 {
+            // Still no reliable frame: do not advertise an active malformed skeleton.
+            return false
+        }
+        up = simd_normalize(up)
+        let right = simd_normalize(simd_cross(up, backward))
+        up = simd_cross(backward, right)
+        rotations.append(simd_normalize(simd_quatf(simd_float3x3(columns: (right, up, backward)))))
+    }
+    for j in 0..<26 {
+        let k = j*8, q = rotations[j]
+        poses[k] = points[j].x; poses[k+1] = points[j].y; poses[k+2] = points[j].z
+        poses[k+3] = q.imag.x; poses[k+4] = q.imag.y; poses[k+5] = q.imag.z; poses[k+6] = q.real
+    }
+    poses[7] = 0.015
+    flags[0] = 3 | (flags[11] & flags[12] & 12)
+    return true
+}
+// END OPENXR HAND FRAME MATH

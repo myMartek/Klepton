@@ -30,3 +30,6 @@ void kl_mprobe_nexus_frame_budget(unsigned frame);
 void kl_mprobe_gunclub_save_preferences(void);
 
 #endif
+
+// User-initiated visionOS selection ray, in Unity-handed head-local metres.
+void kl_brink_selection_push(float ox,float oy,float oz,float dx,float dy,float dz,int hand,int kind,float mx,float my);

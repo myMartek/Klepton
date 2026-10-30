@@ -1069,6 +1069,7 @@ GENERIC_ENV = "KLEPTON_GENERIC_TARGET"
 # <files>/obb gave it an empty directory, every "Unable to open archive file",
 # and a loading screen that never ends.
 GENERIC_OBB = {
+    "x3635172946605196": "Android/obb/com.brink.vr.oculus.quest",
     "x2544573735586536": "Android/obb/com.JustAddWater.SniperEliteVR",
     # Ghost Town (com.FireproofStudios.GhostTown, x9531494193591052) is Unity,
     # and its scenes are loose AssetBundles the store delivers into Android's
