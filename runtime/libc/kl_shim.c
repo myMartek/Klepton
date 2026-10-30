@@ -975,7 +975,7 @@ static int klb_JNI_GetCreatedJavaVMs(void **vmBuf, int bufLen, int *nVMs) {
 static int kl_connect(int fd, const struct sockaddr *sa, socklen_t len) {
     if (kl_net_offline()) {
         if (kl_net_trace()) fprintf(stderr, "  [net] connect() -> ENETUNREACH (offline)\n");
-        errno = ENETUNREACH;
+        kl_errno_set(ENETUNREACH);
         return -1;
     }
     char host[80] = "?";

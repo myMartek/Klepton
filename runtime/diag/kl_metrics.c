@@ -21,6 +21,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
@@ -243,6 +244,11 @@ int kl_metrics_tick(void) {
         if (drew) m.gpu_game_ms = (float)((game_s > 0 ? game_s : 0) * 1000.0 / (double)drew);
     }
     m.eye_w = g_eye_w; m.eye_h = g_eye_h;
+    static int trace = -1;
+    if (trace < 0) { const char *v = getenv("KL_PERF_LOG"); trace = v && atoi(v) != 0; }
+    if (trace && g_now.seq % 5 == 0)
+        fprintf(stderr, "  [perf] fresh=%.1f fps display=%.1f Hz stale=%.1f/s gpu=%.1f%% game=%.2fms composite=%.2fms eye=%dx%d\n",
+                m.fps, m.display_hz, m.stale, m.gpu_busy*100, m.gpu_game_ms, m.gpu_comp_ms, m.eye_w, m.eye_h);
     pthread_mutex_lock(&g_mu);
     m.upscale = g_up.state; m.out_w = g_up.w; m.out_h = g_up.h;
     memcpy(m.path, g_up.path, sizeof m.path);

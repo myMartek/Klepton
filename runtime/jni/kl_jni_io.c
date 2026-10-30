@@ -704,7 +704,42 @@ static klj_val intbuffer_put(void *env, void *self, const klj_val *a, int n) {
 static klj_val intbuffer_rewind(void *env, void *self, const klj_val *a, int n) {
     (void)env;(void)a;(void)n;klj_intbuffer *b=intbuffer(self);if(b)b->position=0;return (klj_val){.l=self};
 }
+// Android's NativeGallery has no host Photos bridge yet. Its documented
+// Permission.Denied is 0: report absence normally rather than abort the app.
+static klj_val klj_NativeGallery_denied(void *env,void *self,const klj_val *a,int n) {
+    (void)env;(void)self;(void)a;(void)n;
+    KLJ_LOG("NativeGallery: host gallery permission unavailable (Denied)");
+    return (klj_val){.j=0};
+}
+
+static klj_val klj_NativeGallery_request_denied(void *env,void *self,const klj_val *a,int n) {
+    (void)env;(void)self;
+    KLJ_LOG("NativeGallery: asynchronous permission request denied normally");
+    if (n >= 2 && a[1].l) {
+        void *args = klj_new_array('L', "java/lang/Object", 1);
+        ((void **)klj_arr(args)->data)[0] = klj_box_int(0);
+        klj_proxy_invoke_named_args(a[1].l,
+            "com/yasirkula/unity/NativeGalleryPermissionReceiver",
+            "OnPermissionResult", "(I)V", args);
+    }
+    return (klj_val){0};
+}
+
 const klj_binding klj_bind_io[] = {
+    {"com/yasirkula/unity/NativeGallery", "RequestPermission",
+     "(Lcom/unity3d/player/UnityPlayerActivity;Lcom/yasirkula/unity/NativeGalleryPermissionReceiver;ZI)V", klj_NativeGallery_request_denied},
+    {"com/yasirkula/unity/NativeGallery", "RequestPermission",
+     "(Landroid/content/Context;Lcom/yasirkula/unity/NativeGalleryPermissionReceiver;ZI)V", klj_NativeGallery_request_denied},
+
+    {"com/yasirkula/unity/NativeGallery", "CheckPermission",
+     "(Lcom/unity3d/player/UnityPlayerActivity;ZI)I", klj_NativeGallery_denied},
+    {"com/yasirkula/unity/NativeGallery", "CheckPermission",
+     "(Landroid/content/Context;ZI)I", klj_NativeGallery_denied},
+    {"com/yasirkula/unity/NativeGallery", "RequestPermission",
+     "(Lcom/unity3d/player/UnityPlayerActivity;ZI)I", klj_NativeGallery_denied},
+    {"com/yasirkula/unity/NativeGallery", "RequestPermission",
+     "(Landroid/content/Context;ZI)I", klj_NativeGallery_denied},
+
     {"java/nio/IntBuffer","allocate","(I)Ljava/nio/IntBuffer;",intbuffer_allocate},
     {"java/nio/IntBuffer","array","()[I",intbuffer_array},
     {"java/nio/IntBuffer","capacity","()I",intbuffer_capacity},

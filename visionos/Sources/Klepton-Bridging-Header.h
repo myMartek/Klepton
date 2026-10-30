@@ -58,3 +58,5 @@ int kl_ovrplat_user_id_per_install(const char *target);
 // ...and Surreal Interactive's controller API (KleptonSurrealSDK.swift), which
 // is linked only into a Surreal build that has their framework; see kl_surreal_sdk.h.
 #import "kl_surreal_sdk.h"
+
+#import "kl_mprobe.h"

@@ -307,6 +307,11 @@ int kl_ovrp_haptics_pull(int hand, float *amplitude, float *seconds);
 // stage the guest is still drawing into.
 
 typedef struct {
+    int layer_plus_one, stage, slice, reserved;
+    float near_z, far_z, min_depth, max_depth;
+} kl_ovrp_depth_image;
+
+typedef struct {
     float    px, py, pz;          // head position, in the current tracking space
     float    qx, qy, qz, qw;      // head orientation
     // The frustum the guest was told to render this frame with, per eye:
@@ -372,6 +377,9 @@ typedef struct {
     // thread, and the two describe different frames whenever the guest is
     // decoupled, which is the design.
     int      viewport_of[2];
+    // Optional OpenXR depth, published after the same GPU fence as color.
+    // layer_plus_one == 0 means absent. Registry owns the native images.
+    kl_ovrp_depth_image depth[2];
     uint64_t serial;              // guest frame serial, 1-based; 0 = nothing recorded
     int      stage;               // the swapchain stage this frame drew into
     int      complete;            // has ovrp_EndFrame been seen for this serial?
