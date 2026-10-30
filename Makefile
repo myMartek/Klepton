@@ -17,6 +17,7 @@ CFLAGS  := -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(R
 # are in the base LDLIBS rather than on one target because kl_vtdec is in
 # RUNTIME_SHIP — everything that links the runtime needs them. Metal likewise,
 # for kl_mtl_foveate.m, which makes descriptors of its own.
+CFLAGS += $(REPRO_FLAGS)
 LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio \
            -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
            -framework CoreFoundation -framework AVFoundation -framework Foundation \
@@ -79,9 +80,30 @@ RUNTIME_SHIP := $(LX_SRC) runtime/guest/kl_linuxproc.c \
            runtime/guest/kl_guestpoke.c runtime/kl_cacerts.c runtime/media/kl_phonon_hrtf.S \
            runtime/media/kl_menu_font.S \
            runtime/diag/kl_sample.c runtime/diag/kl_mprobe.c runtime/diag/kl_stall.c runtime/diag/kl_metrics.c \
+           runtime/guest/kl_extension.c runtime/guest/kl_aot_hooks.c \
            runtime/guest/kl_songs.c
 RUNTIME_DIAG := runtime/diag/kl_metadump.c
 RUNTIME := $(RUNTIME_SHIP) $(RUNTIME_DIAG)
+
+# Scotland2 is an optional leaf component. Host-specific tests opt in by target.
+KLEPTON_SCOTLAND2 ?= $(if $(filter build/t_scotland2%,$(MAKECMDGOALS)),1,0)
+ifeq ($(KLEPTON_SCOTLAND2),1)
+SC2_FRAMEWORKS := -framework CoreText -framework CoreGraphics
+RUNTIME_INC += -Iports/scotland2/include
+SC2_DIAGNOSTICS := $(if $(filter release,$(SC2_BUILD_MODE)),0,1)
+SC2_DEFINES := -DKL_GUEST_EXTENSION_BUILTIN -DSC2_DIAGNOSTICS=$(SC2_DIAGNOSTICS)
+CFLAGS += -Iports/scotland2/include $(SC2_DEFINES)
+LDLIBS += $(SC2_FRAMEWORKS)
+RUNTIME_SHIP += ports/scotland2/src/host-bridge.c ports/scotland2/src/apple-unicode.m
+RUNTIME := $(RUNTIME_SHIP) $(RUNTIME_DIAG)
+endif
+
+# A source-list switch must rebuild archives and host fixtures in both directions.
+.PHONY: runtime-selection-force
+build/runtime-selection: runtime-selection-force
+	@mkdir -p build
+	@printf '%s\n' 'scotland2=$(KLEPTON_SCOTLAND2) diagnostics=$(SC2_DIAGNOSTICS)' > $@.tmp
+	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 
 # ...and every header they include, as a PREREQUISITE (never as a compiler
 # input — a .h on the command line is compiled as a header, not included).
@@ -97,13 +119,43 @@ RUNTIME := $(RUNTIME_SHIP) $(RUNTIME_DIAG)
 # that measured a build nobody has.
 # kl_phonon_hrtf.S .incbins the SOFA blob, so the data file is a prerequisite
 # of everything too — same missed-FAILURE argument as the generated tables.
-RUNTIME_ALL_HDRS := $(wildcard runtime/*.h) $(wildcard runtime/*/*.h)
+RUNTIME_ALL_HDRS := $(wildcard runtime/*.h) $(wildcard runtime/*/*.h) $(wildcard ports/scotland2/include/*.h) build/runtime-selection Makefile
 RUNTIME_HDRS := $(RUNTIME_ALL_HDRS) $(wildcard tests/*.h) \
                 runtime/data/phonon_hrtf_cipic_124.sofa \
                 runtime/data/kl_menu_font.ttf
 
 .PHONY: all test clean check load vatest il2cpp boot jnislots x18 guest x18race uevk jniobj
 all: build/t_opus
+
+# Apple Scotland2 core: explicit host gate, separate from the stock runtime.
+SC2_CORE_SRC := $(wildcard ports/scotland2/src/*) $(wildcard ports/scotland2/include/*) \
+                $(wildcard ports/scotland2/upstream/src/*) \
+                $(wildcard ports/scotland2/upstream/shared/*) \
+                $(wildcard ports/scotland2/upstream/include/*) \
+                $(wildcard port-deps/sources/fmt/include/fmt/*) ports/scotland2/build.sh
+build/scotland2/macosx/libscotland2-core.a: $(SC2_CORE_SRC)
+	bash ports/scotland2/build.sh macosx
+
+build/t_scotland2: ports/scotland2/tests/klepton.c build/scotland2/macosx/libscotland2-core.a $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -Iports/scotland2/include -o $@ ports/scotland2/tests/klepton.c \
+	  $(RUNTIME) build/scotland2/macosx/libscotland2-core.a $(LDLIBS) -lc++
+
+build/t_scotland2_il2cpp: ports/scotland2/tests/il2cpp.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ ports/scotland2/tests/il2cpp.c $(RUNTIME) $(LDLIBS)
+
+build/t_android_1453: tests/t_android_1453.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_android_1453.c $(RUNTIME) $(LDLIBS)
+
+build/t_scotland2_paper: ports/scotland2/tests/paper.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ ports/scotland2/tests/paper.c $(RUNTIME) $(LDLIBS)
+
+build/t_scotland2_aot: ports/scotland2/tests/aot-hooks.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ ports/scotland2/tests/aot-hooks.c $(RUNTIME) $(LDLIBS)
 
 build/t_opus: tests/t_opus.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
@@ -157,6 +209,10 @@ build/t_load: tests/t_load.c $(RUNTIME) $(RUNTIME_HDRS)
 # android_dlopen_ext through the guest-facing symbol table: the plain form is
 # dlopen, and every extension flag is refused with a dlerror that names it. No
 # guest library is loaded; milliseconds, in `make check`.
+build/t_futex: tests/t_futex.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_futex.c $(RUNTIME) $(LDLIBS)
+
 build/t_dl_ext: tests/t_dl_ext.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_dl_ext.c $(RUNTIME) $(LDLIBS)
@@ -1106,7 +1162,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands
+check: build/t_futex build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1167,6 +1223,7 @@ check: build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot bu
 	@head -1 build/mtlbusy.log && tail -1 build/mtlbusy.log
 	@./build/t_metrics > build/metrics.log 2>&1 || { cat build/metrics.log; exit 1; }
 	@head -1 build/metrics.log && tail -1 build/metrics.log
+	@KL_FUTEX_EXACT=1 ./build/t_futex > build/futex.log 2>&1 || { cat build/futex.log; exit 1; }
 	@./build/t_dl_ext > build/dl-ext.log 2>&1 || { cat build/dl-ext.log; exit 1; }
 	@echo "=== android_dlopen_ext ===" && tail -1 build/dl-ext.log
 	@./build/t_jni_io > build/jni-io.log 2>&1 || { cat build/jni-io.log; exit 1; }
@@ -1382,7 +1439,7 @@ XROS_LIBS  := $(foreach p,$(XROS_PLATFORMS),build/$(p)/libklepton.a)
 # fails; a Vulkan guest simply reports that the hardware does not meet its
 # requirements, on device only). Nothing links against MoltenVK either way —
 # kl_vulkan.c is VK_NO_PROTOTYPES and dlopens it — so this is headers only.
-XROS_CFLAGS := -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(RUNTIME_INC)
+XROS_CFLAGS := $(REPRO_FLAGS) $(SC2_DEFINES) -g -O1 -Wall -Wextra -Wno-unused-parameter -arch arm64 $(MVK_INC) $(RUNTIME_INC)
 
 .PHONY: xros xros-device xros-sim swiftcheck
 xros: $(XROS_GATES) build/Klepton.xcframework swiftcheck
@@ -1409,9 +1466,12 @@ xros: $(XROS_GATES) build/Klepton.xcframework swiftcheck
 # between this and the real build, which is the one thing that would make it
 # lie.
 swiftcheck:
+	@mkdir -p build/swift-module-cache
 	@xcrun -sdk xros swiftc -typecheck -target arm64-apple-xros26.0 \
+	  -module-cache-path build/swift-module-cache \
 	  -import-objc-header visionos/Sources/Klepton-Bridging-Header.h \
-	  $(RUNTIME_INC) visionos/Sources/*.swift visionos/SteamCloudKit/Sources/SteamCloudKit/*.swift 2>&1 | grep -E '^[^ ].*error:' && exit 1; \
+	  $(RUNTIME_INC) visionos/Sources/*.swift visionos/SteamCloudKit/Sources/SteamCloudKit/*.swift \
+	  > build/swiftcheck.log 2>&1 || { cat build/swiftcheck.log; exit 1; }; \
 	  echo "  swiftcheck: the visionOS app typechecks against runtime/*.h"
 
 # The archives are real targets with real prerequisites, not side effects of a
@@ -1427,7 +1487,7 @@ swiftcheck:
 # stopped at the archives and left this behind it.
 build/xros/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS) $(FZ_DEPS)
 	@mkdir -p build/xros
-	@rm -f $@
+	@rm -f $@ $(@D)/*.o
 	@for s in $(RUNTIME_SHIP); do \
 	  o=build/xros/$$(basename $$s | sed 's/\.[cSm]$$/.o/'); \
 	  $(CC) $(XROS_CFLAGS) -target arm64-apple-xros1.0 -isysroot $(XROS_SDK) \
@@ -1437,7 +1497,7 @@ build/xros/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS) $(FZ_DEPS)
 
 build/xrsim/libklepton.a: $(RUNTIME_SHIP) $(RUNTIME_ALL_HDRS) $(FZ_DEPS)
 	@mkdir -p build/xrsim
-	@rm -f $@
+	@rm -f $@ $(@D)/*.o
 	@for s in $(RUNTIME_SHIP); do \
 	  o=build/xrsim/$$(basename $$s | sed 's/\.[cSm]$$/.o/'); \
 	  $(CC) $(XROS_CFLAGS) -target arm64-apple-xros1.0-simulator -isysroot $(XRSIM_SDK) \
@@ -1452,14 +1512,14 @@ build/xros/libklepton.dylib: build/xros/libklepton.a
 	@$(CC) -target arm64-apple-xros1.0 -isysroot $(XROS_SDK) -arch arm64 \
 	   -dynamiclib -o $@ -Wl,-all_load $< -lz -lc++ -framework AudioToolbox \
 	   -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
-	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework Metal \
+	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework Metal $(SC2_FRAMEWORKS) \
 	   -install_name @rpath/libklepton.dylib
 
 build/xrsim/libklepton.dylib: build/xrsim/libklepton.a
 	@$(CC) -target arm64-apple-xros1.0-simulator -isysroot $(XRSIM_SDK) -arch arm64 \
 	   -dynamiclib -o $@ -Wl,-all_load $< -lz -lc++ -framework AudioToolbox \
 	   -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
-	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework Metal \
+	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework Metal $(SC2_FRAMEWORKS) \
 	   -install_name @rpath/libklepton.dylib
 
 xros-device: build/xros/libklepton.dylib

@@ -28,6 +28,7 @@
 #include "kl_steamapi.h"
 #include "kl_mprobe.h"
 #include "kl_songs.h"
+#include "kl_extension.h"
 #include "kl_sample.h"
 #include "kl_slink.h"
 #include "kl_ue4.h"
@@ -883,6 +884,7 @@ static int boot_linux(FILE *out) {
 }
 
 int kl_driver_boot(FILE *out) {
+    if (kl_extension_start() != 0) return fail(kl_extension_error());
     if (!g_target) return fail("kl_driver_init was not called");
     g_gap_only = kl_env_on("KL_GAP_ONLY", 0);
     int rc;

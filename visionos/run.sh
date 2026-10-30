@@ -45,6 +45,17 @@ BUNDLE_ID="${KLEPTON_BUNDLE_ID:-$KLT_BUNDLE}"
 PRODUCT="$KLT_PRODUCT"
 MODE="${1:-sim}"
 
+# Beat Saber with its mods (AVP Play: "Mods" on the game's page). They come
+# prebuilt with the toolchain, for one game version each; stage_avp_mods.py
+# picks them by the game's version code below and stops with the reason for any
+# other. Exported before the runtime is built: the archive links the bridge only
+# then. Without KLEPTON_SCOTLAND2=1 nothing of this runs.
+if [ "${KLEPTON_SCOTLAND2:-0}" = 1 ]; then
+  export KLEPTON_SCOTLAND2 SC2_BUILD_MODE=release SC2_TEST_SET=coremods
+else
+  unset KLEPTON_SCOTLAND2 SC2_BUILD_MODE SC2_TEST_SET SC2_GAME_PROFILE
+fi
+
 # Give the custom-launcher build its OWN derived data. Xcode's incremental Swift
 # build does not reliably invalidate on a SWIFT_ACTIVE_COMPILATION_CONDITIONS change,
 # so flipping KL_CUSTOM_LAUNCHER against a shared dd-* dir silently reuses the stale
@@ -163,6 +174,14 @@ echo "[1/5] runtime + guest translations ($KLT_NAME)…"
 # mkangle.sh below stops and names the bootstrap command instead.
 if [ -d ../vendor/.git ]; then (cd .. && make -s angle-xros angle-xrsim); fi
 ./mkguest.sh | tail -1
+if [ "${KLEPTON_SCOTLAND2:-0}" = 1 ]; then
+  # After mkguest.sh: it writes the game's own frameworks, and the mods replace
+  # libil2cpp and libunity with copies whose hook gates are prepared before signing.
+  SC2_OUT=$(python3 ../ports/scotland2/tools/stage_avp_mods.py --target "$KLT_NAME" --tree "../$KLT_TREE")
+  printf '%s\n' "$SC2_OUT" | grep -v '^SC2_GAME_PROFILE='
+  export SC2_GAME_PROFILE="$(printf '%s\n' "$SC2_OUT" | sed -n 's/^SC2_GAME_PROFILE=//p')"
+  [ -n "$SC2_GAME_PROFILE" ] || { echo "!! mods: no profile for this game version"; exit 1; }
+fi
 ./mkangle.sh | tail -1
 # ...and the Vulkan renderer, for a guest whose graphics API is not GLES. Unlike
 # ANGLE this needs no source checkout and no build — `make mvk` is a 180 MB

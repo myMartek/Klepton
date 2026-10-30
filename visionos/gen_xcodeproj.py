@@ -34,6 +34,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import targets as targets_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SC2_PROFILE = os.environ.get('SC2_GAME_PROFILE', '1.40.8')
+if SC2_PROFILE not in ('1.40.8', '1.45.3'):
+    raise SystemExit('Unknown Scotland2 game profile')
 KLT = targets_mod.resolve(os.environ.get("KLEPTON_TARGET") or targets_mod.DEFAULT)
 # The PRODUCT name, which is also the .xcodeproj's, the .app's and the scheme's.
 # The Swift sources are still Klepton*.swift whatever the product is called —
@@ -59,6 +62,8 @@ TEST_BUILD = (os.environ.get("KLEPTON_TEST_BUILD", "").strip().lower() in ("1", 
               or bool(os.environ.get("KLEPTON_DISPLAY_OVERRIDE", "").strip())
               or _bundle_test
               or "KL_TEST_BUILD" in re.split(r"[,\s]+", os.environ.get("KLEPTON_TEST_ON", "")))
+if os.environ.get("SC2_BUILD_MODE") == "release":
+    TEST_BUILD = False
 if TEST_BUILD:
     print("gen_xcodeproj: test build (KLTestBuild=1): tester-only controls are in it", file=sys.stderr)
 
@@ -175,7 +180,45 @@ ANGLE_DIR = "Frameworks"
 # Both sets are embedded-not-linked, so the pbxproj treatment is identical and
 # the generator stays data-driven — the two lists differ only in what a missing
 # one means, which is why main() reports them separately.
-EMBED = GUEST + ANGLE + MVK
+SC2 = ["Scotland2Core", "SC2_libtinyxml2"] if os.environ.get("KLEPTON_SCOTLAND2") == "1" else []
+if SC2:
+    if os.environ.get('SC2_TEST_SET', 'tinyxml2') in ('paper','hooks','customtypes','lapiz','bsml','songcore','metacore','songdownloader','coremods'):
+        SC2.append('SC2_libpaper2_scotland2')
+    if os.environ.get('SC2_TEST_SET') in ('hooks','customtypes','lapiz','bsml','songcore','metacore','songdownloader','coremods'):
+        SC2 += ['SC2_'+name for name in ['libbeatsaber-hook','libsl2_abi','libcxx_shared','libsc2_flamingo','libsc2_flamingo_probe']]
+    if os.environ.get('SC2_TEST_SET') in ('customtypes','lapiz','bsml','songcore','metacore','songdownloader','coremods'):
+        SC2 += ['SC2_libcustom-types','SC2_libsc2_customtypes_probe']
+    if os.environ.get('SC2_TEST_SET') in ('lapiz','bsml','songcore','metacore','songdownloader','coremods'):
+        SC2 += ['SC2_liblapiz']
+    if os.environ.get('SC2_TEST_SET') in ('bsml','songcore','metacore','songdownloader','coremods'):
+        SC2 += ['SC2_libbsml','SC2_libsc2_bsml_probe']
+    if os.environ.get('SC2_TEST_SET') in ('songcore','metacore','songdownloader','coremods'):
+        SC2 += ['SC2_libsongcore','SC2_libsc2_songcore_probe']
+    if os.environ.get('SC2_TEST_SET') in ('metacore','songdownloader','coremods'):
+        SC2 += ['SC2_'+name for name in ['libmetacore','libsc2_metacore_probe','libweb-utils','libbeatsaverplusplus','libzip','libsongdetails']]
+    if os.environ.get('SC2_TEST_SET') in ('songdownloader','coremods'):
+        SC2 += ['SC2_libplaylistcore','SC2_libsongdownloader']
+    if os.environ.get('SC2_TEST_SET') == 'coremods':
+        SC2 += ['SC2_libdatakeeper','SC2_libunicode']
+    # The bundle id is the target's usual one (or AVP Play's prefix): mods are an update of the same app.
+    if KLT['name'] != 'beatsaber140':
+        raise SystemExit('Scotland2 mods exist for beatsaber140 only.')
+    if os.environ.get('SC2_BUILD_MODE') == 'release':
+        import json as _sc2_json
+        _sc2_manifest = '../ports/scotland2/port1453/selected-mods.json' if SC2_PROFILE == '1.45.3' else '../ports/scotland2/selected-mods.json'
+        with open(os.path.join(HERE, _sc2_manifest)) as _sc2_file:
+            _sc2_selection = _sc2_json.load(_sc2_file)
+        SC2 = ['Scotland2Core', 'SC2_libcxx_shared'] + [
+            'SC2_' + os.path.basename(path)[:-3] for path in _sc2_selection['metadata']]
+    for name in SC2:
+        if not os.path.isdir(os.path.join(HERE, 'Frameworks', name + '.xcframework')):
+            raise SystemExit('Use ports/scotland2/tools/build_release.py to stage the selected release.' if os.environ.get('SC2_BUILD_MODE')=='release' else 'Run bash ports/scotland2/package.sh xros before generating the diagnostic app.')
+# The newer APK carries its own Android C++ runtime. The mod composition has
+# one explicitly selected shared runtime for the game and all guest mods.
+# Both translate to libcxx_shared.framework, so embedding both is ambiguous.
+if SC2 and 'SC2_libcxx_shared' in SC2:
+    GUEST = [name for name in GUEST if name not in ('libc++_shared', 'libcxx_shared')]
+EMBED = GUEST + ANGLE + MVK + SC2
 
 
 def detect_team():
@@ -540,7 +583,7 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonLauncher.swift", "KleptonHL1.swift", "KleptonGameData.swift",
          "KleptonAlyx.swift", "KleptonText.swift", "KleptonSteamCloud.swift",
          "KleptonBackup.swift", "KleptonMetrics.swift", "KleptonPinch.swift",
-         "KleptonTestBuild.swift",
+         "KleptonTestBuild.swift", "KleptonLogTail.swift", "KleptonAppleMusic.swift", "KleptonModCredits.swift",
          "KleptonArrayViews.swift",
          "KleptonControllerInput.swift", "KleptonControllerMode.swift",
          "KleptonSurrealInput.swift", "KleptonSurrealBackend.swift", "KleptonSurrealView.swift",
@@ -567,6 +610,11 @@ swift_filerefs = "\n".join(
 swift_children = "\n".join(f'\t\t\t\t{s["ref"]},' for s in swift)
 swift_sources  = "\n".join(f'\t\t\t\t{s["bld"]},' for s in swift)
 F_RT    = oid("FRT");   B_RT_LNK = oid("BRTLK")
+SC2_REF = oid("FSC2META"); SC2_BUILD = oid("BSC2META")
+sc2_buildfile = f'{SC2_BUILD} = {{isa = PBXBuildFile; fileRef = {SC2_REF}; }};' if SC2 else ''
+sc2_filereference = f'{SC2_REF} = {{isa = PBXFileReference; lastKnownFileType = folder; path = Scotland2Metadata; sourceTree = "<group>"; }};' if SC2 else ''
+sc2_resource = f'{SC2_BUILD},' if SC2 else ''
+sc2_group = f'{SC2_REF},' if SC2 else ''
 # Surreal Interactive's SDK, when SURREAL_SDK: one file ref, one link, no embed.
 F_SVR   = oid("FSVR");  B_SVR_LNK = oid("BSVRLK")
 SVR_BUILDFILE = (f"\t\t{B_SVR_LNK} /* {SVR_NAME}.xcframework in Frameworks */ = "
@@ -625,7 +673,8 @@ _display = _display.replace("\\", "\\\\").replace('"', '\\"')
 # ENTITLEMENTS_SETTING / ASSETCATALOG_SETTING above, so it lands on its own line in
 # the output and expands to nothing (no blank line) when the flag is off.
 # ...and KL_SURREAL_SDK, which is what lets KleptonSurrealSDK.swift call the SDK at all.
-_conds = (["KL_CUSTOM_LAUNCHER"] if _launcher_on else []) + (["KL_SURREAL_SDK"] if SURREAL_SDK else [])
+_conds = ((["KL_CUSTOM_LAUNCHER"] if _launcher_on else []) + (["KL_SURREAL_SDK"] if SURREAL_SDK else [])
+          + (["KL_SCOTLAND2"] if SC2 else []))
 LAUNCHER_COND = (f'\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "{" ".join(_conds)} $(inherited)";\n'
                  if _conds else "")
 
@@ -642,8 +691,40 @@ def _plist_version(env, dflt):
 APP_VERSION = _plist_version("KLEPTON_APP_VERSION", "1.0")
 APP_BUILD = _plist_version("KLEPTON_APP_BUILD", "1")
 
+# Build settings for the Beat Saber mods (Info.plist KLScotland2*). Only a build
+# with the mods writes them, so every other project file stays as it was.
+def _sc2_settings():
+    if not SC2:
+        return ""
+    release = os.environ.get("SC2_BUILD_MODE") == "release"
+    test_set = os.environ.get("SC2_TEST_SET", "")
+    def on(*sets):
+        return 1 if test_set in sets else 0
+    rows = {
+        "KL_SCOTLAND2_TEST": 1,
+        "KL_SCOTLAND2_PROFILE": SC2_PROFILE,
+        "KL_SCOTLAND2_DIAGNOSTICS": 0 if release else 1,
+        "KL_SCOTLAND2_CUSTOMTYPES": on("customtypes"),
+        "KL_SCOTLAND2_METACORE": on("metacore", "songdownloader", "coremods"),
+        "KL_SCOTLAND2_SONGDOWNLOADER": on("songdownloader", "coremods"),
+        "KL_SCOTLAND2_COREMODS": on("coremods"),
+        "KL_SCOTLAND2_SONGCORE": on("songcore", "metacore", "songdownloader", "coremods"),
+        "KL_SCOTLAND2_BSML": on("bsml", "songcore", "metacore", "songdownloader", "coremods"),
+        "KL_SCOTLAND2_LAPIZ": on("lapiz"),
+        "KL_SCOTLAND2_HOOKS": on("hooks", "customtypes", "lapiz", "bsml", "songcore",
+                                 "metacore", "songdownloader", "coremods"),
+    }
+    text = "".join(f'\t\t\t\t{key} = "{value}";\n' for key, value in rows.items())
+    # The song search reads the Apple Music history (KleptonAppleMusic.swift); visionOS asks with this text.
+    text += ('\t\t\t\tINFOPLIST_KEY_NSAppleMusicUsageDescription = "Beat Saber\'s song search lists the songs you '
+             'played recently in Apple Music and finds maps for them on BeatSaver. No song is played from Apple Music.";\n')
+    if release:
+        text += '\t\t\t\tENABLE_DEBUG_DYLIB = NO;\n'
+    return text
+SC2_SETTINGS = _sc2_settings()
+
 COMMON = f"""
-				CLANG_ENABLE_MODULES = YES;
+{SC2_SETTINGS}				CLANG_ENABLE_MODULES = YES;
 {ENTITLEMENTS_SETTING}				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = {APP_BUILD};
 				DEVELOPMENT_TEAM = {TEAM};
@@ -709,7 +790,7 @@ COMMON = f"""
 				// second target needed one. The failure is a link error naming
 				// VTDecompressionSession*, which reads as a missing SDK rather
 				// than as a build setting that was never updated.
-				OTHER_LDFLAGS = "-lz -lc++ -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface{" -framework Accelerate" if SURREAL_SDK else ""}";
+				OTHER_LDFLAGS = "-lz -lc++ -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface{" -framework Accelerate" if SURREAL_SDK else ""}{" -framework CoreText -framework CoreGraphics" if SC2 else ""}";
 				PRODUCT_BUNDLE_IDENTIFIER = {BUNDLE_ID};
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = xros;
@@ -735,6 +816,7 @@ PBX = f"""// !$*UTF8*$!
 	objects = {{
 
 /* Begin PBXBuildFile section */
+{sc2_buildfile}
 {swift_buildfiles}
 		{B_C} /* kl_app.c in Sources */ = {{isa = PBXBuildFile; fileRef = {F_C}; }};
 		{B_ASSETS} /* Assets.xcassets in Resources */ = {{isa = PBXBuildFile; fileRef = {F_ASSETS}; }};
@@ -743,6 +825,7 @@ PBX = f"""// !$*UTF8*$!
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+{sc2_filereference}
 		{PRODUCT} /* {NAME}.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = {NAME}.app; sourceTree = BUILT_PRODUCTS_DIR; }};
 {swift_filerefs}
 		{F_C} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = kl_app.c; sourceTree = "<group>"; }};
@@ -786,6 +869,7 @@ PBX = f"""// !$*UTF8*$!
 				{G_FW},
 				{G_PROD},
 				{F_ASSETS},
+                {sc2_group}
 			);
 			sourceTree = "<group>";
 		}};
@@ -870,6 +954,7 @@ PBX = f"""// !$*UTF8*$!
 			buildActionMask = 2147483647;
 			files = (
 				{B_ASSETS},
+                {sc2_resource}
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		}};
