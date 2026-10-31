@@ -29,6 +29,7 @@
 
 #include "kl_avdec.h"
 #include "kl_env.h"
+#include "kl_audio.h"
 
 struct kl_avdec {
     char        path[1024];          // the file actually opened (see slice_out)
@@ -49,6 +50,19 @@ struct kl_avdec {
 
     unsigned char *frame;            // tightly packed BGRA, width*height*4
     size_t         frame_bytes;
+
+    int            has_audio;
+    int            audio_rate;
+    int            audio_channels;
+    int            audio_enabled;
+    float          volume;
+
+    pthread_t       athread;
+    pthread_mutex_t amu;
+    pthread_cond_t  acv;
+    int             audio_running;
+    int             audio_playing;
+    long long       audio_seek_ms;
 };
 
 // ---------------------------------------------------------------------------
@@ -306,6 +320,138 @@ static void *decode_thread(void *arg) {
     return NULL;
 }
 
+// KL_AVDEC_AUDIO: play a movie's sound track. Only for Bulletstorm VR: without
+// KL_AUDIO_MIX_SOURCES the sink has one owner, so in any other guest this second
+// source would be arbitrated against the game's own sound, and pausing the movie
+// could pause the device.
+static int avdec_sound(void) {
+    extern const char *kl_driver_target_name(void);
+    const char *t = kl_driver_target_name();
+    return kl_env_on("KL_AVDEC_AUDIO", t && strcmp(t, "x6565887093433499") == 0);
+}
+
+static void *audio_decode_thread(void *arg) {
+    kl_avdec *d = arg;
+    @autoreleasepool {
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:d->path]];
+        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+        AVAssetTrack *track = first_track_of(asset, AVMediaTypeAudio);
+        if (!track) return NULL;
+
+        kl_audio_open_src(d, "cutscene", (unsigned)d->audio_rate, (unsigned)d->audio_channels, 16);
+        // kl_avdec_play can come before the source exists, and then found nothing to start.
+        pthread_mutex_lock(&d->amu);
+        int already = d->audio_playing;
+        pthread_mutex_unlock(&d->amu);
+        if (already) kl_audio_play_src(d);
+
+        CMTime start = kCMTimeZero;
+        AVAssetReader *reader = nil;
+        AVAssetReaderTrackOutput *out = nil;
+
+        for (;;) {
+            pthread_mutex_lock(&d->amu);
+            while (d->audio_running && !d->audio_playing && d->audio_seek_ms < 0)
+                pthread_cond_wait(&d->acv, &d->amu);
+            int run = d->audio_running;
+            long long seek = d->audio_seek_ms;
+            d->audio_seek_ms = -1;
+            pthread_mutex_unlock(&d->amu);
+            if (!run) break;
+
+            if (seek >= 0) {
+                start = CMTimeMake(seek, 1000);
+                reader = nil; out = nil;
+                kl_audio_flush_src(d);
+            }
+
+            if (!reader) {
+                NSError *err = nil;
+                reader = [AVAssetReader assetReaderWithAsset:asset error:&err];
+                if (!reader) break;
+                NSDictionary *settings = @{
+                    AVFormatIDKey: @(kAudioFormatLinearPCM),
+                    AVLinearPCMBitDepthKey: @16,
+                    AVLinearPCMIsFloatKey: @NO,
+                    AVLinearPCMIsBigEndianKey: @NO,
+                    AVLinearPCMIsNonInterleaved: @NO,
+                };
+                out = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:settings];
+                out.alwaysCopiesSampleData = NO;
+                if (![reader canAddOutput:out]) break;
+                [reader addOutput:out];
+                if (CMTIME_IS_VALID(start) && CMTimeGetSeconds(start) > 0)
+                    reader.timeRange = CMTimeRangeMake(start, kCMTimePositiveInfinity);
+                if (![reader startReading]) break;
+            }
+
+            // One sample at a time: a long cutscene must not pile up what AVFoundation autoreleases.
+            @autoreleasepool {
+                CMSampleBufferRef sb = [out copyNextSampleBuffer];
+                if (!sb) {
+                    if (d->looping) {
+                        start = kCMTimeZero; reader = nil; out = nil;
+                        continue;
+                    }
+                    pthread_mutex_lock(&d->amu);
+                    d->audio_playing = 0;
+                    pthread_mutex_unlock(&d->amu);
+                    continue;
+                }
+
+                CMBlockBufferRef bb = CMSampleBufferGetDataBuffer(sb);
+                if (bb) {
+                    size_t len = CMBlockBufferGetDataLength(bb);
+                    if (len > 0) {
+                        void *buf = malloc(len);
+                        if (buf) {
+                            if (CMBlockBufferCopyDataBytes(bb, 0, len, buf) == noErr) {
+                                pthread_mutex_lock(&d->mu);
+                                int enabled = d->audio_enabled;
+                                float vol = d->volume;
+                                pthread_mutex_unlock(&d->mu);
+
+                                if (!enabled || vol <= 0.001f) {
+                                    int16_t zero[1024] = {0};
+                                    size_t remain = len;
+                                    while (remain > 0) {
+                                        size_t chunk = remain > sizeof(zero) ? sizeof(zero) : remain;
+                                        kl_audio_write_src(d, zero, chunk);
+                                        remain -= chunk;
+                                    }
+                                } else if (fabsf(vol - 1.0f) > 0.01f) {
+                                    int16_t tmp[1024];
+                                    int16_t *src = (int16_t *)buf;
+                                    size_t samples = len / 2;
+                                    size_t off = 0;
+                                    while (off < samples) {
+                                        size_t chunk = (samples - off) > 1024 ? 1024 : (samples - off);
+                                        for (size_t i = 0; i < chunk; i++) {
+                                            float s = (float)src[off + i] * vol;
+                                            if (s > 32767.0f) s = 32767.0f;
+                                            else if (s < -32768.0f) s = -32768.0f;
+                                            tmp[i] = (int16_t)lrintf(s);
+                                        }
+                                        kl_audio_write_src(d, tmp, chunk * 2);
+                                        off += chunk;
+                                    }
+                                } else {
+                                    kl_audio_write_src(d, buf, len);
+                                }
+                            }
+                            free(buf);
+                        }
+                    }
+                }
+                CFRelease(sb);
+            }
+        }
+
+        kl_audio_close_src(d);
+    }
+    return NULL;
+}
+
 kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
     if (!path || !*path) return NULL;
     char real[1024];
@@ -317,6 +463,7 @@ kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
 
     __block int w = 0, h = 0;
     __block long long dur = 0;
+    __block int has_aud = 0, aud_rate = 0, aud_ch = 0;
     @autoreleasepool {
         NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:real]];
         AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
@@ -331,6 +478,17 @@ kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
         CGSize sz = t.naturalSize;
         w = (int)sz.width; h = (int)sz.height;
         dur = (long long)(CMTimeGetSeconds(asset.duration) * 1000.0);
+
+        AVAssetTrack *at = avdec_sound() ? first_track_of(asset, AVMediaTypeAudio) : nil;
+        if (at) {
+            has_aud = 1;
+            CMAudioFormatDescriptionRef afmt = at
+                ? (__bridge CMAudioFormatDescriptionRef)at.formatDescriptions.firstObject : NULL;
+            const AudioStreamBasicDescription *asbd =
+                afmt ? CMAudioFormatDescriptionGetStreamBasicDescription(afmt) : NULL;
+            aud_rate = asbd && asbd->mSampleRate > 0 ? (int)(asbd->mSampleRate + 0.5) : 48000;
+            aud_ch = asbd && asbd->mChannelsPerFrame > 0 ? (int)asbd->mChannelsPerFrame : 2;
+        }
     }
     if (w <= 0 || h <= 0) return NULL;
 
@@ -338,16 +496,46 @@ kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
     if (!d) return NULL;
     snprintf(d->path, sizeof d->path, "%s", real);
     d->width = w; d->height = h; d->duration_ms = dur;
+    d->has_audio = has_aud;
+    d->audio_rate = aud_rate;
+    d->audio_channels = aud_ch;
+    d->audio_enabled = 1;
+    d->volume = 1.0f;
     d->seek_ms = -1;
     d->running = 1;
     pthread_mutex_init(&d->mu, NULL);
     pthread_mutex_init(&d->fmu, NULL);
     pthread_cond_init(&d->cv, NULL);
+
+    if (has_aud) {
+        d->audio_running = 1;
+        d->audio_seek_ms = -1;
+        pthread_mutex_init(&d->amu, NULL);
+        pthread_cond_init(&d->acv, NULL);
+        if (pthread_create(&d->athread, NULL, audio_decode_thread, d) != 0) {
+            d->has_audio = 0;
+            pthread_mutex_destroy(&d->amu);
+            pthread_cond_destroy(&d->acv);
+        } else {
+            fprintf(stderr, "  [avdec] %s: sound %d Hz, %d ch\n", d->path, aud_rate, aud_ch);
+        }
+    }
+
     if (pthread_create(&d->thread, NULL, decode_thread, d) != 0) {
+        if (d->has_audio) {
+            pthread_mutex_lock(&d->amu);
+            d->audio_running = 0;
+            pthread_cond_broadcast(&d->acv);
+            pthread_mutex_unlock(&d->amu);
+            pthread_join(d->athread, NULL);
+            pthread_mutex_destroy(&d->amu);
+            pthread_cond_destroy(&d->acv);
+        }
         free(d);
         return NULL;
     }
-    fprintf(stderr, "  [avdec] %s: %dx%d, %lld ms\n", d->path, w, h, dur);
+    fprintf(stderr, "  [avdec] %s: %dx%d, %lld ms%s\n", d->path, w, h, dur,
+            has_aud ? ", with sound" : "");
     return d;
 }
 
@@ -359,6 +547,18 @@ void kl_avdec_close(kl_avdec *d) {
     pthread_cond_broadcast(&d->cv);
     pthread_mutex_unlock(&d->mu);
     pthread_join(d->thread, NULL);
+
+    if (d->has_audio) {
+        pthread_mutex_lock(&d->amu);
+        d->audio_running = 0;
+        d->audio_playing = 0;
+        pthread_cond_broadcast(&d->acv);
+        pthread_mutex_unlock(&d->amu);
+        pthread_join(d->athread, NULL);
+        pthread_mutex_destroy(&d->amu);
+        pthread_cond_destroy(&d->acv);
+    }
+
     free(d->frame);
     pthread_mutex_destroy(&d->mu);
     pthread_mutex_destroy(&d->fmu);
@@ -377,6 +577,15 @@ void kl_avdec_play(kl_avdec *d, int on) {
     if (on) d->complete = 0;
     pthread_cond_broadcast(&d->cv);
     pthread_mutex_unlock(&d->mu);
+
+    if (d->has_audio) {
+        pthread_mutex_lock(&d->amu);
+        d->audio_playing = on != 0;
+        pthread_cond_broadcast(&d->acv);
+        pthread_mutex_unlock(&d->amu);
+        if (on) kl_audio_play_src(d);
+        else    kl_audio_pause_src(d);
+    }
 }
 
 void kl_avdec_seek(kl_avdec *d, long long ms) {
@@ -385,9 +594,35 @@ void kl_avdec_seek(kl_avdec *d, long long ms) {
     d->seek_ms = ms < 0 ? 0 : ms;
     pthread_cond_broadcast(&d->cv);
     pthread_mutex_unlock(&d->mu);
+
+    if (d->has_audio) {
+        pthread_mutex_lock(&d->amu);
+        d->audio_seek_ms = ms < 0 ? 0 : ms;
+        pthread_cond_broadcast(&d->acv);
+        pthread_mutex_unlock(&d->amu);
+        kl_audio_flush_src(d);
+    }
 }
 
 void kl_avdec_set_looping(kl_avdec *d, int on) { if (d) d->looping = on != 0; }
+
+void kl_avdec_set_volume(kl_avdec *d, float v) {
+    if (!d) return;
+    pthread_mutex_lock(&d->mu);
+    d->volume = v;
+    pthread_mutex_unlock(&d->mu);
+}
+
+void kl_avdec_set_audio_enabled(kl_avdec *d, int on) {
+    if (!d) return;
+    pthread_mutex_lock(&d->mu);
+    d->audio_enabled = on != 0;
+    pthread_mutex_unlock(&d->mu);
+}
+
+int kl_avdec_has_audio(kl_avdec *d)      { return d ? d->has_audio : 0; }
+int kl_avdec_audio_rate(kl_avdec *d)     { return d ? d->audio_rate : 0; }
+int kl_avdec_audio_channels(kl_avdec *d) { return d ? d->audio_channels : 0; }
 
 long long kl_avdec_position_ms(kl_avdec *d) {
     if (!d) return 0;

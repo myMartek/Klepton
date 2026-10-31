@@ -2782,6 +2782,10 @@ The composite/timewarp pass — one file, compiled by both compositors
   environment variable wins, then the saved settings, then these defaults.
 
 
+- `KL_AVDEC_AUDIO=0|1` — (`runtime/media/kl_avdec.m`) play the sound track of a
+  movie through UE4's MediaPlayer14. Default 1 for `x6565887093433499` (Bulletstorm
+  VR, which also has `KL_AUDIO_MIX_SOURCES`), else 0, and then the guest is told
+  the movie has no audio track.
 - `KL_HAND_PINCH=0` — (`KleptonControllers.swift`, `klovrp_hands_buttons`) a hand's
   pinch or tap presses nothing: no trigger, and no A/X in OVRPlugin hands mode. The
   hands still track and aim. Set from the game's Settings › Your hands, "Pinch pulls

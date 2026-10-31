@@ -10242,7 +10242,9 @@ static int klovrp_spacewarp_shape_ok(const void *motion_depth, const void *extra
 void kl_ovrp_eye_desc_size(float texture_scale, int *out_w, int *out_h) {
     int w = 0, h = 0;
     kl_ovrp_eye_texture_size(&w, &h);
-    if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
+    const char *t = kl_driver_target_name();
+    if (t && strcmp(t, "x6565887093433499") == 0) texture_scale = 1.0f;
+    else if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
     w = (int)((float)w * texture_scale);
     h = (int)((float)h * texture_scale);
     if (w < 1) w = 1;
@@ -10262,9 +10264,8 @@ void kl_ovrp_eye_desc_size(float texture_scale, int *out_w, int *out_h) {
         // Not cached as a whole: the choice can arrive after the first call in a host run.
         static int env = -2;
         if (env == -2) env = getenv("KL_OVRP_EYE_DESC_CAP") ? kl_env_on("KL_OVRP_EYE_DESC_CAP", 0) : -1;
-        const char *t = kl_driver_target_name();
         int on = env >= 0 ? env
-               : kl_driver_target_is_moss() || (t && strcmp(t, "x2285803881494677") == 0) || g_eye_max_choice > 0;
+               : kl_driver_target_is_moss() || (t && (strcmp(t, "x2285803881494677") == 0 || strcmp(t, "x6565887093433499") == 0)) || g_eye_max_choice > 0;
         // No display has pushed a size in a host run, so no cap was worked out: the plain default there.
         int cap = g_eye_cap >= 0 ? g_eye_cap : kl_env_int("KL_OVRP_EYE_MAX", 3072);
         // ...times the render scale, so "Resolution" still lowers the picture: held to the plain cap, a
