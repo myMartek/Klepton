@@ -1119,6 +1119,16 @@ build/t_statscard: tests/t_statscard.swift tests/t_statscard.h visionos/Sources/
 statscard: build/t_statscard
 	./build/t_statscard
 
+# Half-Life: Alyx's loading screen, from the game's own models (KleptonHologram.swift), on the Mac's GPU.
+# Needs T_ALYX_HLVR, the game's hlvr folder; without it the test says so and passes.
+build/t_hologram: tests/t_hologram.swift visionos/Sources/KleptonHologram.swift
+	@mkdir -p build
+	swiftc -O -o $@ visionos/Sources/KleptonHologram.swift tests/t_hologram.swift
+
+.PHONY: hologram
+hologram: build/t_hologram
+	./build/t_hologram
+
 # "Max resolution per eye" in the start window (KleptonEyeMax.swift): the
 # options, the stored choice per game, and the old Test switch taken over once.
 build/t_maxeye_swift: tests/t_maxeye.swift visionos/Sources/KleptonEyeMax.swift
@@ -1184,7 +1194,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_futex build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands
+check: build/t_futex build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1283,6 +1293,7 @@ check: build/t_futex build/t_opus build/t_variadic build/t_load build/t_il2cpp b
 	@./build/t_mfxalpha > build/mfxalpha.log 2>&1 || { cat build/mfxalpha.log; exit 1; }
 	@head -1 build/mfxalpha.log && tail -1 build/mfxalpha.log
 	@./build/t_statscard > build/statscard.log 2>&1 || { cat build/statscard.log; exit 1; }
+	@./build/t_hologram > build/hologram.log 2>&1 || { cat build/hologram.log; exit 1; }
 	@head -1 build/statscard.log && tail -1 build/statscard.log
 	@./build/t_maxeye_swift > build/maxeye-swift.log 2>&1 || { cat build/maxeye-swift.log; exit 1; }
 	@head -1 build/maxeye-swift.log && tail -1 build/maxeye-swift.log
@@ -1321,7 +1332,14 @@ check: build/t_futex build/t_opus build/t_variadic build/t_load build/t_il2cpp b
 	@if [ -x "$(NDK_CC)" ]; then echo "=== guest differential ===" && \
 	   $(MAKE) -s guest | grep -E 'x18 sites|identical to the host|lost '; \
 	 else echo "=== guest differential: SKIPPED (set ANDROID_NDK_HOME) ==="; fi
-	@echo "=== il2cpp runtime ===" && ./build/t_il2cpp $(LIBS)/libil2cpp.so $(TARGET)/assets/bin/Data/Managed > build/il2cpp.log && tail -4 build/il2cpp.log
+# libil2cpp.so exists only on Unity IL2CPP titles. A UE4, SDL or native guest
+# has nothing to point t_il2cpp at, and failing here stopped every gate after
+# it. Skip loudly, as the opus gate does: a missing library is a property of
+# the guest, not a regression.
+	@echo "=== il2cpp runtime ===" && if [ -f $(LIBS)/libil2cpp.so ]; then \
+	  ./build/t_il2cpp $(LIBS)/libil2cpp.so $(TARGET)/assets/bin/Data/Managed > build/il2cpp.log && tail -4 build/il2cpp.log; \
+	else echo "  SKIPPED: $(LIBS) has no libil2cpp.so (not a Unity IL2CPP title)."; \
+	     echo "  The guest-entry gate below still runs its own entry points."; fi
 	@echo "=== guest entry (JNI_OnLoad, initJni) ===" && ./build/m_boot $(LIBS) > build/boot.log 2>/dev/null && \
 	  grep -E 'guard verified|DLC enumeration|JNI_OnLoad returned|registered com|load returned|natives registered:|ids requested:|EXIT CRITERION' build/boot.log
 

@@ -842,7 +842,13 @@ every time they fire, with the address and the instruction each replaces.
 
 - `KL_GUEST_PATCH=0` — apply none of them. The A/B for every row: with it VRChat
   stops on its "Under Construction" screen exactly as it did before.
-- `KL_GUEST_PATCH_OFF=<name>[,<name>]` — turn off one by name. The names are
+- `KL_GUEST_PATCH_OFF=<name>[,<name>]` — turn off one by name.
+  `unity-texunit-mask` is found in any libunity from 2018.4 to 2021.3 rather
+  than measured: it takes the texture unit `& 31` at the bind, so samplers above
+  31 stop being refused ("Invalid texture unit!", black surfaces, tofu text), and
+  `glUniform1i` masks sampler uniforms to match, only when the loaded image
+  carries the patch. On a headset klepton-ld writes it at the build, so the
+  variable has to be set there. The measured names are
   `vrchat-under-construction`, `vrchat-min-client-version`, `vrchat-multipass`
   and `vrchat-fbo-context-guard`; `fluid-keyboard-warmup` (Fluid,
   `x6946182742093178`) lets its startup keyboard warmup complete without the
@@ -1136,9 +1142,10 @@ the run as an unimplemented JNI call.
   `IsHmdBatteryCharging()`/`GetHmdBatteryLevel()` and publishes them to the host
   as device properties, which the Steam client shows beside the headset. Nothing
   in the streaming path branches on them, so a wrong answer costs a wrong number
-  on someone's desktop. They are knobs because neither is measured yet — on
-  device the real values are available and wiring them is the honest fix; a
-  fixed answer at least does not fluctuate in the meantime.
+  on someone's desktop. The visionOS frontend publishes UIDevice's real level and
+  charging state, and each Sense controller's GCController battery; these knobs
+  override those readings for diagnostics. A host run, which has no device
+  battery, keeps the 95% / not-charging fallback.
 
 ## Video decode (`runtime/media/kl_vtdec.c`, `runtime/media/kl_mediandk.c`)
 
@@ -2824,6 +2831,9 @@ The composite/timewarp pass — one file, compiled by both compositors
   `88:0,14,c;91:0,14,c;94:0,14,c;98:25,24;101:25,24,c;106:-19,18;108:-19,18,c;112:-16,10;114:-16,10,c;118:-8,10;120:-8,10,c;124:0,0`
   (play options OK, NEW GAME, slot 3, NEXT, START GAME) — once its first-run
   "Initial options" and calibration screens are behind it (OK at pitch 10).
+- `KL_HOLOGRAM=0` — (`KleptonCompositor.swift`) Half-Life: Alyx's loading screen as the plain card
+  instead of the amber map rebuilt from the game's files (`KleptonHologram.swift`, `make hologram`).
+  `KL_LOADING_CARD=0` turns off both.
 - `KL_STATS_CARD=1` with `--view` — the metrics panel in the window, drawn by
   KleptonMetrics.swift from `build/libklvm_panel.dylib` (`make viewer-panel`;
   `KL_VIEW_PANEL_LIB` names another path), composited with the headset's depth:
