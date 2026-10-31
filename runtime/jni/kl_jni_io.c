@@ -189,6 +189,31 @@ static int klj_zip_throws(void) {
     return v;
 }
 
+// Red Matter's com.VerticalRobot.RedMatter.VRFL.vrFL(prefix): open the app's
+// own APK (ApplicationInfo.sourceDir) as a zip and return the full name of
+// every entry that starts with `prefix`, in central-directory order — read out
+// of its dex, which is the whole method. UE4 uses it to find files it ships in
+// the APK; a null here aborted the title at boot. An APK we cannot read answers
+// an empty array, as the Java version's catch-and-continue does.
+static klj_val klj_VRFL_vrFL(void *env, void *clazz, const klj_val *a, int n) {
+    (void)env; (void)clazz;
+    const char *prefix = n > 0 ? klj_str(a[0].l) : NULL;
+    if (!prefix) prefix = "";
+    klj_zip z = {0};
+    unsigned hits = 0;
+    if (klj_zip_open(&z, kl_jni_apk_path()) == 0)
+        for (unsigned i = 0; i < z.n; i++)
+            if (strncmp(z.e[i].name, prefix, strlen(prefix)) == 0) hits++;
+    void *arr = klj_new_array('L', "java/lang/String", (int)hits);
+    for (unsigned i = 0, k = 0; i < z.n && k < hits; i++)
+        if (strncmp(z.e[i].name, prefix, strlen(prefix)) == 0)
+            ((void **)klj_arr(arr)->data)[k++] = kl_jni_new_string(z.e[i].name);
+    KLJ_LOG("VRFL.vrFL(\"%s\") -> %u APK entries", prefix, hits);
+    if (z.f) fclose(z.f);
+    free(z.e);
+    return (klj_val){.l = arr};
+}
+
 static klj_val klj_ZipFile_init(void *env, void *clazz, const klj_val *a, int n) {
     (void)env; (void)clazz;
     const char *path = n > 0 ? klj_str(a[0].l) : NULL;
@@ -753,6 +778,7 @@ const klj_binding klj_bind_io[] = {
     {"java/nio/IntBuffer","put","(II)Ljava/nio/IntBuffer;",intbuffer_put},
     {"java/nio/IntBuffer","rewind","()Ljava/nio/Buffer;",intbuffer_rewind},
 
+    {"com/VerticalRobot/RedMatter/VRFL", "vrFL", "(Ljava/lang/String;)[Ljava/lang/String;", klj_VRFL_vrFL},
     {"com/renderheads/AVPro/Video/Manager", "SHA256", "([B)[B", klj_AVPro_SHA256},
     {"com/renderheads/AVPro/Video/Manager", "KeyDerivationPBKDF",
      "(Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;ILjava/nio/ByteBuffer;)I", klj_AVPro_KeyDerivationPBKDF},

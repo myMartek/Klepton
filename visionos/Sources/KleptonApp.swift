@@ -249,6 +249,79 @@ enum Lifecycle {
     }
 }
 
+/// Publishes the Vision Pro's real battery state through the one battery seam
+/// used by both Android BatteryManager and OVRPlugin.  Steam Link reads that
+/// telemetry and forwards it to SteamVR as the HMD battery percentage.
+///
+/// UIDevice monitoring is public UIKit API and needs no entitlement.  It is
+/// disabled by default, so enable it once for the process and keep the two
+/// notification tokens alive for the app's lifetime.  Explicit KL_BATTERY_*
+/// values remain useful for host tests and one-off diagnostics and therefore
+/// win independently for level and charging state.
+@MainActor
+private final class KleptonBattery {
+    static let shared = KleptonBattery()
+
+    private var started = false
+    private var observers: [NSObjectProtocol] = []
+    private let overrideLevel = ProcessInfo.processInfo.environment["KL_BATTERY_LEVEL"] != nil
+    private let overrideCharging = ProcessInfo.processInfo.environment["KL_BATTERY_CHARGING"] != nil
+
+    func start() {
+        guard !started else { return }
+        started = true
+
+        let device = UIDevice.current
+        device.isBatteryMonitoringEnabled = true
+        publish()
+
+        let center = NotificationCenter.default
+        for name in [UIDevice.batteryLevelDidChangeNotification,
+                     UIDevice.batteryStateDidChangeNotification] {
+            observers.append(center.addObserver(forName: name, object: device, queue: .main) {
+                _ in Task { @MainActor in KleptonBattery.shared.publish() }
+            })
+        }
+    }
+
+    private func publish() {
+        let device = UIDevice.current
+        let rawLevel = device.batteryLevel
+        var levelDescription = "override"
+        var stateDescription = "override"
+
+        if !overrideLevel {
+            if rawLevel >= 0 {
+                let percent = Int((rawLevel * 100).rounded())
+                kl_ovrp_set_battery_level(Int32(percent))
+                levelDescription = "\(percent)%"
+            } else {
+                levelDescription = "unknown (keeping fallback)"
+            }
+        }
+
+        if !overrideCharging {
+            switch device.batteryState {
+            case .charging:
+                kl_ovrp_set_battery_charging(1)
+                stateDescription = "charging"
+            case .full:
+                kl_ovrp_set_battery_charging(1)
+                stateDescription = "full"
+            case .unplugged:
+                kl_ovrp_set_battery_charging(0)
+                stateDescription = "unplugged"
+            case .unknown:
+                stateDescription = "unknown (keeping fallback)"
+            @unknown default:
+                stateDescription = "unknown (keeping fallback)"
+            }
+        }
+
+        NSLog("[battery] HMD level \(levelDescription), state \(stateDescription)")
+    }
+}
+
 @main
 struct KleptonApp: App {
     @Environment(\.scenePhase) private var scenePhase
@@ -1524,6 +1597,7 @@ struct BootView: View {
         // The test switches first: none of these overwrites a value that is set, so a switch under
         // Advanced › Test wins over the picture setting it retunes (the foveation profile, 2026-10-13).
         KleptonTestSwitches.applyEnvironment()
+        KleptonBattery.shared.start()
         // The selected app configuration enables the original loader by default.
         // An explicit KL_SCOTLAND2=0 still permits a baseline comparison.
         if Bundle.main.object(forInfoDictionaryKey: "KLScotland2Test") as? String == "1" {

@@ -5112,15 +5112,56 @@ final class KleptonCompositor {
 
     // The loading screen of a guest that says what it should show instead of
     // drawing it — Half-Life: Alyx (runtime/linux/kl_lx_interstitial.c). The
-    // game's own is a web page of dioramas that SteamVR displays; this is the
-    // same words on a card: what is loading, a tip, and the line that says the
-    // level is ready and the trigger starts it.
+    // game's own is a web page that SteamVR displays, rebuilt from the game's
+    // files in KleptonHologram.swift; this is the same words on a card, for as
+    // long as that is not read or where it cannot be: what is loading, a tip,
+    // and the line that says the level is ready and the trigger starts it.
     private var cardTexture: MTLTexture?
     private var cardGeneration: UInt32 = .max
     private var cardWorldFromQuad: simd_float4x4?
     private static let cardSize = SIMD2<Float>(1.8, 1.0)     // metres
     private static let cardPixels = (w: 1800, h: 1000)
     private static let cardEnabled = klEnvOn("KL_LOADING_CARD", default: true)
+    private static let hologramEnabled = klEnvOn("KL_HOLOGRAM", default: true)
+    private var hologram: KleptonHologram?
+
+    private func encodeHologram(_ enc: MTLRenderCommandEncoder, _ st: inout kl_interstitial,
+                                viewIndices: [Int], drawable: KLDrawable,
+                                originFromHead: simd_float4x4) -> Bool {
+        guard Self.hologramEnabled, klIsAlyx() else { return false }
+        if hologram == nil {
+            guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            else { return false }
+            let made = KleptonHologram(device: device, root: docs.appendingPathComponent("lx/game/hlvr"))
+            hologram = made
+            DispatchQueue.global(qos: .utility).async { made.load() }
+        }
+        guard let hologram, hologram.ready else { return false }
+        let now = CACurrentMediaTime()
+        guard hologram.update(phase: Int(st.phase), map: Self.cardString(&st.map),
+                              message: Self.cardString(&st.message),
+                              loading: Self.cardString(&st.loading),
+                              chapter: Self.cardString(&st.chapter),
+                              now: now, originFromHead: originFromHead)
+        else { return false }
+        // The black behind it, with depth, in every kind of space: outside a mixed one nothing else
+        // draws it, and the system drops the tiles of a drawable that hold no depth. Those were dark
+        // squares in the map for as long as there was no eye picture (2026-10-30). Over an eye
+        // picture, which is here again for the map's fade-out, it would hide the game.
+        if kl_ovrp_eye_layer_live() == 0, let pipe = overlayPipeline {
+            if let depthState { enc.setDepthStencilState(depthState) }
+            encodeBlackBackdrop(enc, pipe: pipe, viewIndices: viewIndices, drawable: drawable,
+                                originFromHead: originFromHead)
+        }
+        let views = viewIndices.map { vi -> KleptonHologram.View in
+            let worldFromView = originFromHead * Self.headFromView(drawable.views[vi].transform,
+                                                                   midpoint: eyeMidpointInDevice)
+            return KleptonHologram.View(clipFromWorld: drawable.computeProjection(viewIndex: vi) * worldFromView.inverse,
+                                        eye: SIMD3<Float>(worldFromView.columns.3.x, worldFromView.columns.3.y,
+                                                          worldFromView.columns.3.z))
+        }
+        return hologram.encode(enc, color: pipelineFormat, amplification: amplification, views: views, now: now)
+    }
 
     private func encodeLoadingCard(_ enc: MTLRenderCommandEncoder,
                                    viewIndices: [Int],
@@ -5129,6 +5170,11 @@ final class KleptonCompositor {
         guard Self.cardEnabled, let pipe = overlayPipeline else { return 0 }
         var st = kl_interstitial()
         _ = kl_interstitial_get(&st)
+        if encodeHologram(enc, &st, viewIndices: viewIndices, drawable: drawable,
+                          originFromHead: originFromHead) {
+            cardWorldFromQuad = nil
+            return 1
+        }
         // Only while the guest shows no picture of its own: the card is what
         // there is to look at instead, not something to lay over a level. The
         // exception is the line that asks for the trigger: the game may draw

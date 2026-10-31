@@ -915,6 +915,12 @@ static int klovrp_headset_type(void) {
         // Roboquest VR's Meta Store build (x9269393463181825) is presented as a
         // Quest 3 at its owner's request (kl_jni.c has why), and this answer
         // agrees with the model it was given there.
+        // A Fisherman's Tale (UE4) is the same story told through the product
+        // name: AInnerspacePlayerController::DetectDevices (libUE4 0x5f1ea60)
+        // compares it with exactly "Oculus Quest" for Touch controllers, then
+        // "Oculus Go", and anything else falls to head-gaze input with no hands
+        // drawn. The name follows this answer (klovrp_product_name), so such a
+        // title runs with KL_OVRP_HEADSET=8 (or a target default like Liminal's).
         const char *tgt = kl_driver_target_name();
         int dflt = (tgt && strcmp(tgt, "liminalvr") == 0)
                      ? OVRP_HEADSET_OCULUS_QUEST
@@ -1343,11 +1349,19 @@ static uint64_t klovrp_GetPredictedDisplayTime(int node, double *out) {
 // "Oculus Quest" and "Oculus Headset2". "Oculus Quest 2" matched neither, the
 // game fell back to its default settings, and on device (2026-10-15) the ray
 // pointed straight down and the watch sat upside down above the hand.
+//
+// A title asked with KL_OVRP_HEADSET=8 to run as an original Quest gets that
+// Quest's name too: a guest that keys on the NAME (A Fisherman's Tale's
+// DetectDevices) would otherwise still see a headset it does not know. Only the
+// asked-for case: Liminal's built-in 8 keeps the name it has always had here.
 static const char *klovrp_product_name(void) {
     static const char *v;
     if (!v) {
         const char *t = kl_driver_target_name();
-        v = t && strcmp(t, "x4015163475201433") == 0 ? "Oculus Quest" : "Oculus Quest 2";
+        int quest1 = t && strcmp(t, "x4015163475201433") == 0;
+        if (kl_env_str("KL_OVRP_HEADSET", NULL) && klovrp_headset_type() == OVRP_HEADSET_OCULUS_QUEST)
+            quest1 = 1;
+        v = quest1 ? "Oculus Quest" : "Oculus Quest 2";
     }
     return v;
 }
@@ -1458,7 +1472,7 @@ float kl_ovrp_display_frequency(void) {
 // on device — a frontend pushing UIDevice's real reading. Sanity checks mirror
 // the display-frequency setter: a level outside 0..100 is a bad measurement,
 // and passing it on would make every consumer answer nonsense.
-static int g_battery_level = 95;       // Quest-2 fiction, like the display: 72 Hz
+static int g_battery_level = 95;       // host/unknown fallback; visionOS publishes UIDevice
 static int g_battery_charging;
 
 void kl_ovrp_set_battery_level(int level) {
@@ -1482,6 +1496,38 @@ int kl_ovrp_battery_charging(void) {
         if (e && *e) g_battery_charging = atoi(e) != 0;
     }
     return g_battery_charging;
+}
+
+// PSVR2 Sense controllers are two independent GCController devices, so retain
+// two independent readings. The render thread reads these while GameController
+// is polled by the frontend; atomics keep that seam valid if either callback is
+// ever moved off the render thread. Unknown is distinct from 0%: OpenXR has a
+// validity bit, while OVRPlugin's byte has no unknown representation and keeps
+// its historical 100% fallback in fill_controller_state below.
+static int g_controller_battery_level[2] = { -1, -1 };
+static int g_controller_battery_state[2] = {
+    KL_CONTROLLER_BATTERY_UNKNOWN, KL_CONTROLLER_BATTERY_UNKNOWN
+};
+
+void kl_ovrp_set_controller_battery(int hand, int level, int state) {
+    if (hand < 0 || hand > 1) return;
+    if (level < 0) level = -1;
+    else if (level > 100) level = 100;
+    if (state < KL_CONTROLLER_BATTERY_UNKNOWN ||
+        state > KL_CONTROLLER_BATTERY_FULL)
+        state = KL_CONTROLLER_BATTERY_UNKNOWN;
+    __atomic_store_n(&g_controller_battery_level[hand], level, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_controller_battery_state[hand], state, __ATOMIC_RELEASE);
+}
+
+int kl_ovrp_controller_battery_level(int hand) {
+    if (hand < 0 || hand > 1) return -1;
+    return __atomic_load_n(&g_controller_battery_level[hand], __ATOMIC_ACQUIRE);
+}
+
+int kl_ovrp_controller_battery_state(int hand) {
+    if (hand < 0 || hand > 1) return KL_CONTROLLER_BATTERY_UNKNOWN;
+    return __atomic_load_n(&g_controller_battery_state[hand], __ATOMIC_ACQUIRE);
 }
 
 // ---- predicted display time seam ----
@@ -6835,6 +6881,34 @@ static klovrp_vec3 klovrp_GetBoundaryDimensions(void) {
 #endif
 #define OVRP_CTRL_ACTIVE 0x80000000u
 
+// The frontend hands touches over in ovrpButton bit values ("this button is
+// touched"), which is what the OpenXR path reads. The OVRPlugin struct wants
+// ovrpTouch and ovrpNearTouch, which number things differently:
+//   ovrpTouch     A 0x1  B 0x2  RThumbstick 0x4  RIndexTrigger 0x10
+//                 X 0x100  Y 0x200  LThumbstick 0x400  LIndexTrigger 0x1000
+//   ovrpNearTouch LIndexTrigger 0x1  LThumbButtons 0x2
+//                 RIndexTrigger 0x4  RThumbButtons 0x8
+// The face buttons and stick clicks coincide; the triggers do not, and the
+// button word's stick DIRECTION bits land on the two trigger-touch bits. Passed
+// through raw, a trigger touch is invisible and pushing a stick reads as
+// touching a trigger. Unity's legacy joystick maps trigger TOUCH to buttons
+// 14 (L) / 15 (R), which is the select Air Brigade 2's menu reads.
+#define KLOVRP_TOUCH_FACE 0x00000707u   // A B RThumbstick X Y LThumbstick
+static uint32_t klovrp_touch_bits(uint32_t t) {
+    uint32_t r = t & KLOVRP_TOUCH_FACE;
+    if (t & 0x04000000u) r |= 0x10u;        // RIndexTrigger
+    if (t & 0x10000000u) r |= 0x1000u;      // LIndexTrigger
+    return r;
+}
+static uint32_t klovrp_neartouch_bits(uint32_t t) {
+    uint32_t r = 0;
+    if (t & 0x10000000u) r |= 0x1u;                     // LIndexTrigger
+    if (t & (0x100u | 0x200u | 0x400u)) r |= 0x2u;      // LThumbButtons
+    if (t & 0x04000000u) r |= 0x4u;                     // RIndexTrigger
+    if (t & (0x1u | 0x2u | 0x4u)) r |= 0x8u;            // RThumbButtons
+    return r;
+}
+
 // ovrpControllerState prefix, shared by all three versions (field order from
 // the guest's own metadata — OVRInput.ControllerState{,2,4}):
 //   +0x00 u32 ConnectedControllers   +0x10 f32 LIndexTrigger
@@ -6947,23 +7021,29 @@ static void fill_controller_state(int mask, void *out, int version) {
             (((uint32_t)mask & OVRP_CTRL_ACTIVE) ? OVRP_CTRL_HANDS : (uint32_t)mask);
     if (conn & OVRP_CTRL_LTOUCH) {
         w[1] |= in[0].buttons;                          // Buttons
-        w[2] |= in[0].touches;                          // Touches
-        w[3] |= in[0].neartouches;                      // NearTouches
+        w[2] |= klovrp_touch_bits(in[0].touches);       // Touches
+        w[3] |= klovrp_neartouch_bits(in[0].neartouches); // NearTouches
         f[4] = in[0].index_trigger;                     // LIndexTrigger
         f[6] = in[0].hand_trigger;                      // LHandTrigger
         f[8] = in[0].stick_x; f[9] = in[0].stick_y;
         if (version >= 2) { f[12] = in[0].stick_x; f[13] = in[0].stick_y; }
-        if (version >= 4) b[0x40] = 100;                // LBatteryPercentRemaining
+        if (version >= 4) {
+            int level = kl_ovrp_controller_battery_level(0);
+            b[0x40] = (uint8_t)(level >= 0 ? level : 100); // LBatteryPercentRemaining
+        }
     }
     if (conn & OVRP_CTRL_RTOUCH) {
         w[1] |= in[1].buttons;
-        w[2] |= in[1].touches;
-        w[3] |= in[1].neartouches;
+        w[2] |= klovrp_touch_bits(in[1].touches);
+        w[3] |= klovrp_neartouch_bits(in[1].neartouches);
         f[5] = in[1].index_trigger;                     // RIndexTrigger
         f[7] = in[1].hand_trigger;                      // RHandTrigger
         f[10] = in[1].stick_x; f[11] = in[1].stick_y;
         if (version >= 2) { f[14] = in[1].stick_x; f[15] = in[1].stick_y; }
-        if (version >= 4) b[0x41] = 100;                // RBatteryPercentRemaining
+        if (version >= 4) {
+            int level = kl_ovrp_controller_battery_level(1);
+            b[0x41] = (uint8_t)(level >= 0 ? level : 100); // RBatteryPercentRemaining
+        }
     }
     if (all_connected && version >= 4) {
         b[0x40] = 100;                                  // LBatteryPercentRemaining
