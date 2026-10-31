@@ -1095,6 +1095,13 @@ final class KleptonControllers {
     /// the trigger. For a game where fingers curled round the controller keep
     /// reading as pinches; the gamepad's own triggers still work.
     private static let gamepadKeepsPinch = klEnvOn("KL_GAMEPAD_PINCH", default: true)
+    /// KL_HAND_PINCH=0 — a hand's pinch/tap no longer pulls the trigger. On by
+    /// default; Settings › Your hands turns it off per game.
+    private static let handPinch: Bool = {
+        let on = klEnvOn("KL_HAND_PINCH", default: true)
+        if !on { NSLog("[cp] KL_HAND_PINCH=0 — pinch/tap does not press anything") }
+        return on
+    }()
 
     /// Which Touch face button each of the gamepad's four stands for.
     ///
@@ -2351,7 +2358,7 @@ final class KleptonControllers {
         let byDistance = Self.pinchSrc != .system
             && (pinchHeld[hand] ? (t > 0.30) : (t > 0.55))
         let bySystem = Self.pinchSrc != .distance && sysSeen && native.down
-        let pinchAllowed = padName == nil || Self.gamepadKeepsPinch
+        let pinchAllowed = Self.handPinch && (padName == nil || Self.gamepadKeepsPinch)
         st.indexTrigger = discretePinches[hand].update(
             value: measured, systemDown: bySystem,
             systemStarted: Self.pinchSrc != .distance && native.started,
@@ -2661,8 +2668,9 @@ final class KleptonControllers {
                     && (pinchHeld[hand] ? (t > 0.30) : (t > 0.55))
                 let bySystem = Self.pinchSrc != .distance && sysSeen && sysDown
                 // With a gamepad in use the pinch can be switched off (see
-                // gamepadKeepsPinch): the hand then only says where it is.
-                let pinchAllowed = padName == nil || Self.gamepadKeepsPinch
+                // gamepadKeepsPinch), and KL_HAND_PINCH=0 switches it off
+                // altogether: the hand then only says where it is.
+                let pinchAllowed = Self.handPinch && (padName == nil || Self.gamepadKeepsPinch)
                 let pressed = pinchAllowed && (byDistance || bySystem)
                 if bySystem { pinchFromSystem[hand] += 1 }
                 if byDistance { pinchFromDistance[hand] += 1 }

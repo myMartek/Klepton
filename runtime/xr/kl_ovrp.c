@@ -12122,6 +12122,9 @@ static void klovrp_fake_hands_tick(void) {
 // the left (OVRInput's hands map), so a guest's "press A" works with a pinch.
 static uint32_t klovrp_hands_buttons(void) {
     klovrp_fake_hands_tick();
+    // KL_HAND_PINCH=0 (Settings › Your hands) turns pinch-as-A/X off, as on the Swift side.
+    const char *hp = getenv("KL_HAND_PINCH");
+    if (hp && hp[0] == '0') return 0;
     pthread_mutex_lock(&g_hj_lock);
     uint32_t l = g_hj_ovr[0].tracked ? g_hj_ovr[0].pinch_bits : 0;
     uint32_t r = g_hj_ovr[1].tracked ? g_hj_ovr[1].pinch_bits : 0;

@@ -2726,6 +2726,10 @@ The composite/timewarp pass — one file, compiled by both compositors
   environment variable wins, then the saved settings, then these defaults.
 
 
+- `KL_HAND_PINCH=0` — (`KleptonControllers.swift`, `klovrp_hands_buttons`) a hand's
+  pinch or tap presses nothing: no trigger, and no A/X in OVRPlugin hands mode. The
+  hands still track and aim. Set from the game's Settings › Your hands, "Pinch pulls
+  the trigger" (default on); on the launch line it wins over that setting.
 - `KL_HAND_TUNE=1` — keep an installed game's start window open once the
   game is up, showing the hand-position sliders (`HandTuneView` in
   `KleptonTuning.swift`): the Sense controller's pitch and offset, applied to

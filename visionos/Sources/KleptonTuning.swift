@@ -684,6 +684,35 @@ enum KleptonGuestInfo {
     }
 }
 
+/// "Pinch pulls the trigger": whether a hand's pinch/tap reaches the game as the
+/// trigger (and A/X in hands mode). On unless turned off; each game is its own app,
+/// so the choice is per game. KL_HAND_PINCH on the launch line wins.
+enum KleptonHandPinch {
+    static let key = "klepton.input.handPinch"
+
+    /// Into the environment, before kl_app_configure and before
+    /// KleptonControllers first reads KL_HAND_PINCH.
+    static func applyEnvironment() {
+        let on = (UserDefaults.standard.object(forKey: key) as? Bool) ?? true
+        setenv("KL_HAND_PINCH", on ? "1" : "0", 0)
+        NSLog("[app] pinch pulls the trigger: \(on ? "on" : "off") (setting)")
+    }
+}
+
+/// The "Pinch pulls the trigger" switch, under Your hands.
+struct HandPinchView: View {
+    @AppStorage(KleptonHandPinch.key) private var on = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(klT("Pinch pulls the trigger", "Pinch zieht den Trigger"), isOn: $on)
+            Text(klT("On: pinching or tapping your fingers pulls the trigger (in games played with hands only, it presses A or X). Off: your hands only aim. Takes effect the next time the game starts.",
+                     "Ein: Pinch oder Tippen mit den Fingern zieht den Trigger (in Spielen nur mit Händen drückt es A oder X). Aus: Die Hände zielen nur. Wirkt beim nächsten Start des Spiels."))
+                .font(.callout).foregroundStyle(.secondary)
+        }
+    }
+}
+
 /// "Record what the game waits for": the runtime's account of blocked threads
 /// (KL_TRACE_CONDDUMP — kl_pthread_stuck_diag has what it writes), as a switch
 /// a player can turn on for a game that stops in a loading screen. Off unless
