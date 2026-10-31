@@ -1170,6 +1170,12 @@ def _generic_row(name):
 # DEFAULT of a setting and nothing about how it is built — so the row stays the
 # one read off its APK and only the field named here differs.
 STORE_DEFAULTS = {
+    # Cities: VR (Fast Travel Games, Unity, Vulkan). In-game video on: selecting
+    # the road menu opens tutorial and preview video clips. With video refused
+    # by default for Vulkan guests (kl_mediandk.c, klm_extractor_enabled),
+    # AndroidVideoMedia retries -10002 repeatedly, leaking interface proxies
+    # and crashing.
+    "x4046879905345967": {"video": True},
     # Assassin's Creed Nexus VR. In-game video on: its loading screens play a
     # clip through Unity's VideoPlayer, and with the Vulkan refusal
     # (kl_mediandk.c, klm_extractor_enabled) the game opened that clip again on

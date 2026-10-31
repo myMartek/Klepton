@@ -48,12 +48,19 @@ long long kl_avdec_duration_ms(kl_avdec *d);
 void      kl_avdec_play(kl_avdec *d, int on);
 void      kl_avdec_seek(kl_avdec *d, long long ms);
 void      kl_avdec_set_looping(kl_avdec *d, int on);
+void      kl_avdec_set_volume(kl_avdec *d, float volume);
+void      kl_avdec_set_audio_enabled(kl_avdec *d, int on);
 long long kl_avdec_position_ms(kl_avdec *d);
 int       kl_avdec_playing(kl_avdec *d);
 // True once the stream has run out and is not looping. Latched: a guest polls
 // this to decide the movie is over, and a flag that cleared itself would be a
 // movie that never ends.
 int       kl_avdec_complete(kl_avdec *d);
+
+// Sound track info. Zero / NULL when the container carries no audio track.
+int       kl_avdec_has_audio(kl_avdec *d);
+int       kl_avdec_audio_rate(kl_avdec *d);
+int       kl_avdec_audio_channels(kl_avdec *d);
 
 // The newest decoded frame as **BGRA8**, or NULL if none has been produced yet.
 //

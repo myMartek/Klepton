@@ -1517,6 +1517,10 @@ static void klj_media_open(klj_media *m, const char *what, long long off,
         KLJ_LOG("MediaPlayer14: could not open %s (offset %lld, %lld bytes) — "
                 "setDataSource answers false and the guest's own no-media path "
                 "runs", p, off, len);
+    else {
+        kl_avdec_set_audio_enabled(m->dec, m->audio_enabled);
+        kl_avdec_set_volume(m->dec, m->volume);
+    }
 }
 
 static klj_val klj_MP14_ctor(void *env, void *self, const klj_val *a, int n) {
@@ -1684,25 +1688,22 @@ static klj_val klj_MP14_setVideoEnabled(void *env, void *self, const klj_val *a,
     if (m) m->video_enabled = n > 0 && a[0].j != 0;
     return (klj_val){.j = 0};
 }
-// Recorded rather than applied: nothing here decodes the audio track yet, so
-// honouring the volume would be describing a mix that does not exist. Said
-// once, so a silent cutscene is a known gap rather than a mystery.
 static klj_val klj_MP14_setAudioEnabled(void *env, void *self, const klj_val *a, int n) {
     (void)env;
     klj_media *m = klj_media_of(self);
-    if (m) m->audio_enabled = n > 0 && a[0].j != 0;
-    static int said;
-    if (m && m->audio_enabled && !said) {
-        said = 1;
-        KLJ_LOG("MediaPlayer14: audio is enabled by the guest and this player "
-                "decodes VIDEO only — the cutscene will be silent");
+    if (m) {
+        m->audio_enabled = n > 0 && a[0].j != 0;
+        if (m->dec) kl_avdec_set_audio_enabled(m->dec, m->audio_enabled);
     }
     return (klj_val){.j = 0};
 }
 static klj_val klj_MP14_setAudioVolume(void *env, void *self, const klj_val *a, int n) {
     (void)env;
     klj_media *m = klj_media_of(self);
-    if (m && n > 0) memcpy(&m->volume, &a[0].j, sizeof m->volume);
+    if (m && n > 0) {
+        m->volume = (float)a[0].d;
+        if (m->dec) kl_avdec_set_volume(m->dec, m->volume);
+    }
     return (klj_val){.j = 0};
 }
 
@@ -1733,7 +1734,11 @@ static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
     // movies asked every tick piled up ~6 GB in seconds in the sanctuary
     // until the system ended the app (2026-10-29). Default 1 for `vampire`.
     static int new_only = -1;
-    if (new_only < 0) new_only = kl_env_on("KL_MP14_NEW_FRAMES_ONLY", 0);
+    if (new_only < 0) {
+        const char *t = kl_driver_target_name();
+        int def = (t && (strcmp(t, "vampire") == 0 || strcmp(t, "x6565887093433499") == 0));
+        new_only = kl_env_on("KL_MP14_NEW_FRAMES_ONLY", def);
+    }
     if (new_only && serial == m->buf_serial) return (klj_val){.l = NULL};
     if (w != m->last_w || h != m->last_h) {
         m->res_changed = 1;
@@ -1849,14 +1854,28 @@ static klj_val klj_MP14_updateVideoFrame(void *env, void *self, const klj_val *a
     return (klj_val){.l = NULL};
 }
 
-// Empty track lists. `needTrackInfo` is the ctor's third bool and UE4 only asks
-// when it is set; an empty array is "this player reports no selectable tracks",
-// which is true — nothing here exposes alternates — and is distinguishable from
-// the refusal an absent binding would be.
+// Track lists. `needTrackInfo` is the ctor's third bool and UE4 only asks
+// when it is set. Captions are not supported (empty array).
+#define KLJ_MP14_VTRACK "com/epicgames/ue4/MediaPlayer14$VideoTrackInfo"
+#define KLJ_MP14_ATRACK "com/epicgames/ue4/MediaPlayer14$AudioTrackInfo"
+typedef struct { int w, h; } klj_media_vtrack;
+typedef struct { int channels, sample_rate; } klj_media_atrack;
+
 static klj_val klj_MP14_tracks_audio(void *env, void *self, const klj_val *a, int n) {
-    (void)self; (void)a; (void)n;
-    return (klj_val){.l = klj_new_array('L',
-        "com/epicgames/ue4/MediaPlayer14$AudioTrackInfo", 0)};
+    (void)env; (void)a; (void)n;
+    klj_media *m = klj_media_of(self);
+    int have = m && m->dec && kl_avdec_has_audio(m->dec);
+    void *list = klj_new_array('L', KLJ_MP14_ATRACK, have ? 1 : 0);
+    klj_array *arr = klj_arr(list);
+    if (have && arr) {
+        klj_media_atrack *t = calloc(1, sizeof *t);
+        if (t) {
+            t->channels = kl_avdec_audio_channels(m->dec);
+            t->sample_rate = kl_avdec_audio_rate(m->dec);
+            ((void **)arr->data)[0] = klj_new_object_data(KLJ_MP14_ATRACK, t);
+        }
+    }
+    return (klj_val){.l = list};
 }
 static klj_val klj_MP14_tracks_caption(void *env, void *self, const klj_val *a, int n) {
     (void)self; (void)a; (void)n;
@@ -1877,24 +1896,36 @@ static klj_val klj_MP14_tracks_caption(void *env, void *self, const klj_val *a, 
 // Index, MimeType, DisplayName, Language, BitRate, Width, Height, FrameRate.
 // Width and Height are the decoder's; the frame rate is not something kl_avdec
 // reports, and 30 is what the engine itself assumes when it has no track info.
-#define KLJ_MP14_VTRACK "com/epicgames/ue4/MediaPlayer14$VideoTrackInfo"
-typedef struct { int w, h; } klj_media_vtrack;
-
 int klj_ue4_media_track_field(void *obj, const char *cls, const char *name,
                               const char *sig, klj_val *out) {
-    if (strcmp(cls, KLJ_MP14_VTRACK) != 0) return 0;
-    klj_object *o = klj_as_object(obj);
-    const klj_media_vtrack *t = (o && strcmp(o->cls, KLJ_MP14_VTRACK) == 0) ? o->data : NULL;
-    *out = (klj_val){0};
-    if (!t) return 1;
-    if      (strcmp(name, "Width") == 0)       out->j = (uint64_t)(uint32_t)t->w;
-    else if (strcmp(name, "Height") == 0)      out->j = (uint64_t)(uint32_t)t->h;
-    else if (strcmp(name, "FrameRate") == 0) { if (sig[0] == 'F') out->d = 30.0; else out->j = 30; }
-    else if (strcmp(name, "MimeType") == 0)    out->l = kl_jni_new_string("video/avc");
-    else if (strcmp(name, "DisplayName") == 0) out->l = kl_jni_new_string("Video Track 0 (Stream 0)");
-    else if (strcmp(name, "Language") == 0)    out->l = kl_jni_new_string("und");
-    // Index and BitRate: 0 — the first track, and a rate nobody measured.
-    return 1;
+    if (strcmp(cls, KLJ_MP14_VTRACK) == 0) {
+        klj_object *o = klj_as_object(obj);
+        const klj_media_vtrack *t = (o && strcmp(o->cls, KLJ_MP14_VTRACK) == 0) ? o->data : NULL;
+        *out = (klj_val){0};
+        if (!t) return 1;
+        if      (strcmp(name, "Width") == 0)       out->j = (uint64_t)(uint32_t)t->w;
+        else if (strcmp(name, "Height") == 0)      out->j = (uint64_t)(uint32_t)t->h;
+        else if (strcmp(name, "FrameRate") == 0) { if (sig[0] == 'F') out->d = 30.0; else out->j = 30; }
+        else if (strcmp(name, "MimeType") == 0)    out->l = kl_jni_new_string("video/avc");
+        else if (strcmp(name, "DisplayName") == 0) out->l = kl_jni_new_string("Video Track 0 (Stream 0)");
+        else if (strcmp(name, "Language") == 0)    out->l = kl_jni_new_string("und");
+        // Index and BitRate: 0 — the first track, and a rate nobody measured.
+        return 1;
+    }
+    if (strcmp(cls, KLJ_MP14_ATRACK) == 0) {
+        klj_object *o = klj_as_object(obj);
+        const klj_media_atrack *t = (o && strcmp(o->cls, KLJ_MP14_ATRACK) == 0) ? o->data : NULL;
+        *out = (klj_val){0};
+        if (!t) return 1;
+        if      (strcmp(name, "Channels") == 0)    out->j = (uint64_t)(uint32_t)t->channels;
+        else if (strcmp(name, "SampleRate") == 0)  out->j = (uint64_t)(uint32_t)t->sample_rate;
+        else if (strcmp(name, "MimeType") == 0)    out->l = kl_jni_new_string("audio/mp4a-latm");
+        else if (strcmp(name, "DisplayName") == 0) out->l = kl_jni_new_string("Audio Track 0 (Stream 0)");
+        else if (strcmp(name, "Language") == 0)    out->l = kl_jni_new_string("und");
+        // Index: 0
+        return 1;
+    }
+    return 0;
 }
 
 static klj_val klj_MP14_tracks_video(void *env, void *self, const klj_val *a, int n) {
