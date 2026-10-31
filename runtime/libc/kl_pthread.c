@@ -1785,9 +1785,8 @@ int klb_sem_init(int *s, int pshared, unsigned value) {
     if (origin < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        int azs = t && strcmp(t, "x2190353671014400") == 0;
-        g_sem_claim_first = kl_env_on("KL_SEM_CLAIM_FIRST", azs);
-        origin = kl_env_on("KL_SEM_ORIGIN", azs);
+        g_sem_claim_first = kl_env_on("KL_SEM_CLAIM_FIRST", 1);
+        origin = kl_env_on("KL_SEM_ORIGIN", t && strcmp(t, "x2190353671014400") == 0);
     }
     for (int d = 0; d < 4; d++) g_sems[i].init_ra[d] = NULL;
     if (origin) {
@@ -1908,16 +1907,16 @@ static void sem_describe(int *s, char *out, size_t cap) {
 // empty, went back to sleep: a wake lost for good. Found chasing Arizona
 // Sunshine's intermittent start freeze (UnityMain waiting on a load queued for
 // Loading.PreloadManager, 2026-10-31); closing it did not end that freeze on
-// its own, so it is on for that title only (KL_SEM_CLAIM_FIRST), and every other
-// guest keeps the order it was tested with.
+// its own. KL_SEM_CLAIM_FIRST=0 is the old order, as a Test switch in the game.
 int klb_sem_wait(int *s) {
     kl_sem *k = sem_of(s);
     if (!k) { errno = EINVAL; return -1; }
+    int first = g_sem_claim_first;
     sem_wait_enter(s, __builtin_return_address(0));
-    if (g_sem_claim_first) atomic_fetch_sub(&k->count, 1);
+    if (first) atomic_fetch_sub(&k->count, 1);
     dispatch_semaphore_wait(k->d, DISPATCH_TIME_FOREVER);
     sem_wait_leave();
-    if (!g_sem_claim_first) atomic_fetch_sub(&k->count, 1);
+    if (!first) atomic_fetch_sub(&k->count, 1);
     return 0;
 }
 

@@ -784,6 +784,10 @@ enum KleptonTestSwitches {
 
     static var entries: [Entry] {
         [
+            Entry(env: "KL_SEM_CLAIM_FIRST", value: "0",
+                  title: klT("Semaphores: old order", "Semaphoren: alte Reihenfolge"),
+                  note: klT("If this game has started to hang since the last update, turn this on, start it again and tell us whether it helped.",
+                            "Wenn dieses Spiel seit dem letzten Update hängt, schalte das ein, starte es neu und sag uns, ob es geholfen hat.")),
             Entry(env: "KL_GLFB_DEPTH_LINEAR", value: "0",
                   title: klT("Depth textures: nearest instead of linear without compare",
                              "Tiefentexturen: nächster Wert statt linear ohne Vergleich"),

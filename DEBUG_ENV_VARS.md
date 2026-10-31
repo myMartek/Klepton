@@ -303,8 +303,8 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
 - `KL_SEM_CLAIM_FIRST=0|1` — (`runtime/libc/kl_pthread.c`) take a semaphore's
   count before blocking, as Linux does, so `sem_getvalue` never shows a token
   that is already claimed and a producer that posts only on 0 cannot lose a wake.
-  Default 1 for `x2190353671014400` (Arizona Sunshine), else 0. It did not end
-  that game's logo freeze on its own, so other guests keep the old order.
+  Default 1; 0 is the old order, also as the Test switch "Semaphores: old order"
+  (Settings › Advanced › Test). It did not end Arizona Sunshine's logo freeze.
 - `KL_SEM_ORIGIN=0|1` — (`runtime/libc/kl_pthread.c`) record four frames of
   the guest's call into `sem_init`, shown with each semaphore a thread is stuck
   on in the `KL_TRACE_CONDDUMP` account (with its post count and the age of its
