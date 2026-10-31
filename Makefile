@@ -213,6 +213,10 @@ build/t_futex: tests/t_futex.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_futex.c $(RUNTIME) $(LDLIBS)
 
+build/t_sem: tests/t_sem.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_sem.c $(RUNTIME) $(LDLIBS)
+
 build/t_dl_ext: tests/t_dl_ext.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_dl_ext.c $(RUNTIME) $(LDLIBS)
@@ -1194,7 +1198,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_futex build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands
+check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1256,6 +1260,8 @@ check: build/t_futex build/t_opus build/t_variadic build/t_load build/t_il2cpp b
 	@./build/t_metrics > build/metrics.log 2>&1 || { cat build/metrics.log; exit 1; }
 	@head -1 build/metrics.log && tail -1 build/metrics.log
 	@KL_FUTEX_EXACT=1 ./build/t_futex > build/futex.log 2>&1 || { cat build/futex.log; exit 1; }
+	@KL_SEM_CLAIM_FIRST=0 ./build/t_sem > build/sem.log 2>&1 || { cat build/sem.log; exit 1; }
+	@KL_SEM_CLAIM_FIRST=1 ./build/t_sem > build/sem.log 2>&1 || { cat build/sem.log; exit 1; }
 	@./build/t_dl_ext > build/dl-ext.log 2>&1 || { cat build/dl-ext.log; exit 1; }
 	@echo "=== android_dlopen_ext ===" && tail -1 build/dl-ext.log
 	@./build/t_jni_io > build/jni-io.log 2>&1 || { cat build/jni-io.log; exit 1; }
