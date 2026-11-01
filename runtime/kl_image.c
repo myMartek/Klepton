@@ -647,6 +647,9 @@ static int apply_relocs(kl_image *img, const Elf64_Rela *r, size_t count) {
                     // title's scene layer then throws a NullReferenceException
                     // (2026-10-16).
                                                            strcmp(t, "x9449316705178989") == 0) ||
+                    // ...and the SourceVR guests: libvrxr and liblauncher keep
+                    // thread_local variables in a PT_TLS segment.
+                                       (t && strncmp(t, "sourcevr-", 9) == 0) ||
                     // ...and every title under the profile for untested games:
                     // without it the library that has one is refused and the
                     // game usually ends on the error that follows.

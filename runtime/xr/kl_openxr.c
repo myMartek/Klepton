@@ -6649,6 +6649,9 @@ static XrResult klxr_AcquireSwapchainImage(void *swapchain,
                                            const XrSwapchainImageAcquireInfo *info,
                                            uint32_t *index) {
     KLXR_TRACE("xrAcquireSwapchainImage");
+    // From here to xrEndFrame this thread's GL is one critical section, where
+    // the GL lock is on (kl_glfb_frame_enter).
+    kl_glfb_frame_enter();
     klxr_swapchain *sc = klxr_swapchain_of(swapchain);
     if (!sc) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!index) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
@@ -6688,7 +6691,15 @@ static XrResult klxr_WaitSwapchainImage(void *swapchain,
     return KLXR_SUCCESS;
 }
 
-static XrResult klxr_ReleaseSwapchainImage(void *swapchain,
+static XrResult klxr_ReleaseSwapchainImage_inner(void *swapchain, const XrSwapchainImageReleaseInfo *info);
+static XrResult klxr_ReleaseSwapchainImage(void *swapchain, const XrSwapchainImageReleaseInfo *info) {
+    XrResult r = klxr_ReleaseSwapchainImage_inner(swapchain, info);
+    // The drawing of this frame is over on this thread: commit it and give the
+    // GL lock back (kl_glfb_frame_leave; a no-op where the lock is off).
+    kl_glfb_frame_leave();
+    return r;
+}
+static XrResult klxr_ReleaseSwapchainImage_inner(void *swapchain,
                                            const XrSwapchainImageReleaseInfo *info) {
     KLXR_TRACE("xrReleaseSwapchainImage");
     klxr_swapchain *sc = klxr_swapchain_of(swapchain);
@@ -6929,6 +6940,8 @@ static void klxr_boot_gate(void) {
 static XrResult klxr_WaitFrame(void *session, const XrFrameWaitInfo *info,
                                XrFrameState *state) {
     KLXR_TRACE("xrWaitFrame");
+    // A thread about to wait for the next frame holds no GL lock of the last one.
+    kl_glfb_frame_leave();
     // hl2 (KL_HL2_FORCERT): drive the mod's CreateRenderTargets from here — the guest's
     // render/frame thread with its GL context — instead of the log handler (which ran on a
     // worker thread and re-entered logging, faulting). Self-gated: fires once, retries per
@@ -7344,7 +7357,14 @@ static void klxr_space_warp_seen(klxr_session *s, uint32_t li, uint32_t v,
             (double)dl->orientation.w, (double)dl->position.x, (double)dl->position.y, (double)dl->position.z);
 }
 
+static XrResult klxr_EndFrame_inner(void *session, const XrFrameEndInfo *info);
 static XrResult klxr_EndFrame(void *session, const XrFrameEndInfo *info) {
+    kl_glfb_frame_enter();
+    XrResult r = klxr_EndFrame_inner(session, info);
+    kl_glfb_frame_leave();
+    return r;
+}
+static XrResult klxr_EndFrame_inner(void *session, const XrFrameEndInfo *info) {
     // The stall watch's heartbeat (runtime/diag/kl_stall.c; KL_STALL_MS).
     { extern void kl_stall_frame(void); kl_stall_frame(); }
     KLXR_TRACE("xrEndFrame");

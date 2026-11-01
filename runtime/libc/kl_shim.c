@@ -2422,6 +2422,13 @@ static int klb_sched_getscheduler(int pid) { (void)pid; return 0; }
 static int klb_sched_getparam(int pid, int *param) { (void)pid; if (param) *param = 0; return 0; }
 // sched_getcpu: no Darwin equivalent; CPU 0 is a valid answer for "where am I".
 static int klb_sched_getcpu(void) { return 0; }
+// SourceVR's engine libraries (Portal first): the rest of what they import.
+// exec has nothing to run here; the _chk forms are the plain calls with the
+// buffer size bionic's fortify adds.
+static ssize_t klb___readlink_chk(const char *path, char *buf, size_t size, size_t bufsz) {
+    (void)bufsz;
+    return readlink(path, buf, size);
+}
 
 // putenv: same contract on bionic and Darwin — the "NAME=value" string itself
 // becomes part of the environment, no copy — and the guest's `environ` is the
@@ -2740,6 +2747,11 @@ static const kl_entry g_shim[] = {
     // Tea For God (x6323807174332876): wide-string helpers it imports. wchar_t
     // is 32-bit on both sides, so these forward unchanged.
     E("wcscasecmp", wcscasecmp), E("wctomb", wctomb),
+    // SourceVR (Portal): wide strings are 32-bit on both sides and struct tm is
+    // the same, so these forward; gz* is the host's zlib, like inflate.
+    E("wcscat", wcscat), E("asctime", asctime), E("isblank", isblank), E("lround", lround),
+    E("lroundf", lroundf), E("tmpnam", tmpnam), E("gzopen", gzopen), E("gzwrite", gzwrite),
+    E("gzclose", gzclose), E("__readlink_chk", klb___readlink_chk), E("floor", floor),
     E("sched_getparam", klb_sched_getparam), E("sched_getcpu", klb_sched_getcpu),
     E("putenv", klb_putenv),
     // asctime_r: the Epic Online Services SDK that Roboquest VR ships imports it

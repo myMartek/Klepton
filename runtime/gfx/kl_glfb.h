@@ -45,6 +45,11 @@ void kl_glfb_release_current(void);
 // Bind a share-group context on a thread that holds none (1 if done), and undo it.
 int  kl_glfb_borrow_context(void);
 void kl_glfb_return_context(void);
+// One guest thread's frame as a single critical section of the GL lock, with
+// its commands committed at the end (KL_GLFB_LOCK; see glfb_locking in kl_glfb.c).
+// Both are no-ops where the lock is off, and enter is idempotent within a frame.
+void kl_glfb_frame_enter(void);
+void kl_glfb_frame_leave(void);
 
 // Read the eye framebuffer back and write <dir>/frame_NNN.png. Returns the number
 // of frames presented so far. When a frame sink is registered the buffer goes
@@ -146,6 +151,9 @@ void kl_glfb_program_binary_census(FILE *f);
 // hl2 diagnostic: sample the real ANGLE draw/read framebuffer + color attachment at
 // the moment the eye-copy runs (called from the guest-log shim at "began eye submission").
 void kl_glfb_probe_current_rt(const char *why);
+// Whether the backend itself offers an extension: 1 yes, 0 no, -1 not known yet
+// (no context has been created).
+int kl_glfb_real_has_extension(const char *name);
 void kl_glfb_note_eye_texture(int eye, int stage, uint32_t tex);
 
 // ...and which of an eye's images the guest most recently PRESENTED. Registering

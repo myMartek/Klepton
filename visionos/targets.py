@@ -1026,6 +1026,125 @@ TARGETS = {
         "autoboot": False,
         "generic": True,
     },
+
+    # ---- SourceVR (github.com/tinsarfal/SourceVR) ----
+    #
+    # One Android app for seven Source games in VR — Half-Life 2, its episodes,
+    # Lost Coast, Portal, Portal 2 and Entropy : Zero — each of which is a row
+    # here, because here each is its own app with its own icon. The engine is
+    # the same family as "hl2"/"portal" above (Source + SDL2, liblauncher) but
+    # NOT the same port, and not the same door: on Android it is a NativeActivity.
+    # liblauncher's ANativeActivity_onCreate sets up the OpenXR session (libvrxr)
+    # and only then hands over to LauncherMain — entered through SDL's
+    # nativeRunMain the engine finds "VRXR was never bootstrapped" and runs with
+    # VR off. It is configured by an environment contract its Java launcher
+    # fulfils (kl_native.c, kl_engine_setenv) instead of by the HL2Q3VR switches.
+    #
+    # The libraries are not in the APK's lib/ folder: tools/sourcevr_prepare.py
+    # lays out <tree>/lib/arm64-v8a and the launcher's staged files from the
+    # package's content store. Data on the headset is one folder,
+    # android-files/SourceVRPort (the guest's /sdcard/SourceVRPort):
+    #   common/<hl2|platform|portal|…>   the user's Steam files
+    #   runtime/v1/overlay|vr/…          what the launcher would have staged
+    #   user/                            settings and saves, the guest's own
+    "sourcevr-hl2": {
+        "libs":    None,
+        "srcdir":  "sourcevr-hl2/lib/arm64-v8a",
+        "tree":    "sourcevr-hl2",
+        "apk":     "sourcevr-hl2.apk",
+        "assets":  "sourcevr-hl2/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "stage_files": "SourceVRPort",
+        "entry":   "liblauncher",
+        "kind":    "native",
+        "product": "KleptonSourceVRHl2",
+        "display": "Half-Life 2",
+    },
+    "sourcevr-ep1": {
+        "libs":    None,
+        "srcdir":  "sourcevr-ep1/lib/arm64-v8a",
+        "tree":    "sourcevr-ep1",
+        "apk":     "sourcevr-ep1.apk",
+        "assets":  "sourcevr-ep1/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "stage_files": "SourceVRPort",
+        "entry":   "liblauncher",
+        "kind":    "native",
+        "product": "KleptonSourceVREp1",
+        "display": "Half-Life 2: Episode One",
+    },
+    "sourcevr-ep2": {
+        "libs":    None,
+        "srcdir":  "sourcevr-ep2/lib/arm64-v8a",
+        "tree":    "sourcevr-ep2",
+        "apk":     "sourcevr-ep2.apk",
+        "assets":  "sourcevr-ep2/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "stage_files": "SourceVRPort",
+        "entry":   "liblauncher",
+        "kind":    "native",
+        "product": "KleptonSourceVREp2",
+        "display": "Half-Life 2: Episode Two",
+    },
+    "sourcevr-lostcoast": {
+        "libs":    None,
+        "srcdir":  "sourcevr-lostcoast/lib/arm64-v8a",
+        "tree":    "sourcevr-lostcoast",
+        "apk":     "sourcevr-lostcoast.apk",
+        "assets":  "sourcevr-lostcoast/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "stage_files": "SourceVRPort",
+        "entry":   "liblauncher",
+        "kind":    "native",
+        "product": "KleptonSourceVRLostcoast",
+        "display": "Half-Life 2: Lost Coast",
+    },
+    "sourcevr-portal": {
+        "libs":    None,
+        "srcdir":  "sourcevr-portal/lib/arm64-v8a",
+        "tree":    "sourcevr-portal",
+        "apk":     "sourcevr-portal.apk",
+        "assets":  "sourcevr-portal/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "stage_files": "SourceVRPort",
+        "entry":   "liblauncher",
+        "kind":    "native",
+        "product": "KleptonSourceVRPortal",
+        "display": "Portal",
+    },
+    "sourcevr-portal2": {
+        "libs":    None,
+        "srcdir":  "sourcevr-portal2/lib/arm64-v8a",
+        "tree":    "sourcevr-portal2",
+        "apk":     "sourcevr-portal2.apk",
+        "assets":  "sourcevr-portal2/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "stage_files": "SourceVRPort",
+        "entry":   "liblauncher",
+        "kind":    "native",
+        "product": "KleptonSourceVRPortal2",
+        "display": "Portal 2",
+    },
+    "sourcevr-entropyzero": {
+        "libs":    None,
+        "srcdir":  "sourcevr-entropyzero/lib/arm64-v8a",
+        "tree":    "sourcevr-entropyzero",
+        "apk":     "sourcevr-entropyzero.apk",
+        "assets":  "sourcevr-entropyzero/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "stage_files": "SourceVRPort",
+        "entry":   "liblauncher",
+        "kind":    "native",
+        "product": "KleptonSourceVREntropyzero",
+        "display": "Entropy : Zero",
+    },
 }
 
 DEFAULT = "beatsaber"

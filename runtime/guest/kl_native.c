@@ -296,6 +296,70 @@ static void kl_xash_rewrite_commandline(const char *base, FILE *out) {
              if (out) fprintf(out, "  [xash] commandline.txt -> %s", outbuf); }
 }
 
+// The SourceVR profile a target stands for ("sourcevr-portal" -> "portal"), or
+// NULL for any other target.
+static const char *kl_sourcevr_profile(void) {
+    extern const char *kl_driver_target_name(void);
+    const char *t = kl_driver_target_name();
+    return t && strncmp(t, "sourcevr-", 9) == 0 && t[9] ? t + 9 : NULL;
+}
+
+static void kl_mkdir_p(const char *path) {
+    char tmp[1400];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    for (char *c = tmp + 1; *c; c++)
+        if (*c == '/') { *c = 0; mkdir(tmp, 0755); *c = '/'; }
+    mkdir(tmp, 0755);
+}
+
+// A default is applied once and remembered by a marker file: 1 the first time,
+// 0 from then on. The marker is what makes it a default rather than a rule.
+static int kl_once(const char *marker) {
+    struct stat st;
+    if (stat(marker, &st) == 0) return 0;
+    FILE *f = fopen(marker, "wb");
+    if (f) fclose(f);
+    return 1;
+}
+static void kl_sourcevr_portal_defaults(const char *game, FILE *out) {
+    char path[1500], marker[1500];
+    // The menu backdrop.
+    snprintf(marker, sizeof marker, "%s/scripts/.avpplay-chapterbackgrounds", game);
+    snprintf(path, sizeof path, "%s/scripts", game);
+    kl_mkdir_p(path);
+    if (kl_once(marker)) {
+        snprintf(path, sizeof path, "%s/scripts/chapterbackgrounds.txt", game);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fputs("\"chapters\"\n{\n", f);
+            for (int c = 1; c <= 13; c++) fprintf(f, "\t%d\t\"background2\"\n", c);
+            fputs("}\n", f);
+            fclose(f);
+            if (out) { fprintf(out, "  [env] Portal: menu backdrop set to background2 (chapterbackgrounds.txt, once)\n"); fflush(out); }
+        }
+    }
+    // The recursion depth, replaced only where the wizard's "2" stands.
+    snprintf(marker, sizeof marker, "%s/cfg/.avpplay-portal-depth", game);
+    snprintf(path, sizeof path, "%s/cfg/config.cfg", game);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;               // no config yet: the wizard has not run; next start
+    static char text[65536];
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[n] = 0;
+    static const char was[] = "r_portal_stencil_depth \"2\"";
+    char *hit = n < sizeof text - 1 ? strstr(text, was) : NULL;
+    if (!hit) return;
+    if (!kl_once(marker)) return;
+    if ((f = fopen(path, "wb")) != NULL) {
+        fwrite(text, 1, (size_t)(hit - text), f);
+        fputs("r_portal_stencil_depth \"1\"", f);
+        fputs(hit + sizeof was - 1, f);
+        fclose(f);
+        if (out) { fprintf(out, "  [env] Portal: r_portal_stencil_depth 2 -> 1 (once)\n"); fflush(out); }
+    }
+}
+
 void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
     const char *files = kl_jni_files_dir();
     if (!files) files = "";
@@ -396,6 +460,167 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
         setenv("OPENXR_HMD", getenv("KL_OPENXR_HMD") ? getenv("KL_OPENXR_HMD") : "meta_quest", 1);
         if (out) { fprintf(out, "  [env] XASH3D_BASEDIR=%s GAMEDIR=%s ENGLIBDIR=%s xr_manufacturer=%s OPENXR_HMD=%s\n",
                            base, gamedir, libdir, getenv("xr_manufacturer"), getenv("OPENXR_HMD")); fflush(out); }
+    } else if (entry_lib && strstr(entry_lib, "launcher") && kl_sourcevr_profile()) {
+        // SourceVR (targets "sourcevr-<profile>"; see visionos/targets.py). Its
+        // liblauncher builds the engine's command line itself, from what its
+        // Java launcher puts in the environment (MainActivity.setupEngineEnvironment):
+        //
+        //   APP_LIB_PATH                  where the engine's libraries are
+        //   SOURCEVR_SHARED_CONTENT_PATH  /sdcard/SourceVRPort/common — the Steam files
+        //   VALVE_GAME_PATH               /sdcard/SourceVRPort/user   — the write root
+        //   SOURCEVR_WRITE_GAME_PATH      <user>/<game directory>
+        //   SOURCEVR_GAME                 the game directory (portal, episodic …)
+        //   EXTRAS_VPK_PATH               the staged overlay folders, comma-separated
+        //   VR_CONTENT_PATH               the staged VR layers, comma-separated
+        //
+        // Everything lives under <files>/SourceVRPort, which is also what the
+        // guest's hard-wired /sdcard/SourceVRPort resolves to. The staged folders
+        // are laid out on the Mac by tools/sourcevr_prepare.py. A folder that is
+        // not there is left out of its list, as the launcher does.
+        const char *profile = kl_sourcevr_profile();
+        static const struct { const char *profile, *gamedir; const char *layers[5]; } P[] = {
+            { "hl2",         "hl2",         { "hl2vr", "hl2bodyvr", "hl2bodyhla" } },
+            { "ep1",         "episodic",    { "ep1vr", "hl2vr", "hl2bodyvr", "hl2bodyhla" } },
+            { "ep2",         "ep2",         { "ep2vr", "hl2vr", "hl2bodyvr", "hl2bodyhla" } },
+            { "lostcoast",   "lostcoast",   { "hl2vr", "hl2bodyvr", "hl2bodyhla" } },
+            { "portal",      "portal",      { "portalvr" } },
+            { "portal2",     "portal2",     { "portal2vr" } },
+            { "entropyzero", "EntropyZero", { "hl2vr", "hl2bodyvr", "hl2bodyhla" } },
+        };
+        const char *gamedir = profile;
+        const char *const *layers = NULL;
+        for (size_t i = 0; i < sizeof P / sizeof P[0]; i++)
+            if (strcmp(P[i].profile, profile) == 0) { gamedir = P[i].gamedir; layers = P[i].layers; }
+        const char *gov = getenv("KL_SOURCEVR_GAME");
+        if (gov && *gov) gamedir = gov;
+
+        char root[1100], p[1400], list[4200];
+        snprintf(root, sizeof root, "%s/SourceVRPort", files);
+        // Absolute: the launcher dlopens "<APP_LIB_PATH>/filesystem_stdio.so" and
+        // the loader, handed a relative path, looks for "lib<path>" — on the Mac
+        // host, where libdir is "sourcevr-portal/lib/arm64-v8a", that is
+        // "libsourcevr-portal/lib/arm64-v8a/filesystem_stdio.so: not found".
+        static char libabs[1200];
+        if (libdir && libdir[0] != '/' && realpath(libdir, libabs)) libdir = libabs;
+        setenv("APP_LIB_PATH",    libdir, 1);
+        setenv("APP_MOD_LIB",     libdir, 1);
+        setenv("BASE_PATH",       libdir, 1);
+        setenv("EXECUTABLE_PATH", libdir, 1);
+        snprintf(p, sizeof p, "%s/common", root);
+        setenv("SOURCEVR_SHARED_CONTENT_PATH", p, 1);
+        snprintf(p, sizeof p, "%s/user", root);
+        kl_mkdir_p(p);
+        setenv("VALVE_GAME_PATH", p, 1);
+        snprintf(p, sizeof p, "%s/user/%s", root, gamedir);
+        kl_mkdir_p(p);
+        setenv("SOURCEVR_WRITE_GAME_PATH", p, 1);
+        // Where the staged folders (overlay, vr layers) are: <root>/runtime/v1
+        // when tools/sourcevr_prepare.py laid them out into the data folder on
+        // the Mac, else the app's assets — AVP Play unpacks the APK into the
+        // target's tree and run.sh has the script lay the folders out into
+        // <tree>/assets/sourcevr-runtime/v1, which the app copies to the
+        // headset with the rest of the assets. Read in place: nothing in them
+        // is written to.
+        char rt[1300];
+        snprintf(rt, sizeof rt, "%s/runtime/v1", root);
+        {
+            extern const char *kl_jni_assets_dir(void);
+            const char *assets = kl_jni_assets_dir();
+            snprintf(p, sizeof p, "%s/overlay/%s", rt, profile);
+            if (!kl_dir_exists(p) && assets && *assets) {
+                snprintf(p, sizeof p, "%s/sourcevr-runtime/v1", assets);
+                if (kl_dir_exists(p)) snprintf(rt, sizeof rt, "%s", p);
+            }
+            if (out) { fprintf(out, "  [env] SourceVR staged folders: %s\n", rt); fflush(out); }
+        }
+        // Two defaults AVP Play ships for Portal (his word, 2026-11-01), each
+        // applied ONCE and remembered by a marker beside it, so a player who
+        // changes them afterwards keeps the change:
+        //   - the menu backdrop: the retail background map carries a camera
+        //     flight that made him dizzy; `scripts/chapterbackgrounds.txt` in
+        //     the write root (a search path) points every chapter at
+        //     background2, whose camera stands still.
+        //   - `r_portal_stencil_depth "1"` instead of the "2" the first-run
+        //     wizard writes: the second recursion is what dropped him to 34 fps
+        //     standing in a portal (GPU 99 %).
+        if (strcmp(gamedir, "portal") == 0) kl_sourcevr_portal_defaults(p, out);
+        // The picture size. The engine writes vr_eye_resolution "2064x2208" — a
+        // Quest 3's own panel — into its config at its first exit and from then
+        // on starts at that size whatever this headset recommends (the first
+        // run, with no config yet, took 88 % of the recommendation). "auto"
+        // keeps the size following the runtime, which is where the app's render
+        // resolution setting acts. Only that one default is replaced, so another
+        // size picked in the game's own settings stays; KL_SOURCEVR_KEEP_RES=1
+        // leaves the file alone altogether.
+        if (!kl_env_on("KL_SOURCEVR_KEEP_RES", 0)) {
+            char cfg[1500];
+            snprintf(cfg, sizeof cfg, "%s/cfg/config.cfg", p);
+            FILE *f = fopen(cfg, "rb");
+            if (f) {
+                static char text[65536];
+                size_t n = fread(text, 1, sizeof text - 1, f);
+                fclose(f);
+                text[n] = 0;
+                static const char was[] = "vr_eye_resolution \"2064x2208\"";
+                char *hit = n < sizeof text - 1 ? strstr(text, was) : NULL;
+                if (hit && (f = fopen(cfg, "wb")) != NULL) {
+                    fwrite(text, 1, (size_t)(hit - text), f);
+                    fputs("vr_eye_resolution \"auto\"", f);
+                    fputs(hit + sizeof was - 1, f);
+                    fclose(f);
+                    if (out) { fprintf(out, "  [env] config.cfg: vr_eye_resolution 2064x2208 -> auto\n"); fflush(out); }
+                }
+            }
+        }
+        // The engine is started in the write root and looks for <game>/gameinfo.txt
+        // THERE; the launcher seeds it from the Steam files the first time
+        // (SharedContentMigration.ensurePrivateGameInfo). Without it the engine
+        // stops with "Setup file 'gameinfo.txt' doesn't exist in subdirectory".
+        {
+            char from[1500], to[1500];
+            snprintf(from, sizeof from, "%s/common/%s/gameinfo.txt", root, gamedir);
+            snprintf(to, sizeof to, "%s/gameinfo.txt", p);
+            struct stat gs;
+            if (stat(to, &gs) != 0 || !S_ISREG(gs.st_mode)) {
+                FILE *in = fopen(from, "rb"), *o = in ? fopen(to, "wb") : NULL;
+                if (in && o) {
+                    char buf[8192]; size_t n;
+                    while ((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, o);
+                }
+                if (out) { fprintf(out, "  [env] gameinfo.txt %s the write root from %s\n",
+                                   in && o ? "copied into" : "could NOT be copied into", from); fflush(out); }
+                if (in) fclose(in);
+                if (o) fclose(o);
+            }
+        }
+        setenv("SOURCEVR_GAME", gamedir, 1);
+        if (!getenv("LANG")) setenv("LANG", "en_US", 1);
+
+        // Overlay: the profile's folder, and its anniversary/ subfolder where
+        // the launcher adds it (shaders for the 20th Anniversary game files).
+        list[0] = 0;
+        snprintf(p, sizeof p, "%s/overlay/%s", rt, profile);
+        if (kl_dir_exists(p)) snprintf(list, sizeof list, "%s", p);
+        if (kl_env_on("KL_SOURCEVR_ANNIVERSARY", 1)) {
+            snprintf(p, sizeof p, "%s/overlay/%s/anniversary", rt, profile);
+            if (kl_dir_exists(p) && strlen(list) + strlen(p) + 2 < sizeof list) {
+                if (list[0]) strcat(list, ",");
+                strcat(list, p);
+            }
+        }
+        setenv("EXTRAS_VPK_PATH", list, 1);
+        if (out) { fprintf(out, "  [env] EXTRAS_VPK_PATH=%s\n", list); fflush(out); }
+
+        list[0] = 0;
+        for (int i = 0; layers && i < 5 && layers[i]; i++) {
+            snprintf(p, sizeof p, "%s/vr/%s", rt, layers[i]);
+            if (!kl_dir_exists(p) || strlen(list) + strlen(p) + 2 >= sizeof list) continue;
+            if (list[0]) strcat(list, ",");
+            strcat(list, p);
+        }
+        setenv("VR_CONTENT_PATH", list, 1);
+        if (out) { fprintf(out, "  [env] SourceVR profile %s: game %s, APP_LIB_PATH=%s, root %s\n"
+                                "  [env] VR_CONTENT_PATH=%s\n", profile, gamedir, libdir, root, list); fflush(out); }
     } else if (entry_lib && strstr(entry_lib, "launcher")) {
         // Source (hl2/portal). The launcher (FileSystem_GetExecutableDir) builds
         // "<APP_LIB_PATH>/filesystem_stdio.so" and dlopens the engine/tier0/mod
@@ -462,11 +687,14 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
 }
 
 int kl_native_configure(const char *libdir, const char *entry_lib, FILE *out) {
-    (void)out;
     if (!libdir || !*libdir)       return native_fail("no library directory");
     if (!entry_lib || !*entry_lib) return native_fail("no entry library");
     snprintf(g_libdir, sizeof g_libdir, "%s", libdir);
     snprintf(g_engine_lib, sizeof g_engine_lib, "%s.so", entry_lib);
+    // SourceVR comes through this door (see visionos/targets.py) and needs what
+    // its Java launcher would have put in the environment before the library
+    // loads; the SDL doors call this from their own configure.
+    if (kl_sourcevr_profile()) kl_engine_setenv(libdir, entry_lib, out);
     return 0;
 }
 

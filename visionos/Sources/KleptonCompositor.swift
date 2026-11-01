@@ -6464,6 +6464,22 @@ final class KleptonCompositor {
                              hzSettleTimeoutMs, hzSettleMs, hzSettleTol * 100, gaps.count))
             }
         }
+        // A cadence under 70 Hz is not a rate this panel has. It is the system
+        // showing every other frame while it is busy at launch, and it passes:
+        // seen at 49.97 Hz on a panel that runs at 100. A guest told "50 Hz, and
+        // nothing else" can take that badly — SourceVR's engine never left its
+        // loading screen (its main thread stopped before reading its settings).
+        // So a settled rate that is half of a panel rate is reported as that
+        // panel rate.
+        if let mid = chosen, mid > 0, 1.0 / mid < 70 {
+            let doubled = 2.0 / mid
+            if let c = Self.canonicalHz.first(where: { abs(doubled - $0) <= 0.01 * $0 }) {
+                NSLog(String(format: "[cp] %.2f Hz is half of the panel's %.2f Hz (frames shown "
+                             + "twice at launch) — the guest is told the panel's rate",
+                             1.0 / mid, c))
+                chosen = 1.0 / c
+            }
+        }
         if let mid = chosen, mid > 0 {
             displayPeriod = mid          // what the cadence check measures against
             let hz = Float(1.0 / mid)

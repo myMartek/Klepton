@@ -130,3 +130,5 @@ __pycache__/
 
 # Prebuilt mods per game version (pack_avp_mods.py); the toolchain package carries them.
 /ports/scotland2/prebuilt/
+# SourceVR game trees laid out by tools/sourcevr_prepare.py
+/sourcevr-*/

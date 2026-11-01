@@ -2,6 +2,7 @@
 // The guest's dynamic-linking API maps almost one-to-one onto kl_load/kl_sym.
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -31,7 +32,15 @@ static char   g_libdir[512] = ".";
 static char   g_dlerr[256];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void kl_set_library_path(const char *dir) { snprintf(g_libdir, sizeof g_libdir, "%s", dir); }
+// Kept absolute: a guest that chdir()s (Source's launcher moves into its game
+// directory) would otherwise make every later DT_NEEDED lookup miss — on the
+// host SourceVR's libengine.so dlopen found none of its siblings, libphonon
+// among them, and the first Steam Audio call aborted as an unresolved import.
+void kl_set_library_path(const char *dir) {
+    char abs[PATH_MAX];
+    if (dir && dir[0] != '/' && realpath(dir, abs)) dir = abs;
+    snprintf(g_libdir, sizeof g_libdir, "%s", dir);
+}
 const char *kl_library_path(void) { return g_libdir; }
 
 static const char *basename_of(const char *p) {
