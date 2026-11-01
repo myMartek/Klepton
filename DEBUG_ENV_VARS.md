@@ -3524,6 +3524,13 @@ Standalone reproducers, not part of the runtime; each reads its own knobs.
 
 ## Vulkan (`runtime/gfx/kl_vulkan.c`) — the synthetic libvulkan.so
 
+- `KL_VK_WILD_DEPTH=0|1` — use a depth/stencil-compatible scratch image when a
+  guest supplies an unregistered image handle to a depth or stencil image view.
+  This is enabled by default only for MADiSON VR (`x157074645514372`), whose
+  loading transition otherwise asks Metal for a `Depth32Float_Stencil8` view of
+  the general RGBA8 wild-image scratch and is terminated by Metal validation.
+  Unset is 1 for that target and 0 for every other target.
+
 BONELAB's graphics API. Needs `make mvk`; with no MoltenVK
 vendored the whole path refuses by name and none of these do anything.
 
