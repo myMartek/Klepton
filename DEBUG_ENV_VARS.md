@@ -3944,6 +3944,7 @@ except its own control vars (next section).
   a game quit from its own menu leaves its last picture standing until the app
   is closed by hand. Default 1 for `x2582932495064035` (Real VR Fishing) and
   `x2436558143118760` (Synth Riders) and
+  `x157074645514372` (MADiSON VR) and
   `x2285803881494677` (Gun Club VR, with `KL_UNITY_QUIT_TEARDOWN`), else 0: no
   other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
 - `KL_UNITY_QUIT_TEARDOWN=0|1` — (`runtime/guest/kl_driver.c`) when
@@ -3953,8 +3954,9 @@ except its own control vars (next section).
   chose), then `nativePause` and `nativeDone`, on the guest frame thread.
   `nativeRender` is never called again after it. Default 1 for
   `x2285803881494677` (Gun Club VR build 410: its in-game Exit kept its settings
-  across a restart only with the save in front, as its fix was sent in), else
-  0. Persistence when visionOS force-quits the app is not covered.
+  across a restart only with the save in front, as its fix was sent in) and
+  `x157074645514372` (MADiSON VR), else 0. Persistence when visionOS force-quits
+  the app is not covered.
 - `KL_SYNC_GUEST=1` — drive the guest inline on the compositor thread, i.e.
   P5b's shape before the guest moved to its own thread. The clock P5.4's device numbers were taken
   against, and the A/B for anything that looks like a pacing regression.

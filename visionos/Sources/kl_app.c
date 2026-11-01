@@ -1585,6 +1585,7 @@ static int guest_quit_exits(void) {
         const char *t = kl_driver_target_name();
         v = kl_env_on("KL_UNITY_QUIT_EXITS", t && (strcmp(t, "x2582932495064035") == 0
                                                    || strcmp(t, "x2436558143118760") == 0
+                                                   || strcmp(t, "x157074645514372") == 0
                                                    || strcmp(t, "x2285803881494677") == 0));
     }
     return v;

@@ -1138,7 +1138,9 @@ static int unity_quit_teardown(void) {
     static int v = -1;
     if (v < 0) {
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_UNITY_QUIT_TEARDOWN", t && strcmp(t, "x2285803881494677") == 0);
+        v = kl_env_on("KL_UNITY_QUIT_TEARDOWN", t &&
+                      (strcmp(t, "x2285803881494677") == 0 ||
+                       strcmp(t, "x157074645514372") == 0));
     }
     return v;
 }
