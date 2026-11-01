@@ -7936,7 +7936,8 @@ static uint32_t klvk_sample_mask(void) {
         // per-process limit. Told 2x it makes its targets, passes and
         // pipelines at 2x itself, at the same eye size (the sender's figures
         // and device runs, fix 38, 2026-10-13; not measured here).
-        v = kl_env_int("KL_VK_MAX_SAMPLES", t && (strcmp(t, "x5812519008825194") == 0 ||
+        v = kl_env_int("KL_VK_MAX_SAMPLES", t && (strcmp(t, "x157074645514372") == 0 ||
+                                                  strcmp(t, "x5812519008825194") == 0 ||
                                                   strcmp(t, "x3634830803298285") == 0 ||
                                                   strcmp(t, "x9386827918099701") == 0) ? 2 : 0);
     }

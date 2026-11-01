@@ -2336,8 +2336,10 @@ puts the camera on the ground with its hands underneath it.
 - `KL_VK_MAX_SAMPLES=<1|2|4>` — the highest multisample count a Vulkan guest
   is told the device supports (limits and image-format properties), 0 for the
   truth. A guest's multisampled eye targets are real memory here, so this is
-  what a larger eye is paid for with. Default 2 for `x5812519008825194`
-  (with `KL_OVRP_EYE_MAX` 3840), `x3634830803298285` (Demeo) and
+  what a larger eye is paid for with. Default 2 for `x157074645514372`
+  (MADiSON VR: it switches from 2x to 4x at startup and reaches the Vision Pro
+  process limit while loading a scene), `x5812519008825194` (with
+  `KL_OVRP_EYE_MAX` 3840), `x3634830803298285` (Demeo) and
   `x9386827918099701` (BattleGroupVR2: three 4x colour and depth pairs ask
   for about 5.2 GiB at its start; its eye size is left alone, and it runs
   without MTLHeaps, `MVK_CONFIG_USE_MTLHEAP=0`, as Alyx does), else 0.
