@@ -53,6 +53,7 @@ _kl_gl_lock_tramp:
     stp     q6,  q7,  [sp, #192]
 
     ldr     x0, [x29, #8]            // guest's return address
+    mov     x1, x16                  // the descriptor, for the name of the call
     bl      _kl_gl_lock_acquire      // parks it per-thread and takes the lock
 
     ldp     q6,  q7,  [sp, #192]

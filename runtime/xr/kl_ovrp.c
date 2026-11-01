@@ -1719,6 +1719,10 @@ static int klovrp_title_cap(const char *t) {
     int cap_dflt = 3072;
     {
         if (t && strcmp(t, "doom3quest") == 0) cap_dflt = 4000;
+        // SourceVR: its engine takes 88 % of what it is told (3072 became
+        // 2704x2168, about 26 pixels a degree), and its owner called that
+        // picture not sharp enough. 3840 gives it 3379x2710.
+        if (t && strncmp(t, "sourcevr-", 9) == 0) cap_dflt = 3840;
         // AC Nexus: a quarter more, paid for by rendering 2x multisampled
         // instead of 4x (KL_VK_MAX_SAMPLES in kl_vulkan.c, which is where the
         // memory arithmetic is). 3072 px is about 22 pixels a degree at the

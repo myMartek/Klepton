@@ -23,7 +23,10 @@ import Foundation
 // tester's device backup had grown by the game's 68.7 GB.
 enum KLBackup {
     /// Inside a game's own folder (Documents/<tree>): what the installer puts there.
-    private static let staged = ["assets", "qtplugins", "android-files/obb", "android-files/Android/obb"]
+    private static let staged = ["assets", "qtplugins", "android-files/obb", "android-files/Android/obb",
+                                 // SourceVR: the Steam files (gigabytes) and the engine's staged folders,
+                                 // both put back by the installer; `user/` beside them (saves, settings) stays in.
+                                 "android-files/SourceVRPort/common", "android-files/SourceVRPort/runtime"]
     /// Inside Documents/lx, the Linux trees: marked whole, or all but the named children.
     private static let linuxWhole = ["sysroot", "xrizer", "klfz"]
     private static let linuxKeep = ["game/hlvr/save", "game/hlvr/cfg"]

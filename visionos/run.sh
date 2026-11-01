@@ -21,6 +21,20 @@ cd "$(dirname "$0")"
 eval "$(python3 targets.py "${KLEPTON_TARGET:-}")"
 export KLEPTON_TARGET="$KLT_NAME"
 
+# A SourceVR target whose tree is the APK as unpacked (AVP Play's way): the
+# engine's libraries and the staged folders are in the APK's content store under
+# assets/sourcevr/v1, so they are laid out from there before anything looks for
+# them (tools/sourcevr_prepare.py --tree, which also drops the store from
+# assets). A tree the script laid out from the APK has no store and is left as
+# it is.
+case "$KLT_NAME" in
+  sourcevr-*)
+    if [ -d "../$KLT_TREE/assets/sourcevr/v1" ]; then
+      echo "  SourceVR: laying out the engine libraries and staged folders from the content store"
+      python3 ../tools/sourcevr_prepare.py --tree "${KLT_NAME#sourcevr-}" "../$KLT_TREE"
+    fi ;;
+esac
+
 # The runtime's copy of the target table follows targets.py. For the targets in
 # the table that is the file as checked in, and nothing is written. An
 # experimental target (KLEPTON_GENERIC_TARGET) is not in the checked-in file:

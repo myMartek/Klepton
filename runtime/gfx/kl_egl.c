@@ -477,7 +477,14 @@ static int klgl_want_multiview_ms(void) {
 //     on a large pack is the difference between fitting in the memory budget
 //     and not. ANGLE-on-Metal spells the capability per format (_dxt1 and the
 //     two GL_ANGLE_ names) and not as the umbrella _s3tc, so all four are
-//     candidates.
+//     candidates. The sRGB forms (_s3tc_srgb, formats 0x8C4C-0x8C4F) are a
+//     fifth: SourceVR's engine asks for exactly this name, and without it its
+//     own CPU decode of every sRGB DXT texture is what reaches GL — a decode
+//     that hands over the largest mip of some DXT5 textures with the alpha
+//     intact and every colour byte zero (Portal 2026-11-01: the lift goes
+//     black as you step in, the aiming ring has no colour; 13 of 400 level-0
+//     uploads in one run, all SRGB8_ALPHA8, none of the linear DXT5 blocks).
+//     With the name the blocks go up as they are and that decoder is not run.
 //   * GL_EXT_texture_filter_anisotropic: a sampler parameter, free in memory,
 //     and without it a floor at a grazing angle samples from the mip chosen for
 //     its worst axis.
@@ -498,6 +505,7 @@ static const char *const g_gl_ext_candidates[] = {
     "GL_EXT_texture_compression_dxt1",
     "GL_ANGLE_texture_compression_dxt3",
     "GL_ANGLE_texture_compression_dxt5",
+    "GL_EXT_texture_compression_s3tc_srgb",
     "GL_EXT_texture_filter_anisotropic",
     "GL_EXT_texture_format_BGRA8888",
     "GL_KHR_texture_compression_astc_hdr",
@@ -520,7 +528,10 @@ void kl_gl_cap_adopt_backend_extensions(const char *backend_ext) {
     // verified game was verified against the core-only description, and a
     // Unity guest that is shown anisotropic filtering starts using it. A
     // target that needs one of these names turns the list on by its default.
-    if (!kl_env_on("KL_GL_BACKEND_EXT", 0)) return;
+    // SourceVR's engine is one: without anisotropic filtering and the S3TC names
+    // its retail textures come out soft or not at all.
+    const char *t = kl_driver_target_name();
+    if (!kl_env_on("KL_GL_BACKEND_EXT", t && strncmp(t, "sourcevr-", 9) == 0)) return;
     for (int i = 0; i < KL_GL_EXT_CANDIDATES; i++) {
         const char *name = g_gl_ext_candidates[i];
         size_t len = strlen(name);
@@ -832,6 +843,15 @@ static const struct { uint32_t pname; int32_t value; } g_gl_int[] = {
 // print, no zero. Under the reference renderer the miss goes to ANGLE, which
 // owns the dynamic state (READ_BUFFER & co.) this table never described.
 int kl_gl_cap_integerv(uint32_t pname, int32_t *params) {
+    // See kl_glfb_no_msaa: a target whose multisampled path is broken is told
+    // there is none.
+    if (pname == 0x8D57 /* MAX_SAMPLES */) {
+        extern int kl_glfb_no_msaa(void);
+        if (kl_glfb_no_msaa()) { params[0] = 1; return 1; }
+    }
+    // MAX_TEXTURE_MAX_ANISOTROPY, for a guest that asks for it as an integer;
+    // the float door has always answered 16.
+    if (pname == 0x84FF) { params[0] = 16; return 1; }
     if (!params) return 1;
     if (pname == GL_MAJOR_VERSION) { params[0] = g_es_major; return 1; }
     if (pname == GL_MINOR_VERSION) { params[0] = g_es_minor; return 1; }
