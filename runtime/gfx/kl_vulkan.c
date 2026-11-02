@@ -1763,6 +1763,7 @@ static struct {
     klvk_img_slot s[KLVK_EYE_STAGES][2];
 } g_layer_img[KLVK_MAX_LAYERS];
 static VkImage g_wild_scratch;   // wild-handle stand-in (see klvk_wild_scratch); defined lazily
+static VkImage g_wild_depth_scratch; // depth/stencil wild-handle stand-in (MADiSON VR)
 static VkImage g_content_rt; static uint32_t g_content_rt_w, g_content_rt_h, g_content_rt_area; // KL_RT_DEBUG: largest UI render target
 #ifndef KLVK_SCRATCH_MIPS
 #ifndef KLVK_SCRATCH_MIPS
@@ -4823,11 +4824,78 @@ static VkImage klvk_wild_scratch(void) {
     return g_wild_scratch;
 }
 
+// MADiSON VR's Unity 2022 Vulkan path exposes the missing Android depth image
+// as a wild handle too.  The colour scratch above cannot stand in for it:
+// MoltenVK turns a D32_SFLOAT_S8_UINT view into a Depth32Float_Stencil8 Metal
+// view, and Metal aborts when its source texture is RGBA8.  Remember only the
+// handles that the guest itself identifies with a depth/stencil view, and keep
+// every later barrier/copy for those handles on a format-compatible scratch.
+// Target-gated until another title proves it needs the same Android-surface
+// fallback; the established colour path is otherwise unchanged.
+#define KLVK_WILD_DEPTH_MAX 32
+static VkImage g_wild_depth_handle[KLVK_WILD_DEPTH_MAX];
+static int g_wild_depth_n;
+static pthread_mutex_t g_wild_depth_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int klvk_wild_depth_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_VK_WILD_DEPTH",
+                       t && !strcmp(t, "x157074645514372"));
+    }
+    return on;
+}
+
+static int klvk_wild_depth_has(VkImage img) {
+    int found = 0;
+    pthread_mutex_lock(&g_wild_depth_lock);
+    for (int i = 0; i < g_wild_depth_n; i++)
+        if (g_wild_depth_handle[i] == img) { found = 1; break; }
+    pthread_mutex_unlock(&g_wild_depth_lock);
+    return found;
+}
+
+static void klvk_wild_depth_add(VkImage img) {
+    if (!img || !klvk_wild_depth_on()) return;
+    pthread_mutex_lock(&g_wild_depth_lock);
+    for (int i = 0; i < g_wild_depth_n; i++)
+        if (g_wild_depth_handle[i] == img) {
+            pthread_mutex_unlock(&g_wild_depth_lock);
+            return;
+        }
+    if (g_wild_depth_n < KLVK_WILD_DEPTH_MAX)
+        g_wild_depth_handle[g_wild_depth_n++] = img;
+    pthread_mutex_unlock(&g_wild_depth_lock);
+}
+
+static VkImage klvk_wild_depth_scratch(void) {
+    if (!g_wild_depth_scratch) {
+        klvk_device *d = g_devs[0];
+        if (!d) return VK_NULL_HANDLE;
+        g_wild_depth_scratch = klvk_image_alloc(d, VK_FORMAT_D32_SFLOAT_S8_UINT,
+            4096, 4096, KLVK_SCRATCH_LAYERS, KLVK_SCRATCH_MIPS,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+            NULL);
+        if (g_wild_depth_scratch)
+            VKI("created 4096x4096 depth/stencil scratch image %#llx for "
+                "wild-handle view substitution\n",
+                (unsigned long long)(uintptr_t)g_wild_depth_scratch);
+    }
+    return g_wild_depth_scratch;
+}
+
 // Map a WILD (unregistered) image handle to the scratch image so a command
 // referencing it succeeds against a real resource instead of being dropped.
 // Registered handles pass through unchanged.
 static VkImage klvk_sub_wild(VkImage img) {
     if (!img || klvk_img_reg_has(img)) return img;
+    if (klvk_wild_depth_on() && klvk_wild_depth_has(img)) {
+        VkImage ds = klvk_wild_depth_scratch();
+        if (ds) return ds;
+    }
     VkImage sc = klvk_wild_scratch();
     return sc ? sc : img;
 }
@@ -4865,7 +4933,12 @@ static VkResult VKAPI_CALL klvk_CreateImageView(VkDevice dev,
         }
     }
     if (ci && ci->image && !klvk_img_reg_ok(ci->image)) {
-        VkImage scratch = klvk_wild_scratch();
+        VkImageAspectFlags aspects = ci->subresourceRange.aspectMask;
+        int wants_depth = klvk_wild_depth_on() &&
+            (aspects & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT));
+        if (wants_depth) klvk_wild_depth_add(ci->image);
+        VkImage scratch = wants_depth ? klvk_wild_depth_scratch()
+                                      : klvk_wild_scratch();
         if (scratch && real) {
             VkImageViewCreateInfo sub = *ci;
             sub.image = scratch;
@@ -7863,7 +7936,8 @@ static uint32_t klvk_sample_mask(void) {
         // per-process limit. Told 2x it makes its targets, passes and
         // pipelines at 2x itself, at the same eye size (the sender's figures
         // and device runs, fix 38, 2026-10-13; not measured here).
-        v = kl_env_int("KL_VK_MAX_SAMPLES", t && (strcmp(t, "x5812519008825194") == 0 ||
+        v = kl_env_int("KL_VK_MAX_SAMPLES", t && (strcmp(t, "x157074645514372") == 0 ||
+                                                  strcmp(t, "x5812519008825194") == 0 ||
                                                   strcmp(t, "x3634830803298285") == 0 ||
                                                   strcmp(t, "x9386827918099701") == 0) ? 2 : 0);
     }

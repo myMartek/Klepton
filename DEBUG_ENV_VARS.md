@@ -2336,8 +2336,10 @@ puts the camera on the ground with its hands underneath it.
 - `KL_VK_MAX_SAMPLES=<1|2|4>` — the highest multisample count a Vulkan guest
   is told the device supports (limits and image-format properties), 0 for the
   truth. A guest's multisampled eye targets are real memory here, so this is
-  what a larger eye is paid for with. Default 2 for `x5812519008825194`
-  (with `KL_OVRP_EYE_MAX` 3840), `x3634830803298285` (Demeo) and
+  what a larger eye is paid for with. Default 2 for `x157074645514372`
+  (MADiSON VR: it switches from 2x to 4x at startup and reaches the Vision Pro
+  process limit while loading a scene), `x5812519008825194` (with
+  `KL_OVRP_EYE_MAX` 3840), `x3634830803298285` (Demeo) and
   `x9386827918099701` (BattleGroupVR2: three 4x colour and depth pairs ask
   for about 5.2 GiB at its start; its eye size is left alone, and it runs
   without MTLHeaps, `MVK_CONFIG_USE_MTLHEAP=0`, as Alyx does), else 0.
@@ -3524,6 +3526,13 @@ Standalone reproducers, not part of the runtime; each reads its own knobs.
 
 ## Vulkan (`runtime/gfx/kl_vulkan.c`) — the synthetic libvulkan.so
 
+- `KL_VK_WILD_DEPTH=0|1` — use a depth/stencil-compatible scratch image when a
+  guest supplies an unregistered image handle to a depth or stencil image view.
+  This is enabled by default only for MADiSON VR (`x157074645514372`), whose
+  loading transition otherwise asks Metal for a `Depth32Float_Stencil8` view of
+  the general RGBA8 wild-image scratch and is terminated by Metal validation.
+  Unset is 1 for that target and 0 for every other target.
+
 BONELAB's graphics API. Needs `make mvk`; with no MoltenVK
 vendored the whole path refuses by name and none of these do anything.
 
@@ -3935,6 +3944,7 @@ except its own control vars (next section).
   a game quit from its own menu leaves its last picture standing until the app
   is closed by hand. Default 1 for `x2582932495064035` (Real VR Fishing) and
   `x2436558143118760` (Synth Riders) and
+  `x157074645514372` (MADiSON VR) and
   `x2285803881494677` (Gun Club VR, with `KL_UNITY_QUIT_TEARDOWN`), else 0: no
   other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
 - `KL_UNITY_QUIT_TEARDOWN=0|1` — (`runtime/guest/kl_driver.c`) when
@@ -3944,8 +3954,9 @@ except its own control vars (next section).
   chose), then `nativePause` and `nativeDone`, on the guest frame thread.
   `nativeRender` is never called again after it. Default 1 for
   `x2285803881494677` (Gun Club VR build 410: its in-game Exit kept its settings
-  across a restart only with the save in front, as its fix was sent in), else
-  0. Persistence when visionOS force-quits the app is not covered.
+  across a restart only with the save in front, as its fix was sent in) and
+  `x157074645514372` (MADiSON VR), else 0. Persistence when visionOS force-quits
+  the app is not covered.
 - `KL_SYNC_GUEST=1` — drive the guest inline on the compositor thread, i.e.
   P5b's shape before the guest moved to its own thread. The clock P5.4's device numbers were taken
   against, and the A/B for anything that looks like a pacing regression.
