@@ -1535,11 +1535,18 @@ behind "no controllers render". Diagnostic only, off unless asked for.
 - `KL_PROBE_STRINGS=<Namespace.Class>::<field>` — a List of strings on the
   class's `Instance`, printed as it grows (a test driver's own results).
 - `KL_PROBE_FIND` with an `@Class` part lists that class's fields as well.
+- `KL_UNITY_LOD_BIAS=<x>` — (`runtime/diag/kl_mprobe.c`) `QualitySettings.lodBias`
+  for a Unity guest, through the engine's internal call (IL2CPP strips the
+  managed setter of a game that never calls it), from frame 300 and again every
+  600 frames. The start window's test switch "Detail: detailed models further
+  away" sets 1.5; on from the start for `x1540210` (Arizona Sunshine 2, Steam
+  build, which runs at 0.4). Logs `[unity] LOD bias`.
 - `KL_PROBE_SCRIPT=<frame>:<Namespace.Class>::<Method>[(args)][#n];<frame>:...`
   — several calls like `KL_PROBE_CALL`'s, each at its frame (rising), separated
   by `;`. Arguments, up to four: a quoted one is a string, `true`/`false` and
-  whole numbers go as the value they are; the overload is picked by their
-  COUNT, so a method with two one-argument overloads gets whichever comes first
+  whole numbers go as the value they are, one with a decimal point as a float;
+  the overload is picked by their COUNT, so a method with two one-argument
+  overloads gets whichever comes first
   (`MultiplayerLauncher::LoadScene` took a string for a `CourseInfoAsset` and
   threw). With `#n` the call goes to the n-th object of that class in the
   loaded scenes (inactive ones too, by instance id), and the line says that
@@ -1550,6 +1557,10 @@ behind "no controllers render". Diagnostic only, off unless asked for.
   basement (part of the main menu), `Mighty.Homestar.HSLauncher::Launch#n`
   starts one of the 36 launchers there and
   `Mighty.Homestar.HomestarMenuUtility::ReturnToBasement` comes back.
+- A static setter of one int or float that IL2CPP stripped is called through the
+  engine's internal call of that name (`il2cpp_resolve_icall`): Arizona Sunshine 2
+  has `QualitySettings::get_lodBias` and no `set_lodBias`, and
+  `UnityEngine.QualitySettings::set_lodBias(1.5)` still sets it.
 - `KL_PROBE_KEEP` without `KL_PROBE_CALL` only lists (and filters) at
   `KL_PROBE_CALL_FROM` — how `tools/pipeline_tour.py` reads the names a guest
   loads its scenes by.
