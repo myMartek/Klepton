@@ -771,7 +771,7 @@ KL_XR_ENTRY_POINTS(X)
 // makes that assertion by name.
 static int klxr_is_scene_entry(const char *name);   // the room, defined with the spaces
 static int klxr_scene_on(void);
-static int klxr_is_hand_entry(const char *name);    // XR_EXT_hand_tracking, BRINK Traveler only
+static int klxr_is_hand_entry(const char *name);    // XR_EXT_hand_tracking, BRINK Traveler and Half-Life: Alyx
 static int klxr_hands_on(void);
 static int klxr_GetInstanceProcAddr(void *instance, const char *name, void **function) {
     (void)instance;
@@ -908,13 +908,16 @@ enum { KLXR_GATE_ALWAYS = 0,      // unconditional
        KLXR_GATE_FRAME_CONTROLLER = 5,     // ...Moss from Steam only (see below)
        KLXR_GATE_HITMAN3 = 6,              // ...HITMAN 3 VR: Reloaded only (see below)
        KLXR_GATE_BRINK_HANDS = 7,          // ...BRINK Traveler only
-       KLXR_GATE_BRINK_DEPTH = 8 };        // ...BRINK Traveler, unless KL_XR_DEPTH=0
+       KLXR_GATE_BRINK_DEPTH = 8,          // ...BRINK Traveler, unless KL_XR_DEPTH=0
+       KLXR_GATE_HAND_TRACKING = 9 };      // ...BRINK Traveler and Half-Life: Alyx (see below)
 
 static const struct { const char *name; uint32_t version; int gate; } g_extensions[] = {
     { "XR_KHR_opengl_es_enable",       10, KLXR_GATE_ALWAYS },
     { "XR_KHR_android_create_instance", 3, KLXR_GATE_ALWAYS },
     { "XR_KHR_composition_layer_depth", 6, KLXR_GATE_BRINK_DEPTH },
-    { "XR_EXT_hand_tracking", 4, KLXR_GATE_BRINK_HANDS },
+    // The joints alone, for BRINK and for Half-Life: Alyx (xrizer builds SteamVR's
+    // finger skeleton from them). The two below stay BRINK's.
+    { "XR_EXT_hand_tracking", 4, KLXR_GATE_HAND_TRACKING },
     // The Unity Meta Hand Tracking Aim feature requests this alongside the
     // core skeleton. No new entry points: it extends xrLocateHandJointsEXT's
     // XrHandJointLocationsEXT.next output chain.
@@ -1122,7 +1125,7 @@ static struct { const char *name; uint32_t version; }
 static uint32_t g_ext_nlive;
 
 static int klxr_ext_gate_open(int gate);
-static int klxr_hands_on(void) { return klxr_ext_gate_open(KLXR_GATE_BRINK_HANDS); }
+static int klxr_hands_on(void) { return klxr_ext_gate_open(KLXR_GATE_HAND_TRACKING); }
 static int klxr_is_hand_entry(const char *name) {
     return !strcmp(name, "xrCreateHandTrackerEXT") || !strcmp(name, "xrDestroyHandTrackerEXT") ||
            !strcmp(name, "xrLocateHandJointsEXT");
@@ -1138,6 +1141,17 @@ static int klxr_ext_gate_open(int gate) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
         return t && !strcmp(t, "x3635172946605196");
+    }
+    case KLXR_GATE_HAND_TRACKING: {
+        // Only where the guest is known to keep the controllers as the input.
+        // Half-Life: Alyx (xrizer) uses the joints for the fingers and nothing
+        // else; another OpenXR game may take an active hand tracker as "play
+        // with hands", and ARKit tracks a hand holding a controller too.
+        // KL_XR_HAND_TRACKING=1 offers it to any guest, =0 withholds it.
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        return kl_env_on("KL_XR_HAND_TRACKING", (t && !strcmp(t, "alyx")) ||
+                                                klxr_ext_gate_open(KLXR_GATE_BRINK_HANDS));
     }
     case KLXR_GATE_REFRESH: {
         const char *e = getenv("KL_XR_REFRESH_EXT");
@@ -8939,6 +8953,10 @@ static float klxr_finger_pinch_strength(const klxr_hand_sample *sample, int tip)
 
 enum { KLXR_HAND_TRACKER_MAGIC = 0x48584b4c };
 static struct { uint32_t magic; klxr_session *session; int hand; } g_hand_trackers[8];
+// How many of them exist, for the frontend (kl_openxr_hand_tracking_wanted).
+static atomic_int g_hand_tracker_count;
+
+int kl_openxr_hand_tracking_wanted(void) { return atomic_load(&g_hand_tracker_count) > 0; }
 
 static XrResult klxr_CreateHandTrackerEXT(void *session,
         const XrHandTrackerCreateInfoEXT *info, void **out) {
@@ -8955,6 +8973,7 @@ static XrResult klxr_CreateHandTrackerEXT(void *session,
             g_hand_trackers[i].session = s;
             g_hand_trackers[i].hand = info->hand - 1;
             *out = &g_hand_trackers[i];
+            atomic_fetch_add(&g_hand_tracker_count, 1);
             fprintf(stderr, "  [xr] hand tracker created: %s\n", info->hand == 1 ? "left" : "right");
             return KLXR_SUCCESS;
         }
@@ -8972,6 +8991,7 @@ static XrResult klxr_DestroyHandTrackerEXT(void *tracker) {
     int idx = klxr_hand_tracker_index(tracker);
     if (idx < 0) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     memset(&g_hand_trackers[idx], 0, sizeof g_hand_trackers[idx]);
+    atomic_fetch_sub(&g_hand_tracker_count, 1);
     return KLXR_SUCCESS;
 }
 static XrResult klxr_LocateHandJointsEXT(void *tracker,
@@ -9023,7 +9043,7 @@ static XrResult klxr_LocateHandJointsEXT(void *tracker,
                 sample.poses[1][0], sample.poses[1][1], sample.poses[1][2], count_valid);
         float controller[3], quat[4], vel[3], ang[3];
         if (kl_ovrp_hand_motion(hand_idx, controller, quat, vel, ang))
-            fprintf(stderr, "  [xr] BRINK wrist-vs-controller %s: delta "
+            fprintf(stderr, "  [xr] wrist-vs-controller %s: delta "
                             "(%.3f %.3f %.3f) m\n", hand_idx == 0 ? "L" : "R",
                     controller[0] - sample.poses[1][0],
                     controller[1] - sample.poses[1][1],
@@ -10311,5 +10331,123 @@ int kl_openxr_space_selftest(FILE *f) {
                 same ? "ok  " : "FAIL", e);
         ok &= same;
     }
+    return ok;
+}
+
+// --- XR_EXT_hand_tracking, end to end ----------------------------------------
+//
+// `make xrhands`. The gate as a guest meets it (xrGetInstanceProcAddr), then the
+// joints published as the frontend does, located as a guest does. Every way
+// this goes wrong returns XR_SUCCESS: the fingers are just somewhere else.
+int kl_openxr_hands_selftest(FILE *f) {
+    int ok = 1;
+    const char *was = getenv("KL_XR_HAND_TRACKING");
+    char *saved = was ? strdup(was) : NULL;
+    void *fn = NULL;
+
+    // No target here, so only the override can open it.
+    unsetenv("KL_XR_HAND_TRACKING");
+    ok &= klxr_st_ok(f, "hand tracking: withheld from a guest not known to want it",
+                     !klxr_ext_gate_open(KLXR_GATE_HAND_TRACKING) &&
+                     klxr_GetInstanceProcAddr(NULL, "xrLocateHandJointsEXT", &fn) ==
+                         KLXR_ERROR_FUNCTION_UNSUPPORTED && !fn);
+    setenv("KL_XR_HAND_TRACKING", "1", 1);
+    ok &= klxr_st_ok(f, "hand tracking: KL_XR_HAND_TRACKING=1 offers it and its entry points",
+                     klxr_ext_gate_open(KLXR_GATE_HAND_TRACKING) &&
+                     klxr_GetInstanceProcAddr(NULL, "xrLocateHandJointsEXT", &fn) ==
+                         KLXR_SUCCESS && fn);
+    ok &= klxr_st_ok(f, "hand tracking: ...but not BRINK's aim and hand interaction",
+                     !klxr_ext_gate_open(KLXR_GATE_BRINK_HANDS));
+
+    klxr_session *s = calloc(1, sizeof *s);
+    klxr_space *stage = klxr_space_alloc();
+    if (stage) *stage = klxr_st_space(KLXR_REF_SPACE_STAGE, 0, 0, 0);
+    // A base away from the origin, as xrizer's controller space is.
+    klxr_space *moved = klxr_space_alloc();
+    if (moved) *moved = klxr_st_space(KLXR_REF_SPACE_STAGE, 0.3f, 1.0f, -0.5f);
+    if (!s || !stage || !moved) {
+        free(s);
+        free(saved);
+        return klxr_st_ok(f, "hand tracking: a session and two spaces", 0);
+    }
+    s->magic = KLXR_MAGIC_SESSION;
+
+    XrHandTrackerCreateInfoEXT ci = { XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT, NULL, 2, 0 };
+    void *t = NULL;
+    ok &= klxr_st_ok(f, "hand tracking: a tracker needs a session",
+                     klxr_CreateHandTrackerEXT(NULL, &ci, &t) == KLXR_ERROR_HANDLE_INVALID && !t);
+    ok &= klxr_st_ok(f, "hand tracking: a right-hand tracker, and the frontend is asked for joints",
+                     klxr_CreateHandTrackerEXT(s, &ci, &t) == KLXR_SUCCESS && t &&
+                     kl_openxr_hand_tracking_wanted());
+
+    XrHandJointsLocateInfoEXT info = { XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT, NULL, stage, 0 };
+    XrHandJointLocationEXT joints[KLXR_HAND_JOINT_COUNT];
+    uint8_t vjoints[KLXR_HAND_JOINT_COUNT * 32];
+    XrHandJointVelocitiesEXT vel = { XR_TYPE_HAND_JOINT_VELOCITIES_EXT, NULL,
+                                     KLXR_HAND_JOINT_COUNT, vjoints };
+    XrHandJointLocationsEXT loc = { XR_TYPE_HAND_JOINT_LOCATIONS_EXT, &vel, 0,
+                                    KLXR_HAND_JOINT_COUNT, joints };
+
+    // Nothing published: inactive, nothing valid.
+    kl_openxr_set_hand_joints(1, NULL, NULL, 0);
+    memset(joints, 0xff, sizeof joints);
+    ok &= klxr_st_ok(f, "hand tracking: a hand not seen is inactive",
+                     klxr_LocateHandJointsEXT(t, &info, &loc) == KLXR_SUCCESS &&
+                     !loc.isActive && joints[1].locationFlags == 0);
+
+    // A hand as the frontend sends it: 8 floats a joint, every one tracked.
+    float pose8[KLXR_HAND_JOINT_COUNT * 8];
+    uint32_t valid[KLXR_HAND_JOINT_COUNT];
+    for (int k = 0; k < KLXR_HAND_JOINT_COUNT; k++) {
+        float *v = pose8 + 8 * k;
+        v[0] = 0.2f + 0.01f * k; v[1] = 1.1f; v[2] = -0.4f - 0.005f * k;
+        v[3] = v[4] = v[5] = 0; v[6] = 1;
+        v[7] = 0.01f;
+        valid[k] = 0xF;
+    }
+    kl_openxr_set_hand_joints(1, pose8, valid, KLXR_HAND_JOINT_COUNT);
+    memset(vjoints, 0xff, sizeof vjoints);
+    XrResult r = klxr_LocateHandJointsEXT(t, &info, &loc);
+    int all = 1;
+    for (int k = 0; k < KLXR_HAND_JOINT_COUNT; k++) all &= joints[k].locationFlags == 0xF;
+    ok &= klxr_st_ok(f, "hand tracking: a seen hand is active, 26 joints valid and tracked",
+                     r == KLXR_SUCCESS && loc.isActive && all);
+    ok &= klxr_st_pos(f, "hand tracking: the wrist in STAGE", joints[1].pose.position,
+                      pose8[8 + 0], pose8[8 + 1], pose8[8 + 2]);
+    ok &= klxr_st_pos(f, "hand tracking: the index tip in STAGE", joints[10].pose.position,
+                      pose8[80 + 0], pose8[80 + 1], pose8[80 + 2]);
+    int vzero = 1;
+    for (size_t i = 0; i < sizeof vjoints; i++) vzero &= vjoints[i] == 0;
+    ok &= klxr_st_ok(f, "hand tracking: velocities say they are not measured", vzero);
+
+    // Against a moved base: the same joints, by that base's offset.
+    info.baseSpace = moved;
+    klxr_LocateHandJointsEXT(t, &info, &loc);
+    ok &= klxr_st_pos(f, "hand tracking: located against a base space", joints[1].pose.position,
+                      pose8[8 + 0] - 0.3f, pose8[8 + 1] - 1.0f, pose8[8 + 2] + 0.5f);
+    info.baseSpace = stage;
+
+    loc.jointCount = 21;
+    ok &= klxr_st_ok(f, "hand tracking: a joint count other than 26 is refused",
+                     klxr_LocateHandJointsEXT(t, &info, &loc) == KLXR_ERROR_VALIDATION_FAILURE);
+    loc.jointCount = KLXR_HAND_JOINT_COUNT;
+
+    // The frontend lost the hand (or a controller became the input again).
+    kl_openxr_set_hand_joints(1, NULL, NULL, 0);
+    ok &= klxr_st_ok(f, "hand tracking: a hand withdrawn is inactive again",
+                     klxr_LocateHandJointsEXT(t, &info, &loc) == KLXR_SUCCESS &&
+                     !loc.isActive && joints[1].locationFlags == 0);
+
+    ok &= klxr_st_ok(f, "hand tracking: destroyed, the frontend stops publishing",
+                     klxr_DestroyHandTrackerEXT(t) == KLXR_SUCCESS &&
+                     !kl_openxr_hand_tracking_wanted());
+    ok &= klxr_st_ok(f, "hand tracking: a destroyed tracker is an invalid handle",
+                     klxr_LocateHandJointsEXT(t, &info, &loc) == KLXR_ERROR_HANDLE_INVALID);
+
+    stage->magic = moved->magic = 0;
+    s->magic = 0;
+    free(s);
+    if (saved) setenv("KL_XR_HAND_TRACKING", saved, 1); else unsetenv("KL_XR_HAND_TRACKING");
+    free(saved);
     return ok;
 }

@@ -186,5 +186,13 @@ int  kl_openxr_predict(void);
 // NULL/0 marks a hand temporarily untracked. Called by the visionOS render loop.
 void kl_openxr_set_hand_joints(int hand, const float *pose8,
                               const uint32_t *valid, int count);
+// Has the guest created an XR_EXT_hand_tracking hand tracker? While it has, the
+// frontend publishes the joints above, a hand holding a controller included.
+// Any thread.
+int  kl_openxr_hand_tracking_wanted(void);
+// XR_EXT_hand_tracking end to end, for tests/t_xrhands.c: the gate, the entry
+// points, and joints published as the frontend does located as a guest does.
+// 1 when every check holds.
+int  kl_openxr_hands_selftest(FILE *f);
 
 #endif
