@@ -1367,11 +1367,11 @@ STORE_DEFAULTS = {
     # Shader.WarmupAllShaders, and on a cold Metal cache that took 0.3-1.5 s a
     # pipeline with no frame for over a minute (295 compiled in 70 s, then the
     # player quit, on device 2026-11-03); warm, the same call took 1.9 s.
-    # Detailed models further away and anisotropic filtering: it already runs
-    # its best Android profile (Quest 3, HQ bundles, full-size textures), at a
-    # LOD bias of 0.4 and with no anisotropy; neither costs memory, which is
-    # the limit here (7.3 of 8.1 GB in a level).
-    "x1540210": {"obb_raw": 1, "test_on": "KL_VK_ASYNC_PIPES,KL_UNITY_LOD_BIAS,KL_VK_ANISO"},
+    # Anisotropic filtering: it already runs its best Android profile (Quest 3,
+    # HQ bundles, full-size textures) and asks for none. The LOD bias switch
+    # (KL_UNITY_LOD_BIAS, 1.5 over the game's 0.4) is left to the player: on
+    # device it cost GPU for a difference that was hard to see.
+    "x1540210": {"obb_raw": 1, "test_on": "KL_VK_ASYNC_PIPES,KL_VK_ANISO"},
     # Cities: VR (Fast Travel Games, Unity, Vulkan). In-game video on: selecting
     # the road menu opens tutorial and preview video clips. With video refused
     # by default for Vulkan guests (kl_mediandk.c, klm_extractor_enabled),

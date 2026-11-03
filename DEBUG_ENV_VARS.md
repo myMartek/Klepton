@@ -1539,8 +1539,8 @@ behind "no controllers render". Diagnostic only, off unless asked for.
   for a Unity guest, through the engine's internal call (IL2CPP strips the
   managed setter of a game that never calls it), from frame 300 and again every
   600 frames. The start window's test switch "Detail: detailed models further
-  away" sets 1.5; on from the start for `x1540210` (Arizona Sunshine 2, Steam
-  build, which runs at 0.4). Logs `[unity] LOD bias`.
+  away" sets 1.5 (Arizona Sunshine 2, Steam build, runs at 0.4). Logs
+  `[unity] LOD bias`.
 - `KL_PROBE_SCRIPT=<frame>:<Namespace.Class>::<Method>[(args)][#n];<frame>:...`
   — several calls like `KL_PROBE_CALL`'s, each at its frame (rising), separated
   by `;`. Arguments, up to four: a quoted one is a string, `true`/`false` and
