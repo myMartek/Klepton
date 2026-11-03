@@ -1362,8 +1362,12 @@ def _generic_row(name):
 # one read off its APK and only the field named here differs.
 STORE_DEFAULTS = {
     # Arizona Sunshine 2, Steam build: its obb directory holds the manifests and
-    # asset-config.json beside the OBBs, so it is staged wholesale.
-    "x1540210": {"obb_raw": 1},
+    # asset-config.json beside the OBBs, so it is staged wholesale. Shaders
+    # compiled behind the picture: after its menu loads it calls
+    # Shader.WarmupAllShaders, and on a cold Metal cache that took 0.3-1.5 s a
+    # pipeline with no frame for over a minute (295 compiled in 70 s, then the
+    # player quit, on device 2026-11-03); warm, the same call took 1.9 s.
+    "x1540210": {"obb_raw": 1, "test_on": "KL_VK_ASYNC_PIPES"},
     # Cities: VR (Fast Travel Games, Unity, Vulkan). In-game video on: selecting
     # the road menu opens tutorial and preview video clips. With video refused
     # by default for Vulkan guests (kl_mediandk.c, klm_extractor_enabled),
