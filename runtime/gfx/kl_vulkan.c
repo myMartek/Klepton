@@ -5173,8 +5173,8 @@ static VkResult VKAPI_CALL klvk_CreateGraphicsPipelines(VkDevice dev,
 // calls that undefined too; a Quest's fetch hands the shader the stored bits.
 // Here the attribute is declared with the integer format of the same size,
 // which hands it exactly those bits. Arizona Sunshine 2 (Unity 2022.3,
-// x5245041552210029) had some two thousand of these in a session, in bursts
-// as new things came into view — each a Metal compile thrown away and a draw
+// x5245041552210029; x1540210 is the build Steam ships) had some two
+// thousand of these in a session, in bursts as new things came into view — each a Metal compile thrown away and a draw
 // left out — and is the second title it is on for by default. This half has a
 // switch of its own, KL_VK_VIN_INT (default on for that title only), so Alien's
 // retry stays what was measured there: a pipeline refused for this reason is
@@ -5202,6 +5202,7 @@ static int klvk_vin_on(void) {
         // device, 2026-10-23).
         on = kl_env_on("KL_VK_VIN_FILL", t && (!strcmp(t, "x24882487241367228") ||
                                               !strcmp(t, "x5245041552210029") ||
+                                              !strcmp(t, "x1540210") ||
                                               !strcmp(t, "x8012387035448196") ||
                                               !strcmp(t, "x9269393463181825")));
     }
@@ -5213,7 +5214,8 @@ static int klvk_vin_int_on(void) {
     if (on < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        on = kl_env_on("KL_VK_VIN_INT", t && !strcmp(t, "x5245041552210029"));
+        on = kl_env_on("KL_VK_VIN_INT", t && (!strcmp(t, "x5245041552210029") ||
+                                              !strcmp(t, "x1540210")));
     }
     return on;
 }

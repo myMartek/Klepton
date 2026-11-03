@@ -1256,6 +1256,10 @@ GENERIC_OBB = {
     # /sdcard/Android/obb/<package> path after Unity opens it via getObbDir.
     # Stage @obb there so both readers reach the same installed file.
     "x2124523024270629": "Android/obb/com.FireproofStudios.TheRoomVR",
+    # Arizona Sunshine 2 as Steam ships it (x1540210, Steam app 1540210): 19
+    # OBBs, each with a .manifest beside it, and asset-config.json naming the
+    # ones it requires, all delivered loose into Android's obb directory.
+    "x1540210": "Android/obb/com.vertigogames.azs2",
     "x3635172946605196": "Android/obb/com.brink.vr.oculus.quest",
     "x2544573735586536": "Android/obb/com.JustAddWater.SniperEliteVR",
     # Ghost Town (com.FireproofStudios.GhostTown, x9531494193591052) is Unity,
@@ -1357,6 +1361,9 @@ def _generic_row(name):
 # DEFAULT of a setting and nothing about how it is built — so the row stays the
 # one read off its APK and only the field named here differs.
 STORE_DEFAULTS = {
+    # Arizona Sunshine 2, Steam build: its obb directory holds the manifests and
+    # asset-config.json beside the OBBs, so it is staged wholesale.
+    "x1540210": {"obb_raw": 1},
     # Cities: VR (Fast Travel Games, Unity, Vulkan). In-game video on: selecting
     # the road menu opens tutorial and preview video clips. With video refused
     # by default for Vulkan guests (kl_mediandk.c, klm_extractor_enabled),

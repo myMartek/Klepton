@@ -1,8 +1,9 @@
 // Arizona Sunshine 2's two JNI answers: Vertigo's LogcatUtility.readLogs hands
 // back an empty string, and the Sentry Java SDK (io/sentry/...) is dropped —
 // calls and field reads answer zero/NULL, field writes are not kept. Both for
-// that title only: any other target still stops on the name. Each case runs in
-// a child of its own, because the switches are read once per process.
+// that title only (its Meta build and the one Steam ships): any other target
+// still stops on the name. Each case runs in a child of its own, because the
+// switches are read once per process.
 // No SDK, game or network needed.
 #include <assert.h>
 #include <signal.h>
@@ -22,6 +23,7 @@ enum { KL_JNI_SLOTS(SLOT) };
 #undef SLOT
 #define JNI(name, type) ((type)jni[JNI_##name])
 #define AZS2 "x5245041552210029"
+#define AZS2_STEAM "x1540210"
 #define LOGCAT "com/vertigogames/vertigoandroidutils/LogcatUtility"
 static void *env;
 static void **jni;
@@ -77,8 +79,8 @@ static void *sentry_level(void) {
 }
 
 // The title itself, with the run's own stop rules (not permissive).
-static int target_answers(void) {
-    start(AZS2, 0);
+static int answers(const char *target) {
+    start(target, 0);
     kl_jni_local_frame_push();
     void *s = read_logs();
     assert(s);
@@ -89,6 +91,8 @@ static int target_answers(void) {
     assert(breadcrumbs(300) == 0);   // dropped, and never fills the table
     return 0;
 }
+static int target_answers(void)       { return answers(AZS2); }
+static int steam_build_answers(void)  { return answers(AZS2_STEAM); }
 // Any other title in permissive mode: Sentry writes are kept as before.
 static int other_keeps_writes(void) {
     start("jni-azs2-test-other", 1);
@@ -120,6 +124,7 @@ int main(void) {
 #define EXPECT(fn, want) do { int r = run(fn); if (r != (want)) { \
         fprintf(stderr, "FAIL: %s gave %d, want %d\n", #fn, r, (want)); bad = 1; } } while (0)
     EXPECT(target_answers, 0);
+    EXPECT(steam_build_answers, 0);
     EXPECT(other_keeps_writes, 0);
     EXPECT(other_sentry_call, SIGABRT);
     EXPECT(other_sentry_field, SIGABRT);
@@ -127,7 +132,7 @@ int main(void) {
     EXPECT(target_switched_off, SIGABRT);
 #undef EXPECT
     if (bad) return 1;
-    puts("PASS: Arizona Sunshine 2 reads an empty logcat and drops the Sentry Java SDK "
+    puts("PASS: Arizona Sunshine 2 (Meta and Steam builds) reads an empty logcat and drops the Sentry Java SDK "
          "(calls, field reads, unkept writes past the table size); other titles and "
          "KL_JNI_DROP_SENTRY=0 still stop on the name.");
     return 0;

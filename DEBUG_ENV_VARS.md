@@ -60,7 +60,9 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   Java SDK: they answer zero/NULL/void (writes are not kept), as an SDK that
   was never started, and the first 16 are named in the log. Default 1 for
   `x5245041552210029` (Arizona Sunshine 2, whose sentry-unity asks for
-  `Sentry.getCurrentHub` after its splash), else 0 — the stop by name.
+  `Sentry.getCurrentHub` after its splash) and `x1540210` (the same game as
+  Steam ships it, whose breadcrumbs otherwise fill the field-write table in
+  the first level), else 0 — the stop by name.
 - `KL_MP14_TRACE=1` — (`runtime/jni/kl_jni_ue4.c`) name the first few hundred
   calls a guest makes on UE4's `MediaPlayer14` (position, frame fetch, playing,
   complete, resolution change, start/pause/seek), each with the thread it came
@@ -1961,16 +1963,17 @@ puts the camera on the ground with its hands underneath it.
   "Function requires stage_in attributes but no descriptor was set") is created
   again with those locations reading zeroes from a buffer of the layer's own.
   Pipelines that compile are untouched. Default 1 for `x24882487241367228`
-  (Alien: Rogue Incursion), `x5245041552210029` (Arizona Sunshine 2) and
-  `x9269393463181825` (Roboquest VR, Meta Store build: its start-up shader
-  precompile stopped at the first refusal), else 0.
+  (Alien: Rogue Incursion), `x5245041552210029` and `x1540210` (Arizona
+  Sunshine 2, Meta and Steam builds) and `x9269393463181825` (Roboquest VR,
+  Meta Store build: its start-up shader precompile stopped at the first
+  refusal), else 0.
 - `KL_VK_VIN_INT=0|1` — (only with `KL_VK_VIN_FILL` on) the same retry also
   takes a location the state supplies as 32-bit floats but the shader reads as
   int/uint ("Cannot convert attribute from MTLAttributeFormatFloat2 to int4 or
   uint4"): it is declared again with the integer format of the same size,
   which hands the shader the same bits. Default 1 for `x5245041552210029`
-  (Arizona Sunshine 2), else 0 — Alien keeps such a pipeline refused, as it was
-  measured.
+  and `x1540210` (Arizona Sunshine 2, Meta and Steam builds), else 0 — Alien
+  keeps such a pipeline refused, as it was measured.
 - `KL_VK_GRID_DILATE=0|1` — conservative rasterization for draws through a
   100x60 viewport: each is drawn again four times with the viewport moved by
   ±0.49 pixel, so every pixel a primitive touches gets a fragment. HITMAN 3 VR:
