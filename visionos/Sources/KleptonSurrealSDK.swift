@@ -106,6 +106,21 @@ final class KleptonSurrealSDK: @unchecked Sendable {
 
     func note(_ message: String) { trace(message) }
 
+    /// Before the process ends: the render thread stops calling the SDK, as for a restart, and
+    /// is given a few frames to come out of a call it is in. `exit` runs the SDK's static
+    /// destructors, and one of them, CoreBluetoothSystem's, took a mutex the render thread's
+    /// SVRRenderFinish was using: "mutex lock failed", std::terminate, a crash report on every
+    /// close (Arizona Sunshine 2 and Half-Life: Alyx, on device, 2026-11-03).
+    func quiesceForExit() {
+        #if KL_SURREAL_SDK
+        lock.lock()
+        let wasStarted = started && !paused
+        paused = true
+        lock.unlock()
+        if wasStarted { Thread.sleep(forTimeInterval: 0.1) }
+        #endif
+    }
+
     /// Throws away the SDK's alignment by restarting it, so it finds the controllers again
     /// where they are now (after hands mode they came back misaligned, 2026-10-28). The
     /// render thread stops calling the SDK first; the controllers are parked meanwhile.
