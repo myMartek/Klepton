@@ -1061,11 +1061,16 @@ int kl_ovrp_gl_array_for(const char *t) {
         // value) — only the self-lit screen showed, on black, so there was
         // nothing to point with (his headset, 2026-10-19). With the Array
         // layer and real multiview the console and the hands are there (Mac).
+        // SWORDS of GARGANTUA (x3064046640291676, UE 4.24) took DoubleWide and
+        // then made a two-layer 6144x2464 array for its scene anyway: its eye
+        // framebuffer had no attachment (0x8cd7) on every draw, music and a
+        // black picture (2026-10-31).
         return kl_env_on("KL_OVRP_GL_ARRAY", t && (strcmp(t, "x6963344583787383") == 0 ||
                                                    strcmp(t, "x3386618894743567") == 0 ||
                                                    strcmp(t, "x2108775495884888") == 0 ||
                                                    strcmp(t, "x2223615721048141") == 0 ||
                                                    strcmp(t, "x2426206484098337") == 0 ||
+                                                   strcmp(t, "x3064046640291676") == 0 ||
                                                    // Arizona Sunshine: Unity's legacy VRDevice
                                                    // with a Scriptable Render Pipeline, which
                                                    // renders stereo single-pass or not at all

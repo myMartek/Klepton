@@ -112,6 +112,12 @@ static const char *const UE4_CHAIN[] = {
     // as unresolved right after the platform check (2026-10-28). Built on
     // libc++_shared, so after it; skipped where a guest does not ship it.
     "libnakama-cpp.so",
+    // mod.io's SDK (modio*), which also carries the OpenSSL and curl libUE4
+    // binds against: the same case again. Absent from the pool, SWORDS of
+    // GARGANTUA (x3064046640291676) aborted on OPENSSL_load_builtin_modules as
+    // unresolved right after its config was read (2026-10-31). libc and the
+    // system libstdc++ only; skipped where a guest does not ship it.
+    "libmodio.so",
     UE4_LIB,
 };
 

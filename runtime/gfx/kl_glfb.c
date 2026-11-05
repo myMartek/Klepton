@@ -10288,6 +10288,11 @@ static int klfb_cimg_on(void) {
                                                       strcmp(t, "x3386618894743567") == 0 ||
                                                       strcmp(t, "x1906871599408213") == 0 ||
                                                       strcmp(t, "x5190288877703616") == 0 ||
+                                                      // SWORDS of GARGANTUA (UE 4.24):
+                                                      // once it drew, distant scenery and
+                                                      // parts of its opponents stayed
+                                                      // untextured (fix 89, 2026-11-01).
+                                                      strcmp(t, "x3064046640291676") == 0 ||
                                                       // Warhammer 40,000: Battle Sister
                                                       // (Unity) copies its level's textures
                                                       // into 2D arrays while loading, and

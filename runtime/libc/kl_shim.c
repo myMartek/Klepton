@@ -2455,6 +2455,17 @@ static const kl_entry g_shim[] = {
     // stdio needing guest-FILE translation
     E("__sF", g_sF),
     E("fputc", kl_fputc), E("fputs", kl_fputs), E("fwrite", kl_fwrite), E("fread", kl_fread),
+    // putc is fputc under its other name, and needs the same FILE * mapping:
+    // left to the host's putc, a bionic stream reached flockfile as a Darwin
+    // FILE and faulted. SWORDS of GARGANTUA's libmodio (its curl) died there
+    // right after the first frames (2026-10-31).
+    E("putc", kl_fputc),
+    // Plain C library functions with the same signature on both sides, named
+    // here rather than generated: gen_libc_table.py scans Unity and Steam Link
+    // trees only, and these two are imported by an Unreal title's libraries
+    // alone — labs by SWORDS of GARGANTUA's libmodio (its first call aborted as
+    // unresolved), llround by its libUE4 (2026-10-31).
+    E("labs", labs), E("llround", llround),
     E("fclose", kl_fclose), E("fflush", kl_fflush), E("fgets", kl_fgets), E("getc", kl_getc_),
     E("fgets_unlocked", kl_fgets_unlocked),
     E("feof", kl_feof), E("ferror", kl_ferror), E("clearerr", kl_clearerr),
