@@ -656,6 +656,12 @@ build/t_jni_memory: tests/t_jni_memory.c $(RUNTIME) $(RUNTIME_HDRS)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/t_jni_memory.c $(RUNTIME) $(LDLIBS)
 
+# TMNT: Empire City's three HorizonPlatformCore answers (offline player, two
+# ERROR completions), and that every other title still gets no reply to them.
+build/t_jni_tmnt: tests/t_jni_tmnt.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_jni_tmnt.c $(RUNTIME) $(LDLIBS)
+
 # Arizona Sunshine 2's own answers (Vertigo's logcat read, the Sentry Java SDK
 # dropped), and that every other title still stops on those names.
 build/t_jni_azs2: tests/t_jni_azs2.c $(RUNTIME) $(RUNTIME_HDRS)
@@ -1198,7 +1204,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands
+check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_tmnt build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1272,6 +1278,9 @@ check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load buil
 	@./build/t_jni_vivox > build/jni-vivox.log 2>&1 || { cat build/jni-vivox.log; exit 1; }
 	@./build/t_jni_memory > build/jni-memory.log 2>&1 || { cat build/jni-memory.log; exit 1; }
 	@echo "=== BattleGroupVR2: Firebase, Vivox, memory ===" && tail -1 build/jni-firebase.log && tail -1 build/jni-vivox.log && tail -1 build/jni-memory.log
+	@./build/t_jni_tmnt > build/jni-tmnt.log 2>&1 || { cat build/jni-tmnt.log; exit 1; }
+	@./build/t_jni_tmnt other-target >> build/jni-tmnt.log 2>&1 || { cat build/jni-tmnt.log; exit 1; }
+	@echo "=== TMNT: Empire City: Horizon user, org id, purchases (TMNT + other target) ===" && grep "checks passed" build/jni-tmnt.log
 	@./build/t_jni_azs2 > build/jni-azs2.log 2>&1 || { cat build/jni-azs2.log; exit 1; }
 	@echo "=== Arizona Sunshine 2: logcat, Sentry ===" && tail -1 build/jni-azs2.log
 	@./build/t_gunclub > build/gunclub.log 2>&1 || { cat build/gunclub.log; exit 1; }
