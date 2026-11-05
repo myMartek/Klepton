@@ -77,6 +77,25 @@ static void P(FILE *out, const char *fmt, ...) {
 // already default-on for hl2 via their own target check, so they are not repeated.
 static void kl_driver_env_defaults(const kl_target *t) {
     if (!t || !t->name) return;
+    if (!strcmp(t->name, "x3044656825604617")) {
+        // Doctor Who: The Edge of Time, build 368 (community fix 93). Its
+        // multiview programs target separate-eye framebuffers: kl_glfb lowers
+        // them (klfb_doctor_shader — extension and view count removed, stereo
+        // matrices read from Unity's per-camera uniforms). This legacy submit
+        // has no per-eye viewport rect; give both camera draws and the
+        // compositor the same union of the display's cones. Program binaries
+        // off so the lowering is what links; invalidation off after a Metal
+        // crash the sender saw.
+        //   The sender's build also had KL_GLFB_SLOW_MS=50, KL_STALL_MS=1000,
+        //   KL_STALL_ALL_THREADS=1, KL_GLFB_ERRPROBE=1 and KL_GLFB_DEBUG_CB=1 on
+        //   (plus the [doctor-link] lines, KL_DOCTOR_LINK_LOG=1). Diagnostics
+        //   only, so they are not defaults here; set them to look at a stall.
+        setenv("KL_OVRP_UNIFY_FRUSTUM", "1", 0);
+        setenv("KL_GLES_VERSION", "3.0", 0);
+        setenv("KL_GLFB_PROGRAM_BINARY", "0", 0);
+        setenv("KL_GLFB_NO_INVALIDATE", "1", 0);
+        fprintf(stderr, "  [klepton] Doctor Who: complete separate-eye shader adaptation\n");
+    }
     if (!strcmp(t->name, "x8016534201745429")) {
         // Space Atlas VR resizes its GLES eyes during startup; the owner sees
         // the scene confined to the lower-left corner with guest foveation.
