@@ -229,6 +229,16 @@ static klj_val klj_InputDevice_isVirtual(void *env, void *self, const klj_val *a
     return (klj_val){.j = 0};
 }
 
+// InputDevice.getVibrator() — BRINK Traveler 1.8.4 (Unity 6000.6) calls it at
+// boot and aborted on "no host implementation". Android never returns null
+// here (a device without a motor gets a Vibrator whose hasVibrator() is false),
+// and the host's Vibrator already answers hasVibrator() with false: controller
+// rumble goes through OVRPlugin, not through this path.
+static klj_val klj_InputDevice_getVibrator(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = kl_jni_new_object("android/os/Vibrator")};
+}
+
 // Unity reads the joystick axis table from getMotionRanges(). The honest answer
 // for THIS device is an EMPTY list: every axis is served through OVRPlugin's
 // GetControllerState4, not through Android InputDevice motion ranges — the game
@@ -1059,6 +1069,7 @@ const klj_binding klj_bind_window[] = {
     {"android/view/InputDevice", "getProductId", "()I", klj_InputDevice_getProductId},
     {"android/view/InputDevice", "getVendorId", "()I", klj_InputDevice_getVendorId},
     {"android/view/InputDevice", "isVirtual", "()Z", klj_InputDevice_isVirtual},
+    {"android/view/InputDevice", "getVibrator", "()Landroid/os/Vibrator;", klj_InputDevice_getVibrator},
     {"android/view/InputDevice", "getMotionRanges", "()Ljava/util/List;", klj_InputDevice_getMotionRanges},
     {"android/view/InputDevice", "getMotionRange", "(I)Landroid/view/InputDevice$MotionRange;", klj_InputDevice_getMotionRange},
     {"android/hardware/input/InputManager", "registerInputDeviceListener",
