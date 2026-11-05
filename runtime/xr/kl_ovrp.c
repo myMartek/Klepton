@@ -10265,6 +10265,12 @@ void kl_ovrp_eye_desc_size(float texture_scale, int *out_w, int *out_h) {
     kl_ovrp_eye_texture_size(&w, &h);
     const char *t = kl_driver_target_name();
     if (t && strcmp(t, "x6565887093433499") == 0) texture_scale = 1.0f;
+    // MOTHERGUNSHIP: FORGE (x4188843481174389): the layer is always asked for at scale 1.0. Its dynamic
+    // resolution moves the scale both ways (1.35 up, 0.8 down in the boss room) and every new size is new
+    // eye storage while the old is kept ("allocating fresh"), so the footprint climbed to 8 GB and the
+    // system ended the app (headset 2026-11-03, two runs; the cap alone only stopped the sizes above 1.0).
+    // One size, one allocation. KL_OVRP_FIXED_SCALE=0 gives the guest's scale back.
+    else if (kl_env_on("KL_OVRP_FIXED_SCALE", t && strcmp(t, "x4188843481174389") == 0)) texture_scale = 1.0f;
     else if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
     w = (int)((float)w * texture_scale);
     h = (int)((float)h * texture_scale);
@@ -10286,7 +10292,13 @@ void kl_ovrp_eye_desc_size(float texture_scale, int *out_w, int *out_h) {
         static int env = -2;
         if (env == -2) env = getenv("KL_OVRP_EYE_DESC_CAP") ? kl_env_on("KL_OVRP_EYE_DESC_CAP", 0) : -1;
         int on = env >= 0 ? env
-               : kl_driver_target_is_moss() || (t && (strcmp(t, "x2285803881494677") == 0 || strcmp(t, "x6565887093433499") == 0)) || g_eye_max_choice > 0;
+               : kl_driver_target_is_moss() || (t && (strcmp(t, "x2285803881494677") == 0 || strcmp(t, "x6565887093433499") == 0)) || g_eye_max_choice > 0
+                 // MOTHERGUNSHIP: FORGE (x4188843481174389): its dynamic resolution walks the layer scale
+                 // 1.0 / 1.1 / 1.15 / 1.2 / 1.35 and every new size is new eye storage while the old is
+                 // kept (SetupLayer: "allocating fresh"). Headset 2026-11-03: 24 reallocations in three
+                 // minutes took the footprint from 2.4 GB to 8 GB (avail 146 MB) and the system ended
+                 // the app, nearly through its tutorial. Held to the cap, every scale is one size.
+                 || (t && strcmp(t, "x4188843481174389") == 0);
         // No display has pushed a size in a host run, so no cap was worked out: the plain default there.
         int cap = g_eye_cap >= 0 ? g_eye_cap : kl_env_int("KL_OVRP_EYE_MAX", 3072);
         // ...times the render scale, so "Resolution" still lowers the picture: held to the plain cap, a

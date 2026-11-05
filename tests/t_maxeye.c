@@ -27,6 +27,7 @@
 #define OTHER "maxeye-test-other"
 #define ONIRI "x7611090302277055"
 #define FLOORPLAN2 "x2401648309868679"
+#define MGSFORGE "x4188843481174389"
 
 // What the guest is told for a 4633x3717 request (the display's own size).
 static int eye(const char *target, int choice, const char *env, const char *rs, int want_w, int want_h) {
@@ -122,6 +123,13 @@ int main(void) {
     desc_rs = "0.8";
     ok &= run_desc("Gun Club at 80 %, scale 1.4: the cap follows Resolution (3200x2568)", GUNCLUB, 0, NULL, 1.4f, 3200, 2568);
     desc_rs = NULL;
+    // MOTHERGUNSHIP: FORGE: the layer is worked out at scale 1.0 whatever its dynamic resolution asks
+    // (KL_OVRP_FIXED_SCALE), so every step is the one size; =0 gives the guest's scale back.
+    ok &= run_desc("MOTHERGUNSHIP: FORGE, scale 1.35: fixed at 1.0 (3072x2465)", MGSFORGE, 0, NULL, 1.35f, 3072, 2465);
+    ok &= run_desc("MOTHERGUNSHIP: FORGE, scale 0.8: fixed at 1.0 (3072x2465)", MGSFORGE, 0, NULL, 0.8f, 3072, 2465);
+    setenv("KL_OVRP_FIXED_SCALE", "0", 1);
+    ok &= run_desc("MOTHERGUNSHIP: FORGE, KL_OVRP_FIXED_SCALE=0, scale 0.8: the guest's (2457x1972)", MGSFORGE, 0, NULL, 0.8f, 2457, 1972);
+    unsetenv("KL_OVRP_FIXED_SCALE");
     puts(ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

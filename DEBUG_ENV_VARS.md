@@ -2110,6 +2110,11 @@ puts the camera on the ground with its hands underneath it.
   `FMallocBinned2::FreeExternal` under `UnrealLogSystem::LogStream`). Default 1
   for Zero Caliber 2 (`x6072194326150034`), else 0. Log: *"operator
   new/delete: N slot(s) ... now take libUE4.so's"*.
+- `KL_UE4_ISDK=0|1` — (`kl_ue4.c`) load the guest's `libInteractionSdk.so`
+  (Meta's Interaction SDK) into the UE chain before the engine library, so its
+  `isdk_*` imports bind. Without it they are stubs and the first call aborts
+  (*"called unresolved import 'isdk_FilterPropertyBlock_init'"*). Default 1 for
+  MOTHERGUNSHIP: FORGE (`x4188843481174389`), else 0.
 - `KL_MOH_HOVER=0|1` — Medal of Honor: Above and Beyond: the menu book and the
   telephone receivers on the Whitehall desk lift when a hand comes near. The
   game's data has that reaction off (`TurnHoverAnimsOff` true, `UseLabel`
@@ -4407,6 +4412,13 @@ Not from his fork, found on the way (2026-10-13):
   window; Beat Saber's 1.2x level scale is wanted. The bound is the cap times
   the render scale, so "Resolution" still lowers the picture. His fork
   bounds the desc always. `kl_ovrp_eye_desc_size`.
+- `KL_OVRP_FIXED_SCALE=0|1` — the eye layer is always worked out at scale 1.0,
+  whatever scale the guest passes, so a game's dynamic resolution cannot ask
+  for a new eye size (and new eye storage) on every step. Default 1 for
+  MOTHERGUNSHIP: FORGE (`x4188843481174389`: 24 new sizes in three minutes,
+  footprint 2.4 -> 8 GB, ended by the system), else 0; that title also has
+  `KL_OVRP_EYE_DESC_CAP` on. Bulletstorm VR has the same fixed scale without a
+  switch. `kl_ovrp_eye_desc_size`.
 - `KL_OVRP_EYE_ALIGN=<n>` — each axis of the eye size is rounded down to a
   multiple of n, last of all. **Default 1 (off), 4 for Moss.** Unreal rounds its
   scene buffers UP to a multiple of 4 and kl_fove compares extents exactly: Moss
