@@ -1080,6 +1080,9 @@ static unsigned g_shader_pins_n;
 // Garden of the Sea (x3684804704932159, Unity 2019.4.13f1) the eighth: once
 // its storage-buffer shaders linked (KL_GLFB_SSBO_TEX), 227k "Invalid texture
 // unit!" in a session and the soil it is played on drawn black.
+// Beat Saber 1.45 (beatsaber140) the ninth: repeated "Invalid texture unit!"
+// and the Billie Eilish environment's water black and featureless, restored
+// with the pins on (fix 95, its sender's headset; not run here).
 // ...and every Unity title under the profile for untested games (kl_driver.c):
 // seven of the eight Unity fixes for this error were these pins, and a guest
 // without the error has its samplers where its own shader text puts them, which
@@ -1093,7 +1096,8 @@ static int klfb_bind_pins(void) {
         extern kl_guest_kind kl_driver_kind(void);
         extern int kl_untested_profile(void);
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_GLFB_BIND_PINS", (t && (strcmp(t, "x2773034772778845") == 0 ||
+        v = kl_env_on("KL_GLFB_BIND_PINS", (t && (strcmp(t, "beatsaber140") == 0 ||
+                                                  strcmp(t, "x2773034772778845") == 0 ||
                                                   strcmp(t, "x2582932495064035") == 0 ||
                                                   strcmp(t, "x2436558143118760") == 0 ||
                                                   strcmp(t, "x4015163475201433") == 0 ||
