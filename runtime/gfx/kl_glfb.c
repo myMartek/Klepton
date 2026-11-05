@@ -3934,6 +3934,24 @@ static __thread uint64_t g_draw_t0;
 
 static void klfb_CompileShader(uint32_t shader) {
     if (!g_real_CompileShader) return;
+    // Vacation Simulator (x2393300320759737, community fix 94): ANGLE compiles
+    // shaders asynchronously on background worker threads. Inquiring
+    // GL_COMPILE_STATUS immediately here forces ANGLE to block the main thread
+    // synchronously for each shader under g_compile_lock, freezing the frame
+    // loop for tens of seconds during scene loading. So for that target the
+    // compile is handed straight through: no lock, no status read, and none of
+    // the failure logging below (the guest still reads the status itself).
+    //   KL_GLFB_COMPILE_NOWAIT=0|1 — default 1 for x2393300320759737, else 0.
+    static int nowait = -1;
+    if (nowait < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (t) nowait = kl_env_on("KL_GLFB_COMPILE_NOWAIT", !strcmp(t, "x2393300320759737"));
+    }
+    if (nowait > 0) {
+        g_real_CompileShader(shader);
+        return;
+    }
     // The status/info-log readers are not thunks (the guest must get ANGLE's
     // real answers), so they resolve lazily here rather than through g_thunks,
     // whose entries hand their thunk pointer to the guest.

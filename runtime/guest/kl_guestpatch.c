@@ -841,6 +841,27 @@ static const kl_gp_word k_roboquest_meta_pak_no_mmio[] = {
     { 0x32f167c, 0x910af042, 0x910af042, "fingerprint only (mmio.enable's registration: the variable it binds)" },
 };
 
+// Vacation Simulator (x2393300320759737, com.owlchemylabs.vacationsimulator 1.3.0.40142)
+// PlatformDependentShaderWarmUp and OwlchemyShaderWarmUp: synchronously warming up
+// every shader variant in the game during scene transitions wedges the main thread
+// compiling pipelines via Metal XPC and inflates memory past 3.8 GB. Returning
+// immediately from WarmUpCollections and the OwlchemyShaderWarmUp routines skips
+// the synchronous stall; Unity compiles variants on demand as each material is rendered.
+// Community fix 94 (build 97), measured on the sender's headset only. Every word is a
+// function prologue, which alone is a weak fingerprint; seven of them at these exact
+// addresses, plus Awake's as an unchanged row, pin the group to this build, and the
+// group is atomic — any other libil2cpp.so is left untouched.
+static const kl_gp_word k_vacation_no_shader_warmup[] = {
+    { 0x2372088, 0xa9bd5ffe, 0xd65f03c0, "PlatformDependentShaderWarmUp::WarmUpCollections() -> ret" },
+    { 0x2372130, 0xfc1c0fea, 0xd65f03c0, "PlatformDependentShaderWarmUp::WarmUpCollections(bool) -> ret" },
+    { 0x2371344, 0xfc1c0fea, 0xd65f03c0, "PlatformDependentShaderWarmUp collection warmup loop -> ret" },
+    { 0x2371cac, 0xfc1b0fea, 0xfc1b0fea, "fingerprint only (PlatformDependentShaderWarmUp::Awake)" },
+    { 0x23945dc, 0xa9bf4ffe, 0xd65f03c0, "OwlchemyShaderWarmUp::Warmup(List) -> ret" },
+    { 0x2394604, 0xf81d0ffe, 0xd65f03c0, "OwlchemyShaderWarmUp::Warmup() -> ret" },
+    { 0x23946a4, 0xfc1e0fe8, 0xd65f03c0, "OwlchemyShaderWarmUp::CreatePrewarmObjects() -> ret" },
+    { 0x2394838, 0xa9bf4ffe, 0xd65f03c0, "OwlchemyShaderWarmUp::SetupPrewarmObjectsForVariant() -> ret" },
+};
+
 static const kl_gp_patch k_patches[] = {
     { "roboquest-meta-pak-no-mmio", "libUnreal.so",
       "pak bulk data is read, not memory-mapped (mmio.enable's own path): the read-through cannot map it",
@@ -869,6 +890,10 @@ static const kl_gp_patch k_patches[] = {
       "missing optional end-of-run score state does not abort the scene transition",
       k_pistol_whip_score_null_exit,
       sizeof k_pistol_whip_score_null_exit / sizeof *k_pistol_whip_score_null_exit },
+    { "vacation-no-shader-warmup", "libil2cpp.so",
+      "skip synchronous shader variant collection warmup on scene transitions",
+      k_vacation_no_shader_warmup,
+      sizeof k_vacation_no_shader_warmup / sizeof *k_vacation_no_shader_warmup },
     { "csvr-hud-smaller-lower", "libxash.so",
       "the VR HUD is drawn at 3/4 of its size and 1/16 of the image lower",
       k_csvr_hud_place, sizeof k_csvr_hud_place / sizeof *k_csvr_hud_place },

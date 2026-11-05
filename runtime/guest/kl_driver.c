@@ -391,13 +391,15 @@ static void kl_driver_env_defaults(const kl_target *t) {
             setenv("KL_VK_DEVICE_INFO", "auto", 0);
         }
     }
-    else if (!strcmp(t->name, "x5269080709783454")) {
+    else if (!strcmp(t->name, "x5269080709783454") || !strcmp(t->name, "x2393300320759737")) {
         // Max Mustard (Unity 2022.3 + FMOD Studio over OpenSL). FMOD produced
         // sound in only a small fraction of its buffers — heard as near-silence
         // with the odd quiet stutter — while the banks loaded fine. wrath2's fix
         // class: at default QoS visionOS coalesces the mixer's short timed waits
         // to ~33 ms, longer than one 512-frame block at 48 kHz (10.7 ms), so the
         // output starves between blocks.
+        // Vacation Simulator (x2393300320759737, community fix 94): the same
+        // coalescing made its loader's polling loops take minutes.
         setenv("KL_USLEEP_CAP", "250", 0);
         setenv("KL_GUEST_QOS",  "1",   0);
     }
