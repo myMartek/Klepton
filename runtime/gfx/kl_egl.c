@@ -406,6 +406,9 @@ extern const char *kl_driver_target_name(void);
 // Sweet Surrender (x4723352327707414, Unity 6000.1 + OpenXR, SinglePassMultiview
 // with 4x anti-aliasing) is the same again: ~2000 incomplete-framebuffer errors in
 // 25 s, a black picture with its music playing (2026-10-23).
+// Tentacular (x3967680489996895, Unity 2021.3.19f1 + OpenXR, single-pass into
+// an array swapchain) is the same again: without GL_OVR_multiview and MSRTT,
+// framebuffer attachments are incomplete/refused and the picture stays black.
 // iB Cricket (x5437449896288644, Unity 6000.0 + the Oculus XR plugin, 4x
 // anti-aliasing) too: its eye framebuffers are a colour texture beside a
 // 4-sample depth renderbuffer, every glClear on them raised 0x506 (status
@@ -424,7 +427,8 @@ static int klgl_want_msrtt(void) {
                                             strcmp(t, "x6946182742093178") == 0 ||
                                             strcmp(t, "x4723352327707414") == 0 ||
                                             strcmp(t, "x5437449896288644") == 0 ||
-                                            strcmp(t, "x24151641901194680") == 0)));
+                                            strcmp(t, "x24151641901194680") == 0 ||
+                                            strcmp(t, "x3967680489996895") == 0)));
     }
     return v;
 }

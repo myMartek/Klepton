@@ -522,6 +522,13 @@ void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) 
         kl_egl_set_gles_version(3, 0);
         fprintf(stderr, "  [gl] Gods of Gravity: GLES 3.0 capability profile (ANGLE backend)\n");
     }
+    if (t && !strcmp(t->name, "x3967680489996895")) {
+        // Tentacular (Unity 2021.3.19f1, OpenXR): told 3.2, Unity queries
+        // shader storage blocks and program interfaces unsupported by ANGLE Metal.
+        // GLES 3.0 capability profile ensures Unity stays on the supported paths.
+        kl_egl_set_gles_version(3, 0);
+        fprintf(stderr, "  [gl] Tentacular: GLES 3.0 capability profile (ANGLE backend)\n");
+    }
     // KL_GLES_VERSION=<major>.<minor> — the GLES level described to any guest,
     // for trying a title on the 3.0 profile above without a build.
     {

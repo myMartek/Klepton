@@ -1393,6 +1393,12 @@ STORE_DEFAULTS = {
     # when the head turned (on device, 2026-10-18; the double squeeze measured
     # on the Mac with KL_GLFB_MTL=1 KL_VRR=1 KL_GLFB_DUMP_FBOS=1).
     "x3919415921458774": {"foveation": False, "foveation_reset": 1},
+    # Tentacular (Unity 2021.3.19f1, OpenGL ES). Foveation off by default and
+    # render scale at 0.8: rate mapping on intermediate render targets produces
+    # an unrendered/black swapchain on ANGLE Metal, and lowering resolution
+    # offsets Unity's 1.2x eye texture expansion.
+    "x3967680489996895": {"foveation": False, "foveation_reset": 1,
+                          "render_scale": 0.8, "picture_reset": 1},
     # HITMAN 3 VR: Reloaded (Glacier, Vulkan, OpenXR). Its owner's choices in
     # the start window, made the default for new players (2026-10-20): 100 Hz
     # (the mixed space, the default anyway), a frame on every second refresh —
