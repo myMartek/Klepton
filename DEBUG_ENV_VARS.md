@@ -4865,3 +4865,19 @@ Community fix 84. Everything below is bound to this title unless it says otherwi
   log every fifth metrics tick.
 - `KL_KEEP_START_WINDOW=1` — any title: the start window stays open after the
   immersive space does.
+
+## Controller buttons after a focus change (`KLControllerFocus`, `KleptonControllers.swift`)
+
+Buttons stop reaching the game once another window has the focus (working in
+Mac Virtual Display, a finger on a Spatial Persona) while tracking goes on:
+poses come from ARKit, buttons from GameController, which delivers to the app
+in front. A tap into the other window and then one on the game brought it back.
+- `KL_GC_BACKGROUND=0|1` — default 1: `GCController.shouldMonitorBackgroundEvents
+  = true` (documented for macOS, "ignored on iOS"; which of this and the tap
+  walls brings the buttons back on visionOS is not told apart yet).
+- `[focus] …` lines: app and scene activation, the current controller, taps on
+  the game in the RealityKit space. They say which signal marks the break.
+- `KL_RK_TAP=0|1` — default 1: invisible tap walls (a 24 m box) in the
+  RealityKit space (`KL_RK_PRESENT=1`), so a look and a tap on the game gives it
+  the focus back (`[focus] tap on the game`). Without them the RealityKit space
+  had nothing a tap could land on.

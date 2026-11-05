@@ -2882,3 +2882,55 @@ final class KleptonControllers {
         lock.lock(); state[hand] = st; lock.unlock()
     }
 }
+
+
+// MARK: - Focus
+
+/// Controller BUTTONS stop reaching the game once another window takes the focus
+/// (the owner, 2026-11-05: working in Mac Virtual Display with mouse and keyboard,
+/// or touching a Spatial Persona with a finger), while the TRACKING goes on — the
+/// poses come from ARKit's accessory tracking, which does not care about focus,
+/// and the buttons from GameController, which delivers to the app in front. It
+/// came back after a tap into the other window and then one on the game.
+///
+/// What this does about it, and how to tell which part helped:
+///   * `GCController.shouldMonitorBackgroundEvents = true` — documented for
+///     macOS and "ignored on iOS"; whether visionOS honours it is what the next
+///     run shows (KL_GC_BACKGROUND=0 leaves it off).
+///   * Every focus signal the app can see goes into the log (`[focus] …`): the
+///     application's and each scene's activation, and which controller
+///     GameController calls current. Lines for when it breaks and when the tap
+///     brings it back say which signal to act on.
+///   * The RealityKit space (Spatial Personas) has a tap target around the
+///     player now (KleptonRealitySpace), so a tap on the game gives it the focus
+///     back the way a tap on the Compositor Services picture always did.
+enum KLControllerFocus {
+    nonisolated(unsafe) private static var started = false
+    nonisolated(unsafe) private static var tokens: [NSObjectProtocol] = []
+
+    static func start() {
+        guard !started else { return }
+        started = true
+        if klEnvOn("KL_GC_BACKGROUND", default: true) {
+            GCController.shouldMonitorBackgroundEvents = true
+            NSLog("[focus] GameController asked for events while not in front (shouldMonitorBackgroundEvents)")
+        }
+        let nc = NotificationCenter.default
+        func watch(_ name: Notification.Name, _ text: String, scene: Bool = false) {
+            tokens.append(nc.addObserver(forName: name, object: nil, queue: .main) { n in
+                var what = text
+                if scene, let sc = n.object as? UIScene {
+                    what += " (\(sc.session.role.rawValue)\(sc.title.map { ", " + $0 } ?? ""))"
+                }
+                if let c = n.object as? GCController { what += " (\(c.vendorName ?? "?"))" }
+                NSLog("[focus] %@", what)
+            })
+        }
+        watch(UIApplication.willResignActiveNotification, "app resigns active")
+        watch(UIApplication.didBecomeActiveNotification, "app active")
+        watch(UIScene.willDeactivateNotification, "scene deactivates", scene: true)
+        watch(UIScene.didActivateNotification, "scene active", scene: true)
+        watch(.GCControllerDidBecomeCurrent, "controller current")
+        watch(.GCControllerDidStopBeingCurrent, "controller no longer current")
+    }
+}
