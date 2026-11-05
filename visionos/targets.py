@@ -1188,6 +1188,10 @@ GENERIC_ENV = "KLEPTON_GENERIC_TARGET"
 # <files>/obb gave it an empty directory, every "Unable to open archive file",
 # and a loading screen that never ends.
 GENERIC_OBB = {
+    # The Room VR also opens its main OBB through the hardcoded Android
+    # /sdcard/Android/obb/<package> path after Unity opens it via getObbDir.
+    # Stage @obb there so both readers reach the same installed file.
+    "x2124523024270629": "Android/obb/com.FireproofStudios.TheRoomVR",
     "x3635172946605196": "Android/obb/com.brink.vr.oculus.quest",
     "x2544573735586536": "Android/obb/com.JustAddWater.SniperEliteVR",
     # Ghost Town (com.FireproofStudios.GhostTown, x9531494193591052) is Unity,
