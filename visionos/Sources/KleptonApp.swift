@@ -347,6 +347,8 @@ struct KleptonApp: App {
         // The game's files, which the installer can put back, out of the
         // device's backup (KleptonBackup.swift).
         KLBackup.keepGameFilesOut()
+        // Controller buttons after the focus went to another window (KleptonControllers.swift).
+        KLControllerFocus.start()
     }
 
     var body: some Scene {

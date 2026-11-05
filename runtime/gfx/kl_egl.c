@@ -406,6 +406,9 @@ extern const char *kl_driver_target_name(void);
 // Sweet Surrender (x4723352327707414, Unity 6000.1 + OpenXR, SinglePassMultiview
 // with 4x anti-aliasing) is the same again: ~2000 incomplete-framebuffer errors in
 // 25 s, a black picture with its music playing (2026-10-23).
+// Tentacular (x3967680489996895, Unity 2021.3.19f1 + OpenXR, single-pass into
+// an array swapchain) is the same again: without GL_OVR_multiview and MSRTT,
+// framebuffer attachments are incomplete/refused and the picture stays black.
 // iB Cricket (x5437449896288644, Unity 6000.0 + the Oculus XR plugin, 4x
 // anti-aliasing) too: its eye framebuffers are a colour texture beside a
 // 4-sample depth renderbuffer, every glClear on them raised 0x506 (status
@@ -424,7 +427,8 @@ static int klgl_want_msrtt(void) {
                                             strcmp(t, "x6946182742093178") == 0 ||
                                             strcmp(t, "x4723352327707414") == 0 ||
                                             strcmp(t, "x5437449896288644") == 0 ||
-                                            strcmp(t, "x24151641901194680") == 0)));
+                                            strcmp(t, "x24151641901194680") == 0 ||
+                                            strcmp(t, "x3967680489996895") == 0)));
     }
     return v;
 }
@@ -601,13 +605,16 @@ static int klgl_base_count(void) {
 // Galaxy's Edge (x3484270071659289) died. Star Wars Pinball VR
 // (x3180994211970184, UE 4.25 on GLES) dies the same way: its render thread
 // calls glTexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, buf) through the NULL pointer
-// right after the first textures are made.
+// right after the first textures are made. SWORDS of GARGANTUA
+// (x3064046640291676, UE 4.24 on GLES) does too, on its render thread right
+// after its first 512x512 texture (2026-10-31).
 static const char *klgl_ext_extra(void) {
     const char *t = kl_driver_target_name();
     if (!t) return NULL;
     if (strcmp(t, "cs1") == 0) return "GL_OES_texture_npot";
     if (g_es_major >= 3 && (strcmp(t, "x3484270071659289") == 0 ||
-                            strcmp(t, "x3180994211970184") == 0))
+                            strcmp(t, "x3180994211970184") == 0 ||
+                            strcmp(t, "x3064046640291676") == 0))
         return "GL_EXT_texture_buffer";
     // Vader Immortal: Episode I (UE 4.19.2) is cooked for GLSL_ES3_1_ANDROID
     // only, and its PlatformInitOpenGL takes the ES 3.1 path only when

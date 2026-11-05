@@ -816,6 +816,14 @@ static klj_val klj_UnityAccessibilityDelegate_init(void *env, void *self,
     return (klj_val){.l = kl_jni_new_object("com/unity3d/player/UnityAccessibilityDelegate")};
 }
 
+// Newer Unity 6 (BRINK Traveler 1.8.4, 6000.6) moved the delegate to
+// com.unity3d.accessibility; same contract, the class name is all that differs.
+static klj_val klj_UnityAccessibilityDelegate_init_v2(void *env, void *self,
+                                                      const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    return (klj_val){.l = kl_jni_new_object("com/unity3d/accessibility/UnityAccessibilityDelegate")};
+}
+
 static klj_val klj_false(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     return (klj_val){.j = 0};
@@ -2230,6 +2238,10 @@ const klj_binding klj_bind_android[] = {
     {"com/unity3d/player/UnityAccessibilityDelegate", "init",
      "(Lcom/unity3d/player/UnityPlayer;)Lcom/unity3d/player/UnityAccessibilityDelegate;",
      klj_UnityAccessibilityDelegate_init},
+
+    {"com/unity3d/accessibility/UnityAccessibilityDelegate", "init",
+     "(Lcom/unity3d/player/UnityPlayer;)Lcom/unity3d/accessibility/UnityAccessibilityDelegate;",
+     klj_UnityAccessibilityDelegate_init_v2},
 
     {"bitter/jnibridge/JNIBridge", "newInterfaceProxy",
      "(J[Ljava/lang/Class;)Ljava/lang/Object;", klj_JNIBridge_newInterfaceProxy},

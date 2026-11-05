@@ -1188,6 +1188,10 @@ GENERIC_ENV = "KLEPTON_GENERIC_TARGET"
 # <files>/obb gave it an empty directory, every "Unable to open archive file",
 # and a loading screen that never ends.
 GENERIC_OBB = {
+    # The Room VR also opens its main OBB through the hardcoded Android
+    # /sdcard/Android/obb/<package> path after Unity opens it via getObbDir.
+    # Stage @obb there so both readers reach the same installed file.
+    "x2124523024270629": "Android/obb/com.FireproofStudios.TheRoomVR",
     "x3635172946605196": "Android/obb/com.brink.vr.oculus.quest",
     "x2544573735586536": "Android/obb/com.JustAddWater.SniperEliteVR",
     # Ghost Town (com.FireproofStudios.GhostTown, x9531494193591052) is Unity,
@@ -1389,6 +1393,12 @@ STORE_DEFAULTS = {
     # when the head turned (on device, 2026-10-18; the double squeeze measured
     # on the Mac with KL_GLFB_MTL=1 KL_VRR=1 KL_GLFB_DUMP_FBOS=1).
     "x3919415921458774": {"foveation": False, "foveation_reset": 1},
+    # Tentacular (Unity 2021.3.19f1, OpenGL ES). Foveation off by default and
+    # render scale at 0.8: rate mapping on intermediate render targets produces
+    # an unrendered/black swapchain on ANGLE Metal, and lowering resolution
+    # offsets Unity's 1.2x eye texture expansion.
+    "x3967680489996895": {"foveation": False, "foveation_reset": 1,
+                          "render_scale": 0.8, "picture_reset": 1},
     # HITMAN 3 VR: Reloaded (Glacier, Vulkan, OpenXR). Its owner's choices in
     # the start window, made the default for new players (2026-10-20): 100 Hz
     # (the mixed space, the default anyway), a frame on every second refresh —

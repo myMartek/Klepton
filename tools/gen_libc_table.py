@@ -201,7 +201,7 @@ opendir readdir closedir setjmp longjmp strtold wcstold strtold_l
 swprintf vswprintf vprintf vsscanf execl system syscall sysconf fopen access mkdir unlink rename
 dlopen dlsym dlclose dlerror dladdr dl_iterate_phdr android_dlopen_ext
 memrchr memalign
-fputc fputs fwrite fread fclose fflush fgets getc feof ferror clearerr
+fputc putc fputs fwrite fread fclose fflush fgets getc feof ferror clearerr
 fseek fseeko ftell ftello setvbuf
 __memcpy_chk __memset_chk __strcpy_chk __strlen_chk __strchr_chk __vsnprintf_chk
 __stack_chk_fail

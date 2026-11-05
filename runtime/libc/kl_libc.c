@@ -3323,7 +3323,9 @@ static long kl_futex_spurious_ns(void) {
     if (ns < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        ns = (long)kl_env_int("KL_FUTEX_SPURIOUS_MS", t && strcmp(t, "x2190353671014400") == 0 ? 50 : 0) * 1000000L;
+        int is_target = t && (strcmp(t, "x2190353671014400") == 0 ||
+                              strcmp(t, "x2393300320759737") == 0);
+        ns = (long)kl_env_int("KL_FUTEX_SPURIOUS_MS", is_target ? 50 : 0) * 1000000L;
         if (ns < 0) ns = 0;
     }
     return ns;

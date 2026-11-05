@@ -841,6 +841,98 @@ static const kl_gp_word k_roboquest_meta_pak_no_mmio[] = {
     { 0x32f167c, 0x910af042, 0x910af042, "fingerprint only (mmio.enable's registration: the variable it binds)" },
 };
 
+// Vacation Simulator (x2393300320759737, com.owlchemylabs.vacationsimulator 1.3.0.40142)
+// PlatformDependentShaderWarmUp and OwlchemyShaderWarmUp: synchronously warming up
+// every shader variant in the game during scene transitions wedges the main thread
+// compiling pipelines via Metal XPC and inflates memory past 3.8 GB. Returning
+// immediately from WarmUpCollections and the OwlchemyShaderWarmUp routines skips
+// the synchronous stall; Unity compiles variants on demand as each material is rendered.
+// Community fix 94 (build 97), measured on the sender's headset only. Every word is a
+// function prologue, which alone is a weak fingerprint; seven of them at these exact
+// addresses, plus Awake's as an unchanged row, pin the group to this build, and the
+// group is atomic — any other libil2cpp.so is left untouched.
+static const kl_gp_word k_vacation_no_shader_warmup[] = {
+    { 0x2372088, 0xa9bd5ffe, 0xd65f03c0, "PlatformDependentShaderWarmUp::WarmUpCollections() -> ret" },
+    { 0x2372130, 0xfc1c0fea, 0xd65f03c0, "PlatformDependentShaderWarmUp::WarmUpCollections(bool) -> ret" },
+    { 0x2371344, 0xfc1c0fea, 0xd65f03c0, "PlatformDependentShaderWarmUp collection warmup loop -> ret" },
+    { 0x2371cac, 0xfc1b0fea, 0xfc1b0fea, "fingerprint only (PlatformDependentShaderWarmUp::Awake)" },
+    { 0x23945dc, 0xa9bf4ffe, 0xd65f03c0, "OwlchemyShaderWarmUp::Warmup(List) -> ret" },
+    { 0x2394604, 0xf81d0ffe, 0xd65f03c0, "OwlchemyShaderWarmUp::Warmup() -> ret" },
+    { 0x23946a4, 0xfc1e0fe8, 0xd65f03c0, "OwlchemyShaderWarmUp::CreatePrewarmObjects() -> ret" },
+    { 0x2394838, 0xa9bf4ffe, 0xd65f03c0, "OwlchemyShaderWarmUp::SetupPrewarmObjectsForVariant() -> ret" },
+};
+
+// MOTHERGUNSHIP: FORGE, Meta Store build (libUnreal.so, UE 5.6.0 in Meta's
+// fork, "oculus-5.6.0-release-1.113.0-v81.0"; package com.terribleposture.MGSVR,
+// version 1300 / 141; store target x4188843481174389): the same allocator
+// reservation as Roboquest's above, measured again for this build.
+//
+// FMallocBinned3's constructor reserves 76 pools of 1 GB in one block, 76 GB,
+// and visionOS cannot map that. With KL_TRACE_MMAP=1 the boot log of this game
+// shows
+//     mmap(0x0, 0x1300000000, rw-, flags 0x22, fd -1, off 0) -> MAP_FAILED, ENOMEM
+// from libUnreal.so+0x14d6210 (the helper the constructor calls at 0x156e0ac),
+// and the game dies on start with a write at 0x10 on a guest worker thread
+// (libUnreal.so+0x1631164, a null base). That the null is the allocator's own
+// base is an inference from the order of events; the failed reservation is
+// what was seen.
+//
+// Addresses are the loaded image's, as in the crash report: this library's text
+// segment is mapped 0x4000 above its place in the file (program headers; the
+// logged crash instruction is at file offset 0x162d164 and in memory at
+// 0x1631164).
+//
+// Same change as there: pools of 512 MB, so the reservation is 40 GB. The sites
+// are this build's own, found by scanning its .text for every shift, mask and
+// constant that spells a 1 GB pool, and for every load of the allocator's base
+// (the static at 0x7f3c620, once directly and ten times through its slot at
+// 0x7dc3220):
+//   * the pool index -> pool base step is `mov w9, w22; lsl x27, x9, #30`
+//     (Roboquest's is a ubfiz)
+//   * in two places the pool index is fused with the x 2 of a table of 16-bit
+//     entries: `lsr #29` and `and #0x7fffffffe`. With 512 MB pools that is
+//     `lsr #28`; the mask stays
+//   * the extent the constructor builds is in x10 (movn, then movk #0 at bit
+//     48): 76 GB - 1 -> 40 GB - 1
+//   * three loads of the base's slot (0x156da9c, 0x156dad8, 0x156db14) only
+//     fetch its address in a loop; no pool-sized shift, mask or constant is
+//     near them
+// Left alone on purpose: 0x576a06c stores 0x1300000000 into a field of a 0x28
+// byte record (it reads as bookkeeping of the reservation, not a mapping), and
+// the mask 0x3fffffffc0000000 at 0x5d26d04 / 0x7adcc4 belongs to a 4 GB step
+// and a table of constants.
+//   0x156e0a8  mov x0, #0x1300000000  -> #0xa00000000
+static const kl_gp_word k_mgsvr_forge_binned3[] = {
+    { 0x156d850, 0x92627d6b, 0x9263816b, "and x11, x11, #0x3fffffffc0000000 -> #0x3fffffffe0000000 (start of the pool a block is in)" },
+    { 0x156dc88, 0xd362853b, 0xd363893b, "lsl x27, x9, #30 -> #29 (pool index -> pool base)" },
+    { 0x156e0a8, 0xd2c00260, 0xd2c00140, "mov x0, #0x1300000000 -> #0xa00000000 (the reservation: 76 GB -> 40 GB)" },
+    { 0x156e0d4, 0x92dffdaa, 0x92dffeca, "mov x10, #-0xffed00000001 -> #-0xfff600000001 (its extent: 76 GB - 1 -> 40 GB - 1)" },
+    { 0x156e13c, 0x52a8000d, 0x52a4000d, "mov w13, #0x40000000 -> #0x20000000 (blocks per pool, for the bitmaps' size)" },
+    { 0x156e2d0, 0x52a80009, 0x52a40009, "mov w9, #0x40000000 -> #0x20000000 (blocks per pool)" },
+    { 0x156f658, 0x8b147929, 0x8b147529, "add x9, x9, x20, lsl #30 -> lsl #29 (pool index -> pool base)" },
+    { 0x156fe5c, 0xd35efd15, 0xd35dfd15, "lsr x21, x8, #30 -> #29 (pool index)" },
+    { 0x156fe6c, 0xd360fd08, 0xd35ffd08, "lsr x8, x8, #32 -> #31 (OS allocation: offset >= 38 GB)" },
+    { 0x1572a70, 0xd360ff29, 0xd35fff29, "lsr x9, x25, #32 -> #31 (OS allocation: offset >= 38 GB)" },
+    { 0x1572a90, 0xd35eff28, 0xd35dff28, "lsr x8, x25, #30 -> #29 (pool index)" },
+    { 0x1572ae0, 0xd35ef728, 0xd35df328, "ubfx x8, x25, #30, #32 -> #29, #32 (pool index)" },
+    { 0x1572bd0, 0xd35ef728, 0xd35df328, "ubfx x8, x25, #30, #32 -> #29, #32 (pool index)" },
+    { 0x1572c74, 0xd35efed5, 0xd35dfed5, "lsr x21, x22, #30 -> #29 (pool index)" },
+    { 0x1572c78, 0xd360fec8, 0xd35ffec8, "lsr x8, x22, #32 -> #31 (OS allocation: offset >= 38 GB)" },
+    { 0x1572ca8, 0xd35ef6c8, 0xd35df2c8, "ubfx x8, x22, #30, #32 -> #29, #32 (pool index)" },
+    { 0x1572e4c, 0xd360fd09, 0xd35ffd09, "lsr x9, x8, #32 -> #31 (OS allocation: offset >= 38 GB)" },
+    { 0x1572e5c, 0xd35dfd08, 0xd35cfd08, "lsr x8, x8, #29 -> #28 (pool index x 2, for the 16-bit table)" },
+    { 0x1573508, 0xd360fd09, 0xd35ffd09, "lsr x9, x8, #32 -> #31 (OS allocation: offset >= 38 GB)" },
+    { 0x1573518, 0xd35dfd08, 0xd35cfd08, "lsr x8, x8, #29 -> #28 (pool index x 2, for the 16-bit table)" },
+    { 0x156e164, 0xf101313f, 0xf101313f, "fingerprint only (cmp x9, #0x4c: 76 pools)" },
+    { 0x156fe70, 0xf100491f, 0xf100491f, "fingerprint only (cmp x8, #0x12, kept: (offset >> 31) > 0x12 is offset >= 38 GB)" },
+    { 0x1572a74, 0xf1004d3f, 0xf1004d3f, "fingerprint only (cmp x9, #0x13, kept)" },
+    { 0x1572c7c, 0xf100491f, 0xf100491f, "fingerprint only (cmp x8, #0x12, kept)" },
+    { 0x1572e50, 0xf100493f, 0xf100493f, "fingerprint only (cmp x9, #0x12, kept)" },
+    { 0x1572e60, 0x927f8508, 0x927f8508, "fingerprint only (and x8, x8, #0x7fffffffe, kept)" },
+    { 0x157350c, 0xf100493f, 0xf100493f, "fingerprint only (cmp x9, #0x12, kept)" },
+    { 0x157351c, 0x927f8508, 0x927f8508, "fingerprint only (and x8, x8, #0x7fffffffe, kept)" },
+};
+
 static const kl_gp_patch k_patches[] = {
     { "roboquest-meta-pak-no-mmio", "libUnreal.so",
       "pak bulk data is read, not memory-mapped (mmio.enable's own path): the read-through cannot map it",
@@ -848,6 +940,9 @@ static const kl_gp_patch k_patches[] = {
     { "roboquest-meta-binned3-512m", "libUnreal.so",
       "the allocator's pools are 512 MB, so its start-up reservation is 40 GB, not 76",
       k_roboquest_meta_binned3, sizeof k_roboquest_meta_binned3 / sizeof *k_roboquest_meta_binned3 },
+    { "mgsvr-forge-binned3-512m", "libUnreal.so",
+      "the allocator's pools are 512 MB, so its start-up reservation is 40 GB, not 76",
+      k_mgsvr_forge_binned3, sizeof k_mgsvr_forge_binned3 / sizeof *k_mgsvr_forge_binned3 },
     { "fluid-keyboard-warmup", "libil2cpp.so",
       "the startup keyboard warmup completes without the Java keyboard's surface",
       k_fluid_keyboard_warmup,
@@ -869,6 +964,10 @@ static const kl_gp_patch k_patches[] = {
       "missing optional end-of-run score state does not abort the scene transition",
       k_pistol_whip_score_null_exit,
       sizeof k_pistol_whip_score_null_exit / sizeof *k_pistol_whip_score_null_exit },
+    { "vacation-no-shader-warmup", "libil2cpp.so",
+      "skip synchronous shader variant collection warmup on scene transitions",
+      k_vacation_no_shader_warmup,
+      sizeof k_vacation_no_shader_warmup / sizeof *k_vacation_no_shader_warmup },
     { "csvr-hud-smaller-lower", "libxash.so",
       "the VR HUD is drawn at 3/4 of its size and 1/16 of the image lower",
       k_csvr_hud_place, sizeof k_csvr_hud_place / sizeof *k_csvr_hud_place },

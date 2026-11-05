@@ -503,6 +503,7 @@ struct KleptonRealitySpace: View {
             do {
                 let t = try KLRealityTarget(device: device)
                 content.add(try await t.makeEntity())
+                content.add(Self.tapCatcher())
                 target = t
                 NSLog("[rk] space open — starting the compositor on RealityKit")
                 KleptonCompositor.attach(rk: t)
@@ -510,10 +511,37 @@ struct KleptonRealitySpace: View {
                 NSLog("[rk] could not set up RealityKit presentation: \(error)")
             }
         }
+        // A tap on the game: it is what gives the game the focus back after another window took it (the
+        // controller buttons stop reaching the game while it is not in front; see KLControllerFocus).
+        .gesture(SpatialTapGesture().targetedToAnyEntity().onEnded { _ in
+            NSLog("[focus] tap on the game (RealityKit space)")
+        })
         .onDisappear {
             NSLog("[rk] space closed")
             target?.stopped = true
         }
+    }
+
+    /// Invisible walls of a 24 m box around the start point, the only thing in this space a look and a tap can
+    /// land on: the picture's quad follows the head, and an empty space takes no tap. Windows and Personas are
+    /// nearer than the walls, so they stay what a tap on them reaches. KL_RK_TAP=0 leaves them out.
+    @MainActor static func tapCatcher() -> Entity {
+        let root = Entity()
+        guard klEnvOn("KL_RK_TAP", default: true) else { return root }
+        let h: Float = 12, t: Float = 0.05
+        let walls: [(SIMD3<Float>, SIMD3<Float>)] = [
+            ([0, 0, -h], [2 * h, 2 * h, t]), ([0, 0, h], [2 * h, 2 * h, t]),
+            ([-h, 0, 0], [t, 2 * h, 2 * h]), ([h, 0, 0], [t, 2 * h, 2 * h]),
+            ([0, h, 0], [2 * h, t, 2 * h]), ([0, -h, 0], [2 * h, t, 2 * h]),
+        ]
+        for (p, size) in walls {
+            let w = Entity()
+            w.position = p
+            w.components.set(CollisionComponent(shapes: [.generateBox(size: size)]))
+            w.components.set(InputTargetComponent())
+            root.addChild(w)
+        }
+        return root
     }
 }
 

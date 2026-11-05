@@ -609,7 +609,7 @@ static klj_val klj_horizon_session_id(void *env, void *self, const klj_val *a, i
     return (klj_val){.j = 0x484F52495A4F4Ell};   // a fixed, non-zero synthetic session id
 }
 
-// ---- Horizon Platform: the application's own entitlement ----
+// ---- Horizon Platform: entitlement and TMNT startup callbacks ----
 //
 // The Horizon-SDK twin of the ovr_Entitlement_GetIsViewerEntitled carve-out in
 // runtime/xr/kl_ovrplat.c, and drawn on the SAME line for the SAME reason:
@@ -618,11 +618,11 @@ static klj_val klj_horizon_session_id(void *env, void *self, const klj_val *a, i
 // viewer entitled to THIS application" has a true answer, and it is yes.
 // Answering it describes that purchase; it does not manufacture one.
 //
-// Exactly ONE request is answered: service "entitlements", method
-// "get_is_viewer_entitled". Matched by exact string, never by substring, so
-// every other entitlement, IAP, purchase, DLC/asset or ownership request keeps
-// the old behaviour — an id is handed back and no reply ever comes. That is
-// strictly more restrictive than the truth, as kl_ovrplat.c's refusals are.
+// The existing entitlement response is unchanged. TMNT additionally receives
+// its per-install offline profile and ERROR completions for unavailable
+// organization-ID and purchase-list services. These exact-match handlers
+// neither authenticate a Meta user nor grant purchases or DLC. All other
+// requests and all other games keep their existing behaviour.
 //
 // HARD BULLET (x8116626111777808) gates its first scene on this reply: without
 // it the frame loop runs and the eye shows a black void indefinitely, while the
@@ -634,7 +634,8 @@ static klj_val klj_horizon_session_id(void *env, void *self, const klj_val *a, i
 // session id they always had.
 #define KLJ_HZ_MAX_PENDING 8
 static pthread_mutex_t g_hz_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_hz_pending[KLJ_HZ_MAX_PENDING];
+typedef struct { uint64_t id; int local_user; int cookie; int unavailable; } klj_hz_reply;
+static klj_hz_reply g_hz_pending[KLJ_HZ_MAX_PENDING];
 static int      g_hz_npending;
 static uint64_t g_hz_next_id = 0x484F525A00000001ull;
 
@@ -647,15 +648,33 @@ static int klj_hz_is_app_entitlement(const char *service, const char *method) {
 static klj_val klj_horizon_make_request(void *env, void *self, const klj_val *a, int n) {
     const char *s0 = n > 0 ? klj_str(a[0].l) : NULL, *s1 = n > 1 ? klj_str(a[1].l) : NULL;
     const char *s3 = n > 3 ? klj_str(a[3].l) : NULL;
-    if (klj_hz_is_app_entitlement(s0, s1) && kl_env_on("KL_HZ_ENTITLEMENT", 1)) {
+    // TMNT waits forever for this callback before leaving 00_Boot. Use the
+    // installation's existing offline identity, not a Meta-authenticated user.
+    // No token, proof, or purchase is supplied by this offline profile.
+    extern const char *kl_driver_target_name(void);
+    const char *target = kl_driver_target_name();
+    const char *uid = kl_env_str("KL_PLAT_USER_ID", "");
+    int valid_uid = *uid && strlen(uid) <= 16 && strspn(uid, "0123456789") == strlen(uid)
+                    && strtoull(uid, NULL, 10) != 0;
+    int local_user = target && strcmp(target, "x6635073589916590") == 0 &&
+        kl_env_on("KL_TMNT_HORIZON_USER", 1) && valid_uid && s0 && s1 &&
+        strcmp(s0, "users") == 0 && strcmp(s1, "get_logged_in_user") == 0;
+    // There is no Meta account service here. Complete this request with an
+    // error so the game's own offline/error handler can run; never mint an
+    // organization-scoped identity or grant items from its purchase list.
+    int unavailable = target && strcmp(target, "x6635073589916590") == 0 &&
+        s0 && s1 && ((strcmp(s0, "users") == 0 && strcmp(s1, "get_org_scoped_id") == 0) ||
+                     (strcmp(s0, "iap") == 0 && strcmp(s1, "get_viewer_purchases") == 0));
+    if (unavailable || local_user || (klj_hz_is_app_entitlement(s0, s1) && kl_env_on("KL_HZ_ENTITLEMENT", 1))) {
         pthread_mutex_lock(&g_hz_lock);
         uint64_t id = g_hz_next_id++;
         int queued = g_hz_npending < KLJ_HZ_MAX_PENDING;
-        if (queued) g_hz_pending[g_hz_npending++] = id;
+        if (queued) g_hz_pending[g_hz_npending++] = (klj_hz_reply){id, local_user, n > 4 ? (int)a[4].j : 0, unavailable};
         pthread_mutex_unlock(&g_hz_lock);
         KLJ_LOG("HorizonPlatformCore.makeRequest(\"%s\", \"%s\") -> id 0x%llx — the "
-                "application's own entitlement; reply queued%s", s0, s1,
-                (unsigned long long)id, queued ? "" : " (queue full, dropped)");
+                "%s; reply queued%s", s0, s1,
+                (unsigned long long)id, unavailable ? "account service unavailable (error completion)" : local_user ? "local offline player (not Meta authentication)" : "application entitlement",
+                queued ? "" : " (queue full, dropped)");
         return (klj_val){.j = id};
     }
     KLJ_LOG("HorizonPlatformCore.makeRequest(\"%.120s\", \"%.120s\", %d, \"%.200s\", %d) — no reply will come",
@@ -669,7 +688,7 @@ static klj_val klj_horizon_make_request(void *env, void *self, const klj_val *a,
 // its shape is learned from what the guest reads off it; until then the object
 // is inert and the first field or method the guest asks for is named in the log.
 #define KLJ_HZ_MSG_CLASS "horizonos/supplement/hzplatformclientcore/HorizonMessage"
-static struct { void *obj; uint64_t id; } g_hz_msgs[KLJ_HZ_MAX_PENDING];
+static struct { void *obj; klj_hz_reply reply; } g_hz_msgs[KLJ_HZ_MAX_PENDING];
 static unsigned g_hz_nmsgs;
 
 // The reply's fields, read by the guest with GetFieldID/Get*Field. Measured on
@@ -682,14 +701,31 @@ static unsigned g_hz_nmsgs;
 int klj_horizon_message_field(void *obj, const char *cls, const char *name,
                               const char *sig, klj_val *out) {
     if (strcmp(cls, KLJ_HZ_MSG_CLASS) != 0) return 0;
-    uint64_t id = 0;
+    klj_hz_reply reply = {0};
     pthread_mutex_lock(&g_hz_lock);
     for (unsigned i = 0; i < KLJ_HZ_MAX_PENDING; i++)
-        if (g_hz_msgs[i].obj == obj) id = g_hz_msgs[i].id;
+        if (g_hz_msgs[i].obj == obj) reply = g_hz_msgs[i].reply;
+    uint64_t id = reply.id;
     pthread_mutex_unlock(&g_hz_lock);
     *out = (klj_val){0};
     if (strcmp(name, "requestId") == 0 && sig[0] == 'J') out->j = id;
-    else if (strcmp(name, "errorCode") != 0)
+    else if (reply.unavailable && (strcmp(name, "statusCode") == 0 || strcmp(name, "errorCode") == 0) && sig[0] == 'I')
+        out->j = 1;
+    else if (reply.unavailable && strcmp(name, "statusMessage") == 0 && strcmp(sig, "Ljava/lang/String;") == 0)
+        out->l = kl_jni_new_string("Meta account services are unavailable in this local runtime.");
+    else if (reply.unavailable && strcmp(name, "data") == 0 && strcmp(sig, "Ljava/lang/String;") == 0)
+        out->l = kl_jni_new_string("{}");
+    else if (reply.local_user && strcmp(name, "data") == 0 && strcmp(sig, "Ljava/lang/String;") == 0) {
+        char json[256];
+        snprintf(json, sizeof json,
+            "{\"id\":\"%s\",\"oculus_id\":\"kleptonplayer\",\"display_name\":\"Klepton Player\",\"presence_status\":\"OFFLINE\"}",
+            kl_env_str("KL_PLAT_USER_ID", ""));
+        out->l = kl_jni_new_string(json);
+    }
+    else if ((reply.local_user || reply.unavailable) && strcmp(name, "cookie") == 0 && sig[0] == 'I') out->j = reply.cookie;
+    else if (reply.local_user && strcmp(name, "statusMessage") == 0 && strcmp(sig, "Ljava/lang/String;") == 0)
+        out->l = kl_jni_new_string("");
+    else if (strcmp(name, "errorCode") != 0 && strcmp(name, "statusCode") != 0)
         KLJ_LOG("HorizonMessage.%s %s read — not modelled yet, answering 0/NULL", name, sig);
     KLJ_LOG("HorizonMessage(0x%llx).%s %s -> 0x%llx", (unsigned long long)id, name, sig,
             (unsigned long long)out->j);
@@ -698,25 +734,25 @@ int klj_horizon_message_field(void *obj, const char *cls, const char *name,
 static klj_val klj_horizon_pop_message(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self;
     pthread_mutex_lock(&g_hz_lock);
-    uint64_t id = 0;
+    klj_hz_reply reply = {0};
     if (g_hz_npending > 0) {
-        id = g_hz_pending[0];
+        reply = g_hz_pending[0];
         memmove(g_hz_pending, g_hz_pending + 1, (size_t)(--g_hz_npending) * sizeof g_hz_pending[0]);
     }
     pthread_mutex_unlock(&g_hz_lock);
+    uint64_t id = reply.id;
     if (!id) return (klj_val){.l = NULL};
     void *msg = kl_jni_new_object(KLJ_HZ_MSG_CLASS);
     pthread_mutex_lock(&g_hz_lock);
-    g_hz_msgs[g_hz_nmsgs % KLJ_HZ_MAX_PENDING] = (typeof(g_hz_msgs[0])){msg, id};
+    g_hz_msgs[g_hz_nmsgs % KLJ_HZ_MAX_PENDING] = (typeof(g_hz_msgs[0])){msg, reply};
     g_hz_nmsgs++;
     pthread_mutex_unlock(&g_hz_lock);
-    KLJ_LOG("HorizonPlatformCore.popMessage(flag=%d) -> entitlement reply for id 0x%llx",
+    KLJ_LOG("HorizonPlatformCore.popMessage(flag=%d) -> platform reply for id 0x%llx",
             n > 1 ? (int)a[1].j : -1, (unsigned long long)id);
     return (klj_val){.l = msg};
 }
 
-// getMessageCount(session): how many replies are waiting — only ever the
-// entitlement replies queued above.
+// getMessageCount(session): how many platform replies are waiting.
 static klj_val klj_horizon_message_count(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     pthread_mutex_lock(&g_hz_lock);

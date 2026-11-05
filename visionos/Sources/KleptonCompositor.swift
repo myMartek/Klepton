@@ -1881,7 +1881,7 @@ final class KleptonCompositor {
             }
             frame.endSubmission()
             n += 1
-            if Date() >= next {
+            if Date() > next {   // not `>=`: see csFrames
                 next = Date().addingTimeInterval(2)
                 NSLog("[cp] minimal: \(n) frames presented, state=\(String(describing: layerRenderer.state))")
             }
@@ -1987,7 +1987,14 @@ final class KleptonCompositor {
                 arrayViews.frameDone()
             }
             iterations += 1
-            if Date() >= nextReport {
+            // `>`, never `>=`, between Dates in this file. Built against the
+            // 27.2 SDK, `Date >=` becomes a back-deployment thunk that calls a
+            // WEAK Foundation symbol whenever the OS reports 27.2 or later —
+            // and visionOS 27.2 build 24N5093f reports that without exporting
+            // it, so the call lands on address 0 (KERN_PROTECTION_FAILURE at
+            // 0x0 on this thread, first frame, every launch). `>` is the old,
+            // strongly linked operator, and a log timer cannot tell them apart.
+            if Date() > nextReport {
                 nextReport = Date().addingTimeInterval(0.5)
                 cmdLock.lock(); let done = cmdCompleted; cmdLock.unlock()
                 NSLog("[cp] alive: \(iterations) iters, \(presented) with a picture, "
@@ -2005,7 +2012,7 @@ final class KleptonCompositor {
                 NSLog("[cp] \(stageSummary())")
                 // The haptics queue's own census, every 10 s and only when it
                 // has something to say (see KleptonControllers.hapticsQueue).
-                if Date() >= nextHapticsReport {
+                if Date() > nextHapticsReport {
                     nextHapticsReport = Date().addingTimeInterval(10)
                     if let h = controllers.hapticsSummary() { NSLog("[cp] \(h)") }
                 }
@@ -6577,7 +6584,7 @@ final class KleptonCompositor {
             autoreleasepool { presented += renderFrame() }
             arrayViews.frameDone()
             iterations += 1
-            if Date() >= nextReport {
+            if Date() > nextReport {   // not `>=`: see csFrames
                 nextReport = Date().addingTimeInterval(2)
                 let sorted = gaps.sorted()
                 let hz = sorted.isEmpty ? 0 : 1 / sorted[sorted.count / 2]

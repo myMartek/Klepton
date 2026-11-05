@@ -1061,11 +1061,16 @@ int kl_ovrp_gl_array_for(const char *t) {
         // value) — only the self-lit screen showed, on black, so there was
         // nothing to point with (his headset, 2026-10-19). With the Array
         // layer and real multiview the console and the hands are there (Mac).
+        // SWORDS of GARGANTUA (x3064046640291676, UE 4.24) took DoubleWide and
+        // then made a two-layer 6144x2464 array for its scene anyway: its eye
+        // framebuffer had no attachment (0x8cd7) on every draw, music and a
+        // black picture (2026-10-31).
         return kl_env_on("KL_OVRP_GL_ARRAY", t && (strcmp(t, "x6963344583787383") == 0 ||
                                                    strcmp(t, "x3386618894743567") == 0 ||
                                                    strcmp(t, "x2108775495884888") == 0 ||
                                                    strcmp(t, "x2223615721048141") == 0 ||
                                                    strcmp(t, "x2426206484098337") == 0 ||
+                                                   strcmp(t, "x3064046640291676") == 0 ||
                                                    // Arizona Sunshine: Unity's legacy VRDevice
                                                    // with a Scriptable Render Pipeline, which
                                                    // renders stereo single-pass or not at all
@@ -5152,6 +5157,18 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // Before this, all of it was dropped here. After the wait for the same
     // reason the record is: these name stages of their own.
     klovrp_record_overlays(layer_submits, layer_submit_count);
+    // ...and on a GLES guest the enqueue path's panels (ovrp_EnqueueSubmitLayer2)
+    // are copied here too, as ovrp_EndFrame and the OpenXR frame end do. Without
+    // it Vacation Simulator (x2393300320759737), whose quad overlays come that
+    // way next to EndFrame4, stayed black (community fix 94).
+    //   KL_OVRP_ENQ_MIRROR_EF4=0|1 — default 1 for x2393300320759737, else 0.
+    static int enq_mirror = -1;
+    if (enq_mirror < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (t) enq_mirror = kl_env_on("KL_OVRP_ENQ_MIRROR_EF4", !strcmp(t, "x2393300320759737"));
+    }
+    if (enq_mirror > 0) klovrp_mirror_enq_gl();
     // GL array eyes reach the compositor by copy, and the copy has to land
     // before the record announces the stage (the same ordering argument as the
     // Vulkan branch above: nothing else puts the compositor behind it).
@@ -10248,6 +10265,12 @@ void kl_ovrp_eye_desc_size(float texture_scale, int *out_w, int *out_h) {
     kl_ovrp_eye_texture_size(&w, &h);
     const char *t = kl_driver_target_name();
     if (t && strcmp(t, "x6565887093433499") == 0) texture_scale = 1.0f;
+    // MOTHERGUNSHIP: FORGE (x4188843481174389): the layer is always asked for at scale 1.0. Its dynamic
+    // resolution moves the scale both ways (1.35 up, 0.8 down in the boss room) and every new size is new
+    // eye storage while the old is kept ("allocating fresh"), so the footprint climbed to 8 GB and the
+    // system ended the app (headset 2026-11-03, two runs; the cap alone only stopped the sizes above 1.0).
+    // One size, one allocation. KL_OVRP_FIXED_SCALE=0 gives the guest's scale back.
+    else if (kl_env_on("KL_OVRP_FIXED_SCALE", t && strcmp(t, "x4188843481174389") == 0)) texture_scale = 1.0f;
     else if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
     w = (int)((float)w * texture_scale);
     h = (int)((float)h * texture_scale);
@@ -10269,7 +10292,13 @@ void kl_ovrp_eye_desc_size(float texture_scale, int *out_w, int *out_h) {
         static int env = -2;
         if (env == -2) env = getenv("KL_OVRP_EYE_DESC_CAP") ? kl_env_on("KL_OVRP_EYE_DESC_CAP", 0) : -1;
         int on = env >= 0 ? env
-               : kl_driver_target_is_moss() || (t && (strcmp(t, "x2285803881494677") == 0 || strcmp(t, "x6565887093433499") == 0)) || g_eye_max_choice > 0;
+               : kl_driver_target_is_moss() || (t && (strcmp(t, "x2285803881494677") == 0 || strcmp(t, "x6565887093433499") == 0)) || g_eye_max_choice > 0
+                 // MOTHERGUNSHIP: FORGE (x4188843481174389): its dynamic resolution walks the layer scale
+                 // 1.0 / 1.1 / 1.15 / 1.2 / 1.35 and every new size is new eye storage while the old is
+                 // kept (SetupLayer: "allocating fresh"). Headset 2026-11-03: 24 reallocations in three
+                 // minutes took the footprint from 2.4 GB to 8 GB (avail 146 MB) and the system ended
+                 // the app, nearly through its tutorial. Held to the cap, every scale is one size.
+                 || (t && strcmp(t, "x4188843481174389") == 0);
         // No display has pushed a size in a host run, so no cap was worked out: the plain default there.
         int cap = g_eye_cap >= 0 ? g_eye_cap : kl_env_int("KL_OVRP_EYE_MAX", 3072);
         // ...times the render scale, so "Resolution" still lowers the picture: held to the plain cap, a

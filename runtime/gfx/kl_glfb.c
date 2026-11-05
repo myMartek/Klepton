@@ -288,11 +288,40 @@ static void klfb_TextureViewOES(uint32_t texture, uint32_t target, uint32_t orig
 // every message. The vendored debug ANGLE speaks KHR_debug fluently, so a
 // guest call failing silently (the "0 lit" frame was one) comes with its
 // reason here instead of needing an error-code probe per call site.
+static int klfb_doctor_debug_context(void);
+
 static void klfb_debug_cb(uint32_t source, uint32_t type, uint32_t id,
                           uint32_t severity, int32_t length, const char *msg,
                           const void *user) {
     (void)source; (void)type; (void)id; (void)severity; (void)user;
+    if (klfb_doctor_debug_context() && msg && length > 0) {
+        // Repeating a validation error at every draw would bury the reason.
+        static __thread uint32_t seen[64]; static __thread unsigned count;
+        uint32_t hash = 2166136261u;
+        for (int32_t i = 0; i < length; i++) hash = (hash ^ (uint8_t)msg[i]) * 16777619u;
+        for (unsigned i = 0; i < count; i++) if (seen[i] == hash) return;
+        if (count == 64) return;
+        seen[count++] = hash;
+    }
     fprintf(stderr, "  [glcb] %.*s\n", length, msg ? msg : "");
+}
+
+// Investigation-only debug context for Doctor Who (x3044656825604617, community
+// fix 93): the context is created with EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR, the
+// callback is registered by its ES 3.0 (KHR-suffixed) name, delivery is
+// synchronous and repeats are dropped. Diagnostics: only for that target and only
+// with KL_GLFB_DEBUG_CB=1 (or KL_DOCTOR_DEBUG_CONTEXT=1). Every other target keeps
+// the original EGL attribute sequence (terminated at the first EGL_NONE).
+static int klfb_doctor_debug_context(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (!t) return 0;               // asked before the guest is chosen: not kept
+        on = !strcmp(t, "x3044656825604617") &&
+             kl_env_on("KL_DOCTOR_DEBUG_CONTEXT", kl_env_on("KL_GLFB_DEBUG_CB", 0));
+    }
+    return on;
 }
 
 int kl_glfb_init(void) {
@@ -425,7 +454,11 @@ int kl_glfb_init(void) {
                     g_w, g_h);
     }
     if (!g_surf) g_surf = a_eglCreatePbufferSurface(g_dpy, cfg, surf_attrs);
-    const int32_t ctx_attrs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+    const int32_t ctx_attrs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        klfb_doctor_debug_context() ? 0x30FC /* EGL_CONTEXT_FLAGS_KHR */ : EGL_NONE,
+        1 /* EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR */, EGL_NONE
+    };
     g_ctx  = a_eglCreateContext(g_dpy, cfg, EGL_NO_CONTEXT, ctx_attrs);
     if (g_surf && g_ctx && g_flat_ios && !a_eglMakeCurrent(g_dpy, g_surf, g_surf, g_ctx)) {
         // The IOSurface surface created but cannot go current: retire it and
@@ -460,12 +493,25 @@ int kl_glfb_init(void) {
     // here instead of needing an error-code probe per call site.
     if (kl_env_on("KL_GLFB_DEBUG_CB", 0)) {
         void (*glDebugMessageCallback)(const void *, const void *) =
-            asym("glDebugMessageCallback");
+            asym(klfb_doctor_debug_context() ? "glDebugMessageCallbackKHR" : "glDebugMessageCallback");
         void (*glEnable)(uint32_t) = asym("glEnable");
         if (glDebugMessageCallback) {
             glDebugMessageCallback((const void *)klfb_debug_cb, NULL);
             // GL_DEBUG_OUTPUT 0x92E0 — synchronous delivery.
             if (glEnable) glEnable(0x92E0);
+            if (klfb_doctor_debug_context()) {
+                if (glEnable) glEnable(0x8242 /* DEBUG_OUTPUT_SYNCHRONOUS */);
+                void (*control)(uint32_t, uint32_t, uint32_t, int32_t, const uint32_t *, uint8_t) =
+                    asym("glDebugMessageControlKHR");
+                if (control) control(0x1100, 0x1100, 0x1100, 0, NULL, 1);
+                void (*insert)(uint32_t, uint32_t, uint32_t, uint32_t, int32_t, const char *) =
+                    asym("glDebugMessageInsertKHR");
+                if (insert) insert(0x824A /* APPLICATION */, 0x8268 /* MARKER */,
+                                   3044, 0x826B /* NOTIFICATION */, -1,
+                                   "Doctor Who KHR_debug callback self-test");
+                fprintf(stderr, "  [glfb] Doctor Who: KHR debug callback installed; "
+                                "look for callback self-test above\n");
+            }
             fprintf(stderr, "  [glfb] KHR_debug callback registered\n");
         } else {
             fprintf(stderr, "  [glfb] no glDebugMessageCallback in this ANGLE\n");
@@ -759,7 +805,11 @@ void kl_glfb_make_current(void) {
                             (unsigned long long)tid, (unsigned long long)g_root_owner);
                 }
                 const int32_t surf_attrs[] = { EGL_WIDTH, g_w, EGL_HEIGHT, g_h, EGL_NONE };
-                const int32_t ctx_attrs[]  = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+                const int32_t ctx_attrs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        klfb_doctor_debug_context() ? 0x30FC /* EGL_CONTEXT_FLAGS_KHR */ : EGL_NONE,
+        1 /* EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR */, EGL_NONE
+    };
                 t->surf = a_eglCreatePbufferSurface(g_dpy, g_cfg, surf_attrs);
                 t->ctx  = a_eglCreateContext(g_dpy, g_cfg, g_ctx, ctx_attrs);
                 // NOT the root owner — this is a second, shared context, so
@@ -769,7 +819,11 @@ void kl_glfb_make_current(void) {
             // SHARED: per-thread contexts — see the mode comment above for why
             // the guest's FBOs break here.
             const int32_t surf_attrs[] = { EGL_WIDTH, g_w, EGL_HEIGHT, g_h, EGL_NONE };
-            const int32_t ctx_attrs[]  = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+            const int32_t ctx_attrs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        klfb_doctor_debug_context() ? 0x30FC /* EGL_CONTEXT_FLAGS_KHR */ : EGL_NONE,
+        1 /* EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR */, EGL_NONE
+    };
             t->surf = a_eglCreatePbufferSurface(g_dpy, g_cfg, surf_attrs);
             // KL_GLFB_NOSHARE_OBJ=1 gives the thread its own context that shares
             // *nothing*. The guest then renders with objects it cannot see, so the
@@ -797,7 +851,11 @@ void kl_glfb_make_current(void) {
         // way; its textures, buffers and programs are not.
         if (!klfb_take_parked(t, tid)) {
             const int32_t surf_attrs[] = { EGL_WIDTH, g_w, EGL_HEIGHT, g_h, EGL_NONE };
-            const int32_t ctx_attrs[]  = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+            const int32_t ctx_attrs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        klfb_doctor_debug_context() ? 0x30FC /* EGL_CONTEXT_FLAGS_KHR */ : EGL_NONE,
+        1 /* EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR */, EGL_NONE
+    };
             t->surf = a_eglCreatePbufferSurface(g_dpy, g_cfg, surf_attrs);
             t->ctx  = a_eglCreateContext(g_dpy, g_cfg, g_ctx, ctx_attrs);
             fprintf(stderr, "  [glfb] thread %llu released its shared context and "
@@ -844,11 +902,24 @@ void kl_glfb_make_current(void) {
         // registration in kl_glfb_init does not cover this thread's context.
         t->debug_cb = 1;
         void (*glDebugMessageCallback)(const void *, const void *) =
-            asym("glDebugMessageCallback");
+            asym(klfb_doctor_debug_context() ? "glDebugMessageCallbackKHR" : "glDebugMessageCallback");
         void (*glEnable)(uint32_t) = asym("glEnable");
         if (glDebugMessageCallback) {
             glDebugMessageCallback((const void *)klfb_debug_cb, NULL);
             if (glEnable) glEnable(0x92E0);
+            if (klfb_doctor_debug_context()) {
+                if (glEnable) glEnable(0x8242 /* DEBUG_OUTPUT_SYNCHRONOUS */);
+                void (*control)(uint32_t, uint32_t, uint32_t, int32_t, const uint32_t *, uint8_t) =
+                    asym("glDebugMessageControlKHR");
+                if (control) control(0x1100, 0x1100, 0x1100, 0, NULL, 1);
+                void (*insert)(uint32_t, uint32_t, uint32_t, uint32_t, int32_t, const char *) =
+                    asym("glDebugMessageInsertKHR");
+                if (insert) insert(0x824A /* APPLICATION */, 0x8268 /* MARKER */,
+                                   3044, 0x826B /* NOTIFICATION */, -1,
+                                   "Doctor Who KHR_debug callback self-test");
+                fprintf(stderr, "  [glfb] Doctor Who: KHR debug callback installed; "
+                                "look for callback self-test above\n");
+            }
         }
     }
 }
@@ -875,7 +946,11 @@ int kl_glfb_borrow_context(void) {
     if (!r_GetCurrentContext || r_GetCurrentContext()) return 0;   // something is current: leave it
     if (!g_borrow_ctx) {
         const int32_t surf_attrs[] = { EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE };
-        const int32_t ctx_attrs[]  = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+        const int32_t ctx_attrs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        klfb_doctor_debug_context() ? 0x30FC /* EGL_CONTEXT_FLAGS_KHR */ : EGL_NONE,
+        1 /* EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR */, EGL_NONE
+    };
         g_borrow_surf = a_eglCreatePbufferSurface(g_dpy, g_cfg, surf_attrs);
         g_borrow_ctx  = a_eglCreateContext(g_dpy, g_cfg, g_ctx, ctx_attrs);
         uint64_t tid = 0; pthread_threadid_np(NULL, &tid);
@@ -1080,6 +1155,9 @@ static unsigned g_shader_pins_n;
 // Garden of the Sea (x3684804704932159, Unity 2019.4.13f1) the eighth: once
 // its storage-buffer shaders linked (KL_GLFB_SSBO_TEX), 227k "Invalid texture
 // unit!" in a session and the soil it is played on drawn black.
+// Beat Saber 1.45 (beatsaber140) the ninth: repeated "Invalid texture unit!"
+// and the Billie Eilish environment's water black and featureless, restored
+// with the pins on (fix 95, its sender's headset; not run here).
 // ...and every Unity title under the profile for untested games (kl_driver.c):
 // seven of the eight Unity fixes for this error were these pins, and a guest
 // without the error has its samplers where its own shader text puts them, which
@@ -1093,7 +1171,8 @@ static int klfb_bind_pins(void) {
         extern kl_guest_kind kl_driver_kind(void);
         extern int kl_untested_profile(void);
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_GLFB_BIND_PINS", (t && (strcmp(t, "x2773034772778845") == 0 ||
+        v = kl_env_on("KL_GLFB_BIND_PINS", (t && (strcmp(t, "beatsaber140") == 0 ||
+                                                  strcmp(t, "x2773034772778845") == 0 ||
                                                   strcmp(t, "x2582932495064035") == 0 ||
                                                   strcmp(t, "x2436558143118760") == 0 ||
                                                   strcmp(t, "x4015163475201433") == 0 ||
@@ -3351,6 +3430,125 @@ static int klfb_rewrite_denorm_literals(char *buf, size_t *off, size_t cap) {
     return n;
 }
 
+// Doctor Who build 368 ships multiview programs but uses separate-eye FBOs.
+// Strip both the view-count declaration AND the multiview extension: keeping
+// the extension makes ANGLE emit render_target_array_index even without a view
+// count, and Metal then rejects the ordinary single-view pipeline (host probe).
+//   KL_DOCTOR_SEPARATE=0|1 — default 1 for x3044656825604617, else never.
+// Asked on every draw, so the answer is kept once the target is known.
+static int klfb_doctor_separate(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (!t) return 0;               // asked before the guest is chosen: not kept
+        on = !strcmp(t, "x3044656825604617") && kl_env_on("KL_DOCTOR_SEPARATE", 1);
+    }
+    return on;
+}
+// In separate-eye mode Unity updates its ordinary per-camera matrices. The
+// multiview uniform block is not the current camera: keeping it made the owner
+// see a correctly aligned picture glued to the head. Use Unity's normal names
+// so its existing uniform upload binds the camera for this draw.
+static int klfb_doctor_live_camera(char *buf, size_t cap) {
+    if (!kl_env_on("KL_DOCTOR_CAMERA_LIVE", 1)) return 0;
+    static const char *const oldnames[] = {
+        "hlslcc_mtx4x4unity_StereoMatrixVP", "hlslcc_mtx4x4unity_StereoMatrixV"
+    };
+    static const char *const newnames[] = {
+        "hlslcc_mtx4x4unity_MatrixVP", "hlslcc_mtx4x4unity_MatrixV"
+    };
+    char declarations[256] = "";
+    int changed = 0;
+    for (unsigned k = 0; k < 2; k++) {
+        int hits = 0;
+        for (char *p = buf; (p = strstr(p, oldnames[k])); ) {
+            char *open = p + strlen(oldnames[k]);
+            if (*open != '[') { p = open; continue; }
+            int bound = 0, n = 0;
+            sscanf(open, " [ %d ] ; %n", &bound, &n);
+            if (n && bound == 8) { p = open + n; continue; } // keep the block layout
+            char *end = open + 1;
+            int depth = 1;
+            for (; *end && depth; end++) {
+                if (*end == '[') depth++;
+                else if (*end == ']') depth--;
+            }
+            if (depth) return changed;
+            char replacement[512];
+            int len = snprintf(replacement, sizeof replacement, "%s[((%.*s) & 3)]",
+                               newnames[k], (int)(end - open - 2), open + 1);
+            if (len < 0 || (size_t)len >= sizeof replacement) return changed;
+            char *next = klfb_splice(buf, cap, p, (size_t)(end - p), replacement);
+            if (!next) return changed;
+            p = next; hits++;
+        }
+        if (hits) {
+            char decl[128];
+            snprintf(decl, sizeof decl, "uniform highp vec4 %s[4];\n", newnames[k]);
+            strncat(declarations, decl, sizeof declarations - strlen(declarations) - 1);
+            changed += hits;
+        }
+    }
+    if (changed) {
+        char *insert = strchr(buf, '\n');
+        if (!insert) return 0;
+        insert++;
+        for (char *p = buf; (p = strstr(p, "#extension")); ) {
+            char *end = strchr(p, '\n');
+            if (!end) return 0;
+            insert = p = end + 1;
+        }
+        if (!klfb_splice(buf, cap, insert, 0, declarations)) return 0;
+    }
+    return changed;
+}
+
+static int klfb_doctor_shader(char *buf, size_t cap) {
+    if (!klfb_doctor_separate() || !strstr(buf, "GL_OVR_multiview")) return 0;
+    int changed = 0;
+    for (char *p = buf; (p = strstr(p, "#extension")); ) {
+        char *end = strchr(p, '\n');
+        if (!end) end = p + strlen(p);
+        if ((size_t)(end - p) >= strlen("#extension GL_OVR_multiview") &&
+            strstr(p, "GL_OVR_multiview") && strstr(p, "GL_OVR_multiview") < end) {
+            if (*end) end++;
+            memmove(p, end, strlen(end) + 1);
+            changed = 1;
+        } else p = *end ? end + 1 : end;
+    }
+    for (char *p = buf; (p = strstr(p, "layout")); ) {
+        unsigned views = 0; int n = 0;
+        sscanf(p, "layout ( num_views = %u ) in ; %n", &views, &n);
+        if (n && views == 2) { memmove(p, p + n, strlen(p + n) + 1); changed = 1; }
+        else p += 6;
+    }
+    int needs_eye = 0;
+    for (char *p = buf; (p = strstr(p, "gl_ViewID_OVR")); ) {
+        char *next = klfb_splice(buf, cap, p, strlen("gl_ViewID_OVR"), "kl_doctor_eye_");
+        if (!next) return 0;
+        p = next; needs_eye = 1;
+    }
+    if (needs_eye) {
+        char *insert = strchr(buf, '\n');
+        if (!insert) return 0;
+        insert++;
+        for (char *p = buf; (p = strstr(p, "#extension")); ) {
+            char *end = strchr(p, '\n');
+            if (!end) return 0;
+            insert = p = end + 1;
+        }
+        if (!klfb_splice(buf, cap, insert, 0, "uniform highp uint kl_doctor_eye_;\n")) return 0;
+    }
+    int cameras = klfb_doctor_live_camera(buf, cap);
+    if (cameras) {
+        static unsigned said;
+        if (said++ < 8)
+            fprintf(stderr, "  [glfb] Doctor Who: %d stereo matrix reads use the current per-eye camera\n", cameras);
+    }
+    return changed || needs_eye || cameras;
+}
+
 static void klfb_ShaderSource(uint32_t shader, int32_t count,
                               const char *const *strings, const int32_t *lengths) {
     if (strings && count > 0) {
@@ -3437,6 +3635,12 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
             }
             // Either flag sends `buf` to ANGLE instead of the guest's strings.
             int dbg_modified = trimmed;
+            if (klfb_doctor_shader(buf, cap)) {
+                off = strlen(buf); dbg_modified = 1;
+                static unsigned said;
+                if (said++ < 8)
+                    fprintf(stderr, "  [glfb] Doctor Who shader %u: separate-eye program, multiview extension removed\n", shader);
+            }
             {
                 int dn = klfb_rewrite_denorm_literals(buf, &off, cap);
                 if (dn) {
@@ -3730,6 +3934,24 @@ static __thread uint64_t g_draw_t0;
 
 static void klfb_CompileShader(uint32_t shader) {
     if (!g_real_CompileShader) return;
+    // Vacation Simulator (x2393300320759737, community fix 94): ANGLE compiles
+    // shaders asynchronously on background worker threads. Inquiring
+    // GL_COMPILE_STATUS immediately here forces ANGLE to block the main thread
+    // synchronously for each shader under g_compile_lock, freezing the frame
+    // loop for tens of seconds during scene loading. So for that target the
+    // compile is handed straight through: no lock, no status read, and none of
+    // the failure logging below (the guest still reads the status itself).
+    //   KL_GLFB_COMPILE_NOWAIT=0|1 — default 1 for x2393300320759737, else 0.
+    static int nowait = -1;
+    if (nowait < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (t) nowait = kl_env_on("KL_GLFB_COMPILE_NOWAIT", !strcmp(t, "x2393300320759737"));
+    }
+    if (nowait > 0) {
+        g_real_CompileShader(shader);
+        return;
+    }
     // The status/info-log readers are not thunks (the guest must get ANGLE's
     // real answers), so they resolve lazily here rather than through g_thunks,
     // whose entries hand their thunk pointer to the guest.
@@ -3987,6 +4209,29 @@ static void klfb_LinkProgram(uint32_t program) {
     klfb_ssbo_forget(program);
     pthread_mutex_lock(&g_compile_lock);
     uint64_t slow_t0 = klfb_slow_ms() ? klfb_slow_now() : 0;
+    // KL_DOCTOR_LINK_LOG=1 (Doctor Who only, default 0): each link's stages,
+    // source hashes and time — the sender's view of its new-game stalls.
+    uint64_t doctor_link_start = 0;
+    static int doctor_link_log = -1;
+    if (doctor_link_log < 0 && klfb_doctor_separate())
+        doctor_link_log = kl_env_on("KL_DOCTOR_LINK_LOG", 0);
+    if (doctor_link_log > 0) {
+        doctor_link_start = klfb_slow_now();
+        static void (*attached)(uint32_t, int32_t, int32_t *, uint32_t *);
+        if (!attached) attached = asym("glGetAttachedShaders");
+        uint32_t shaders[8]; int32_t count = 0;
+        if (attached) attached(program, 8, &count, shaders);
+        fprintf(stderr, "  [doctor-link] begin program=%u stages=%d", program, count);
+        for (int32_t i = 0; i < count && i < 8; i++) {
+            const char *source = klfb_shader_src(shaders[i]);
+            size_t bytes = source ? strlen(source) : 0;
+            uint32_t hash = 2166136261u;
+            for (size_t j = 0; j < bytes; j++) hash = (hash ^ (uint8_t)source[j]) * 16777619u;
+            fprintf(stderr, " shader=%u/type=%x/bytes=%zu/hash=%08x", shaders[i],
+                    klfb_shader_type(shaders[i]), bytes, hash);
+        }
+        fprintf(stderr, "\n");
+    }
     klfb_pins_bind(program);
     g_real_LinkProgram(program);
     klfb_cs_linked(program);
@@ -4036,6 +4281,9 @@ static void klfb_LinkProgram(uint32_t program) {
             }
         }
     }
+    if (doctor_link_start)
+        fprintf(stderr, "  [doctor-link] complete program=%u elapsed_ms=%.1f\n",
+                program, (double)(klfb_slow_now() - doctor_link_start) / 1.0e6);
     // KL_GLFB_DUMP_PROGRAM=N: print the sources that were linked into program
     // N. The timeline names programs by number ("the frame's last draw is
     // program 7"); this turns the number into the shader text.
@@ -10284,6 +10532,11 @@ static int klfb_cimg_on(void) {
                                                       strcmp(t, "x3386618894743567") == 0 ||
                                                       strcmp(t, "x1906871599408213") == 0 ||
                                                       strcmp(t, "x5190288877703616") == 0 ||
+                                                      // SWORDS of GARGANTUA (UE 4.24):
+                                                      // once it drew, distant scenery and
+                                                      // parts of its opponents stayed
+                                                      // untextured (fix 89, 2026-11-01).
+                                                      strcmp(t, "x3064046640291676") == 0 ||
                                                       // Warhammer 40,000: Battle Sister
                                                       // (Unity) copies its level's textures
                                                       // into 2D arrays while loading, and
@@ -11301,6 +11554,42 @@ static void klfb_apply_vertex_bindings(void) {
     }
 }
 
+static void klfb_doctor_set_eye(void) {
+    if (!klfb_doctor_separate() || !a_glGetIntegerv) return;
+    static int (*getloc)(uint32_t, const char *);
+    static void (*uniform)(int32_t, uint32_t);
+    if (!getloc) getloc = asym("glGetUniformLocation");
+    if (!uniform) uniform = asym("glUniform1ui");
+    if (!getloc || !uniform) return;
+    int32_t program = 0, fb = 0;
+    a_glGetIntegerv(0x8B8D, &program);
+    a_glGetIntegerv(0x8CA6, &fb);
+    if (program <= 0) return;
+    int loc = getloc((uint32_t)program, "kl_doctor_eye_");
+    if (loc < 0) return;
+    uint32_t tex = 0;
+    for (unsigned i = 0; i < g_nfbo_color; i++)
+        if (g_fbo_color[i].fbo == (uint32_t)fb) { tex = g_fbo_color[i].tex; break; }
+    unsigned eye = 0;
+    for (unsigned e = 0; e < 2; e++)
+        for (unsigned stage = 0; stage < KLFB_MAX_STAGES; stage++)
+            if (tex && g_eye_tex_stage[e][stage] == tex) eye = e;
+    // Unity's legacy multi-pass path already uploads the current eye's camera
+    // for each draw. A multiview index of 1 can then select an unpopulated
+    // second slot on the right. Test index 0 for both prepared eye draws;
+    // KL_DOCTOR_VIEW_ZERO=0 restores the explicit eye index for comparison.
+    static int view_zero = -1;
+    if (view_zero < 0) view_zero = kl_env_on("KL_DOCTOR_VIEW_ZERO", 1);
+    unsigned view = view_zero ? 0 : eye;
+    uniform(loc, view);
+    static unsigned seen;
+    if (!(seen & (1u << eye))) {
+        seen |= 1u << eye;
+        fprintf(stderr, "  [glfb] Doctor Who: program %d fb %d texture %u targets eye %u, shader view %u\n",
+                program, fb, tex, eye, view);
+    }
+}
+
 static void klfb_DrawElements(uint32_t mode, int32_t count, uint32_t type,
                               const void *indices) {
     KLFB_VFX_SKIP();
@@ -11308,6 +11597,7 @@ static void klfb_DrawElements(uint32_t mode, int32_t count, uint32_t type,
     // draws, so it reads the pbuffer the frame actually landed in — not the
     // swap thread's, which is empty by construction.
     klfb_apply_vertex_bindings();
+    klfb_doctor_set_eye();
     klfb_service_capture();
     klfb_note_draw();
     klfb_errprobe0("glDrawElements(before)");
@@ -11320,6 +11610,7 @@ static void klfb_DrawElements(uint32_t mode, int32_t count, uint32_t type,
 static void klfb_DrawArrays(uint32_t mode, int32_t first, int32_t count) {
     KLFB_VFX_SKIP();
     klfb_apply_vertex_bindings();
+    klfb_doctor_set_eye();
     klfb_service_capture();
     klfb_note_draw();
     klfb_errprobe0("glDrawArrays(before)");
@@ -11337,6 +11628,7 @@ static void klfb_DrawRangeElements(uint32_t mode, uint32_t start, uint32_t end,
                                    int32_t count, uint32_t type, const void *indices) {
     KLFB_VFX_SKIP();
     klfb_apply_vertex_bindings();
+    klfb_doctor_set_eye();
     klfb_service_capture();
     klfb_note_draw();
     klfb_errprobe0("glDrawRangeElements(before)");
@@ -11354,6 +11646,7 @@ static void klfb_DrawElementsInstanced(uint32_t mode, int32_t count, uint32_t ty
                                        const void *indices, int32_t instances) {
     KLFB_VFX_SKIP();
     klfb_apply_vertex_bindings();
+    klfb_doctor_set_eye();
     klfb_note_draw();
     klfb_errprobe0("glDrawElementsInstanced(before)");
     if (g_real_DrawElementsInstanced)
@@ -11382,6 +11675,7 @@ static void klfb_DrawElementsBaseVertex(uint32_t mode, int32_t count, uint32_t t
                                         const void *indices, int32_t basevertex) {
     KLFB_VFX_SKIP();
     klfb_apply_vertex_bindings();
+    klfb_doctor_set_eye();
     klfb_note_draw();
     static int resolved;
     if (!resolved) {
@@ -11428,6 +11722,7 @@ static void klfb_DrawRangeElementsBaseVertex(uint32_t mode, uint32_t start, uint
                                              int32_t count, uint32_t type,
                                              const void *indices, int32_t basevertex) {
     klfb_apply_vertex_bindings();
+    klfb_doctor_set_eye();
     klfb_service_capture();
     klfb_note_draw();
     static int resolved;
@@ -11471,6 +11766,7 @@ static void klfb_DrawArraysInstanced(uint32_t mode, int32_t first, int32_t count
                                      int32_t instances) {
     KLFB_VFX_SKIP();
     klfb_apply_vertex_bindings();
+    klfb_doctor_set_eye();
     klfb_note_draw();
     klfb_errprobe0("glDrawArraysInstanced(before)");
     if (g_real_DrawArraysInstanced)
@@ -13363,7 +13659,11 @@ static void *klfb_selftest_thread(void *arg) {
     if (!mkpb || !mkctx || !a_eglMakeCurrent) return NULL;
 
     const int32_t surf_attrs[] = { EGL_WIDTH, 256, EGL_HEIGHT, 256, EGL_NONE };
-    const int32_t ctx_attrs[]  = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+    const int32_t ctx_attrs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        klfb_doctor_debug_context() ? 0x30FC /* EGL_CONTEXT_FLAGS_KHR */ : EGL_NONE,
+        1 /* EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR */, EGL_NONE
+    };
     void *surf = mkpb(g_dpy, g_cfg, surf_attrs);
     void *ctx  = mkctx(g_dpy, g_cfg, g_ctx, ctx_attrs);
     fprintf(stderr, "  [glfb] selftest: surf=%p ctx=%p\n", surf, ctx);

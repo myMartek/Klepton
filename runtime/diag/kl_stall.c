@@ -18,6 +18,8 @@
 //
 //   KL_STALL_MS=<ms>   the gap that counts as a stall. 0: off. Default 0 here;
 //                      a target's defaults may set it (kl_driver.c).
+//   KL_STALL_ALL_THREADS=1  keep and print every thread's stack, waiting ones
+//                      too, each with its thread port and name (default 0).
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -31,15 +33,17 @@
 
 #define KLS_DEPTH   14
 #define KLS_SAMPLES 6
-#define KLS_KEEP    48          // distinct (thread, stack) records kept per stall
+#define KLS_KEEP    48           // distinct (thread, stack) records kept per stall
+#define KLS_KEEP_ALL 128         // ...with KL_STALL_ALL_THREADS, which keeps waiters too
 
 static uint64_t g_last_ns;      // the last frame's stamp, CLOCK_UPTIME_RAW
 static thread_t g_frame_thread; // who submits frames: shown even when it is waiting,
                                 // because WHAT it waits in is often the answer
 static uint64_t g_frames;
 static int      g_threshold_ms = -1;
+static int      g_all_threads;
 
-typedef struct { uintptr_t pc[KLS_DEPTH]; int n, hits; } kls_rec;
+typedef struct { uintptr_t pc[KLS_DEPTH]; int n, hits; thread_t thread; char name[64]; } kls_rec;
 
 static uint64_t kls_now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 
@@ -96,6 +100,13 @@ static void kls_sample(kls_rec *recs, int *nrecs, thread_t self) {
             if (thread_get_state(th[i], ARM_THREAD_STATE64, (thread_state_t)&st, &c) == KERN_SUCCESS) {
                 kls_rec r;
                 memset(&r, 0, sizeof r);
+                r.thread = th[i];
+                if (g_all_threads) {
+                    thread_extended_info_data_t info;
+                    mach_msg_type_number_t nc = THREAD_EXTENDED_INFO_COUNT;
+                    if (thread_info(th[i], THREAD_EXTENDED_INFO, (thread_info_t)&info, &nc) == KERN_SUCCESS)
+                        snprintf(r.name, sizeof r.name, "%.*s", (int)sizeof r.name - 1, info.pth_name);
+                }
                 r.pc[r.n++] = (uintptr_t)arm_thread_state64_get_pc(st);
                 int waiting = kls_is_wait(r.pc[0]);
                 {
@@ -113,7 +124,7 @@ static void kls_sample(kls_rec *recs, int *nrecs, thread_t self) {
                 // or when what it waits IN is the graphics stack: a pipeline
                 // being compiled is a thread asleep inside Metal, the work
                 // itself being in another process.
-                int keep = !waiting || th[i] == g_frame_thread;
+                int keep = g_all_threads || !waiting || th[i] == g_frame_thread;
                 for (int f = 0; !keep && f < r.n; f++) {
                     Dl_info di;
                     if (dladdr((void *)r.pc[f], &di) && di.dli_fname &&
@@ -128,9 +139,12 @@ static void kls_sample(kls_rec *recs, int *nrecs, thread_t self) {
                 if (keep) {
                     int k;
                     for (k = 0; k < *nrecs; k++)
-                        if (recs[k].n == r.n && !memcmp(recs[k].pc, r.pc, (size_t)r.n * sizeof r.pc[0])) break;
+                        if ((!g_all_threads || recs[k].thread == r.thread) && recs[k].n == r.n &&
+                            !memcmp(recs[k].pc, r.pc, (size_t)r.n * sizeof r.pc[0])) break;
                     if (k < *nrecs) recs[k].hits++;
-                    else if (*nrecs < KLS_KEEP) { r.hits = 1; recs[(*nrecs)++] = r; }
+                    else if (*nrecs < (g_all_threads ? KLS_KEEP_ALL : KLS_KEEP)) {
+                        r.hits = 1; recs[(*nrecs)++] = r;
+                    }
                 }
             }
         }
@@ -142,8 +156,11 @@ static void kls_sample(kls_rec *recs, int *nrecs, thread_t self) {
 static void *kls_main(void *arg) {
     (void)arg;
     pthread_setname_np("klepton.stall");
+    // Diagnostic only: when requested, include all sleeping producer/worker
+    // threads rather than hiding them behind the frame thread's semaphore wait.
+    g_all_threads = kl_env_on("KL_STALL_ALL_THREADS", 0);
     thread_t self = mach_thread_self();
-    static kls_rec recs[KLS_KEEP];
+    static kls_rec recs[KLS_KEEP_ALL];
     unsigned long stalls = 0;
     uint64_t reported = 0;      // a gap already printed while it lasted
     for (;;) {
@@ -180,11 +197,15 @@ static void *kls_main(void *arg) {
                 (unsigned long long)gap_ms, stalls,
                 (unsigned long long)__atomic_load_n(&g_frames, __ATOMIC_RELAXED), taken);
         // Most-sampled first; three stacks say what a stall was.
-        for (int shown = 0; shown < 3; shown++) {
+        for (int shown = 0; shown < (g_all_threads ? KLS_KEEP_ALL : 3); shown++) {
             int best = -1;
             for (int k = 0; k < nrecs; k++)
                 if (recs[k].hits > 0 && (best < 0 || recs[k].hits > recs[best].hits)) best = k;
             if (best < 0) break;
+            if (g_all_threads)
+                fprintf(stderr, "    thread %u [%s]%s: ", recs[best].thread,
+                        recs[best].name[0] ? recs[best].name : "unnamed",
+                        recs[best].thread == g_frame_thread ? " FRAME" : "");
             fprintf(stderr, "    in %d of %d sample(s):\n", recs[best].hits, taken);
             for (int f = 0; f < recs[best].n; f++) kls_print_frame(recs[best].pc[f]);
             recs[best].hits = 0;

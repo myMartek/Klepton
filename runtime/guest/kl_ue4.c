@@ -112,8 +112,33 @@ static const char *const UE4_CHAIN[] = {
     // as unresolved right after the platform check (2026-10-28). Built on
     // libc++_shared, so after it; skipped where a guest does not ship it.
     "libnakama-cpp.so",
+    // mod.io's SDK (modio*), which also carries the OpenSSL and curl libUE4
+    // binds against: the same case again. Absent from the pool, SWORDS of
+    // GARGANTUA (x3064046640291676) aborted on OPENSSL_load_builtin_modules as
+    // unresolved right after its config was read (2026-10-31). libc and the
+    // system libstdc++ only; skipped where a guest does not ship it.
+    "libmodio.so",
+    // Meta's Interaction SDK, the same case once more: libUnreal NEEDS it
+    // (DT_NEEDED) and binds 209 isdk_* imports against it, but it was not in
+    // the pool when libUnreal bound, so every one became a stub, and the first
+    // call aborted: "called unresolved import 'isdk_FilterPropertyBlock_init'"
+    // (MOTHERGUNSHIP: FORGE, x4188843481174389, headset 2026-11-03, signal 6
+    // two seconds after the engine started). Self-contained (libc, libm, liblog
+    // only). Only loaded for the targets in ue4_chain_member_on(), so no other
+    // UE title is bound differently than before.
+    "libInteractionSdk.so",
     UE4_LIB,
 };
+
+// Chain members that are not loaded for every title that ships them.
+// KL_UE4_ISDK=1 forces libInteractionSdk in, =0 keeps it out.
+static int ue4_chain_member_on(const char *name) {
+    if (strcmp(name, "libInteractionSdk.so") == 0) {
+        const char *t = kl_driver_target_name();
+        return kl_env_on("KL_UE4_ISDK", t && strcmp(t, "x4188843481174389") == 0);
+    }
+    return 1;
+}
 
 // UE4's own Java front door. `com.epicgames.ue4.GameActivity` is a
 // NativeActivity subclass, which is why the guest reaches
@@ -753,6 +778,7 @@ int kl_ue4_load(FILE *out) {
         // exactly that — all five deps skipped on a guest that ships all five,
         // libUE4 bound without libc++_shared, and its first static initializer
         // died on an unresolved __cxa_guard_acquire.
+        if (!ue4_chain_member_on(UE4_CHAIN[i])) continue;
         if (strcmp(UE4_CHAIN[i], UE4_LIB) != 0 && !kl_can_load(path)) {
             if (out) fprintf(out, "  --     %-22s not in this guest — skipped\n",
                              UE4_CHAIN[i]);
@@ -1169,7 +1195,11 @@ static void kl_ue4_java_create(FILE *out) {
     // UE5 game is called with anything it was not called with before.
     {
         const char *t = kl_driver_target_name();
-        if (t && strcmp(t, "x9269393463181825") == 0 &&
+        // x4188843481174389 is MOTHERGUNSHIP: FORGE (UE 5.6, same Meta fork):
+        // headset 2026-11-03, black screen, heartbeat stuck in
+        // ANativeActivity_onCreate with the footprint flat.
+        if (t && (strcmp(t, "x9269393463181825") == 0 ||
+                  strcmp(t, "x4188843481174389") == 0) &&
             ue4_native("nativeSetConfigRulesVariables")) {
             UE4_CALL(out, "nativeSetConfigRulesVariables", ue4_fn_as,
                      kl_jni_new_string_array(NULL, 0));

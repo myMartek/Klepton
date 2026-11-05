@@ -2604,6 +2604,30 @@ static uint64_t klplat_User_GetOrgScopedID(uint64_t user_id) {
     return klplat_request_err("ovr_User_GetOrgScopedID", KLPLAT_MSG_ORG_SCOPED_ID);
 }
 
+// ovr_User_GetLoggedInUserFriends() — the signed-in user's friends. Social
+// decoration, no ownership, and nothing here can fetch a friend list, so it
+// fails for every guest; again what differs is the SHAPE of the failure. The
+// default stays 0 through klplat_init_fails (the request could not be made).
+// Forefront (x28816918137899319) does not walk past a 0: its onboarding step
+// PlatformInitialize asks for friends right after Entitlement and UserInfo,
+// the SDK meets the 0 with "Request failed" and never calls the callback, and
+// onboarding never leaves that step. An ERROR completion runs the game's own
+// handler instead. It reports no friends, real or made up. It does NOT make
+// the game playable: its next steps, Unity Authentication and attestation,
+// need ovr_User_GetUserProof, a proof only Meta can issue (2026-11, fix 97).
+#define KLPLAT_MSG_LOGGED_IN_USER_FRIENDS 0x587C2A8Du  // .User_GetLoggedInUserFriends (Forefront 7.1.19 metadata)
+static uint64_t klplat_User_GetLoggedInUserFriends(void) {
+    static int err = -1;
+    if (err < 0) {
+        const char *t = kl_driver_target_name();
+        err = t && strcmp(t, "x28816918137899319") == 0;
+    }
+    if (!err) return klplat_init_fails("ovr_User_GetLoggedInUserFriends");
+    plat_hit("ovr_User_GetLoggedInUserFriends");
+    return klplat_request_err("ovr_User_GetLoggedInUserFriends",
+                              KLPLAT_MSG_LOGGED_IN_USER_FRIENDS);
+}
+
 // The User that completion carries. The message handle IS the user handle (one
 // payload per message), and these read its fields. An offline user: a fixed
 // non-zero ovrID — 0 would read as "no user" and defeat the point — and a plain
@@ -3435,6 +3459,7 @@ static const char *klplat_MessageType_ToString(uint32_t type) {
     case KLPLAT_MSG_LOGGED_IN_USER:         return "ovrMessage_User_GetLoggedInUser";
     case KLPLAT_MSG_USER_GET:               return "ovrMessage_User_Get";
     case KLPLAT_MSG_ORG_SCOPED_ID:          return "ovrMessage_User_GetOrgScopedID";
+    case KLPLAT_MSG_LOGGED_IN_USER_FRIENDS: return "ovrMessage_User_GetLoggedInUserFriends";
     case KLPLAT_MSG_LEADERBOARD_GET_ENTRIES: return "ovrMessage_Leaderboard_GetEntries";
     case KLPLAT_MSG_LEADERBOARD_WRITE_ENTRY: return "ovrMessage_Leaderboard_WriteEntry";
     case KLPLAT_MSG_LEADERBOARD_GET:            return "ovrMessage_Leaderboard_Get";
@@ -3576,6 +3601,8 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     // The exact-match binding overrides the name's entry in g_plat_request,
     // which is still what every guest but one gets (see the handler).
     {"ovr_User_GetOrgScopedID",                (void *)klplat_User_GetOrgScopedID},
+    // Overrides the name's entry in g_plat_request for one guest (see the handler).
+    {"ovr_User_GetLoggedInUserFriends",        (void *)klplat_User_GetLoggedInUserFriends},
     {"ovr_Message_GetUser",                    (void *)klplat_Message_GetPayload},
     {"ovr_Message_GetRoom",                    (void *)klplat_Message_GetPayload},
     {"ovr_User_GetID",                         (void *)klplat_User_GetID},
