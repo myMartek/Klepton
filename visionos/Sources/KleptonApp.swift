@@ -342,6 +342,18 @@ struct KleptonApp: App {
     /// immersive scene's `.upperLimbVisibility` live. The object is the shared
     /// singleton the panel edits, not a second copy.
     @ObservedObject private var chroma = KleptonChroma.shared
+    /// Observed so the scene's immersion style follows the boot decision, the
+    /// same way the chroma object drives .mixed vs .full (crown patch).
+    @ObservedObject private var rendering = KleptonRendering.shared
+
+    /// Progressive when the switch was on at boot and this is not a mixed-
+    /// reality game; mixed/full exactly as before otherwise (crown patch).
+    private var immersiveStyle: any ImmersionStyle {
+        if rendering.crownImmersionActive {
+            return KleptonImmersion.style
+        }
+        return chroma.immersionFull ? .full : .mixed
+    }
 
     // Before anything here has asked Metal for a shader (kl_app.c).
     init() {
@@ -443,6 +455,25 @@ struct KleptonApp: App {
                       + "renderer=\(ObjectIdentifier(layerRenderer))")
                 KleptonCompositor.attach(layer: layerRenderer)
             }
+            // The crown, while the game is the frontmost scene. The amount is
+            // what the system reports for the progressive portal; a change
+            // means the HUD is up, which is the one moment the controllers have
+            // to be let go of (crown patch).
+            .onImmersionChange { old, new in
+                KleptonImmersion.noteAmount(new.amount)
+                guard KleptonImmersion.enabled else { return }
+                // The boot transition (nil -> 1.0) is not a crown turn.
+                if old.amount != nil, new.amount != nil {
+                    KLControllerRecovery.crownChanged()
+                }
+                // Below a tenth of a percent the portal is visually closed.
+                let closed = (new.amount ?? 0) < 0.001
+                if closed != KleptonImmersion.soundClosed {
+                    KleptonImmersion.soundClosed = closed
+                    KleptonAudio.setCrownGain(closed ? 0 : 1)
+                    NSLog("[crown] sound \(closed ? "fading out at 0 %" : "fading in above 0 %")")
+                }
+            }
         }
         // .mixed vs .full is read from the observed chroma object (set by boot
         // once the target is known — see KleptonChroma.immersionFull and
@@ -450,8 +481,13 @@ struct KleptonApp: App {
         // before kl_app_configure, so a static read always saw the pre-target
         // default. Observing the object means .full takes hold reactively before
         // the space opens, for the native VR kind (GTA Vice City). KL_FULL wins.
-        .immersionStyle(selection: .constant(chroma.immersionFull ? .full : .mixed),
-                        in: .mixed, .full)
+        // `.progressive` is offered as well: with the crown switch on, that is
+        // the style the scene selects, and the Digital Crown becomes the
+        // immersion control instead of a Home button (crown patch).
+        .immersionStyle(selection: .constant(immersiveStyle),
+                        in: .mixed, .full,
+                        .progressive(KleptonImmersion.minimum...KleptonImmersion.maximum,
+                                     initialAmount: KleptonImmersion.initial))
         // See Immersive.systemOverlays. On the scene, not on a view inside it:
         // a CompositorLayer has no view hierarchy for the View-level modifier to
         // attach to, so the Scene-level one is the only one that applies here.
@@ -809,6 +845,21 @@ struct PlayerSettingsView: View {
             if Immersive.wanted {
                 GroupBox(klT("Frame generation", "Zwischenbilder")) {
                     FrameGenPicker().frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            // The Digital Crown becomes the immersion control: a per-game
+            // switch, off by default, and never for a mixed-reality title whose
+            // room is the point (crown patch).
+            if Immersive.wanted, !KleptonRendering.targetIsMixedReality {
+                GroupBox(klT("Progressive (Digital Crown)", "Progressiv (Digital Crown)")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle(klT("Progressive immersion", "Progressive Immersion"),
+                               isOn: $rendering.crownImmersion)
+                        Text(klT("Starts fully immersed. Turning the Digital Crown down draws the game into a portal over the room, and at 0% the room is all that is left; the sound fades out there and returns as you turn it back up. Takes effect the next time the game starts.",
+                                 "Startet voll immersiv. Dreh die Krone herunter, dann zieht sich das Spiel in ein Portal über dem Raum zusammen, bei 0 % ist nur der Raum da; dort fadet der Ton aus und kommt zurück, sobald du hochdrehst. Wirkt beim nächsten Start des Spiels."))
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             // Alyx hides the player's arms whatever this says (see
@@ -1745,6 +1796,15 @@ struct BootView: View {
                 KleptonChroma.shared.immersionFull = !Immersive.mixed
                 Immersive.mixedBlackAtBoot = Immersive.mixedBlack
                 Immersive.mixedAtBoot = Immersive.mixed
+                // The crown switch, read here because it depends on the target:
+                // a mixed-reality game keeps its room (crown patch).
+                let crown = KleptonRendering.shared.crownImmersion
+                    && !KleptonRendering.targetIsMixedReality
+                KleptonRendering.shared.crownImmersionActive = crown
+                KleptonImmersion.enabled = crown
+                NSLog("[crown] immersion \(crown ? "on" : "off")"
+                      + " (setting \(KleptonRendering.shared.crownImmersion ? "on" : "off"), "
+                      + "mixed reality \(KleptonRendering.targetIsMixedReality ? "yes" : "no"))")
             }
 
             let logPath = String(cString: kl_app_log_path())

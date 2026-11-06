@@ -176,6 +176,12 @@ static size_t g_scratch_frames;          // ...its size in samples (see resample
 static _Atomic uint64_t g_last_render_ns;
 static _Atomic uint64_t g_last_render_frames;   // what that callback asked for
 static _Atomic uint32_t g_underruns;
+
+// The crown's fade (kl_audio_set_gain). The target is written from the main
+// thread; the render thread walks g_gain toward it one sample at a time, so
+// neither side needs a lock.
+static _Atomic float    g_gain_target = 1.0f;
+static float            g_gain = 1.0f;   // render thread only
 static unsigned long    g_writes, g_short_writes, g_restarts;
 static int              g_trace;
 // The peak sample the guest ever handed us. A buffer count says the mixer ran;
@@ -482,6 +488,31 @@ static OSStatus render_cb(void *ref, AudioUnitRenderActionFlags *flags,
         memset(g_ring + off * g_out_ch, 0, run * g_out_ch * sizeof(float));
         done += run;
     }
+    // The crown's fade: a linear ramp over 0.3 s, applied to the frames just
+    // copied. A target change mid-ramp reverses from wherever the gain is now,
+    // so crossing the 0 % edge cannot click. When the gain is wide open this
+    // costs one atomic load and one comparison per buffer.
+    float gain_target = atomic_load_explicit(&g_gain_target, memory_order_relaxed);
+    if (g_gain != gain_target) {
+        float hw_rate = g_out_rate > 8000.0 ? (float)g_out_rate : 48000.0f;
+        float gain_step = 1.0f / (0.30f * hw_rate);
+        float gain = g_gain;
+        float *sample = dst;
+        for (size_t i = 0; i < take; i++) {
+            if (gain < gain_target) {
+                gain += gain_step;
+                if (gain > gain_target) gain = gain_target;
+            } else {
+                gain -= gain_step;
+                if (gain < gain_target) gain = gain_target;
+            }
+            for (unsigned c = 0; c < g_out_ch; c++) *sample++ *= gain;
+        }
+        g_gain = gain;
+    } else if (g_gain != 1.0f) {
+        for (size_t i = 0; i < take * g_out_ch; i++) dst[i] *= g_gain;
+    }
+
     if (take < want) {
         memset(dst + take * g_out_ch, 0, (want - take) * g_out_ch * sizeof(float));
         atomic_fetch_add_explicit(&g_frames_silent, want - take, memory_order_relaxed);
@@ -1141,6 +1172,15 @@ void kl_audio_interrupted(int began) {
 void kl_audio_set_silenced(int silenced) {
     g_silenced = silenced;
     kl_audio_interrupted(silenced);
+}
+
+// The crown's fade. 0 closes over about 0.3 s, 1 opens over the same; the unit
+// is never stopped, so there is no gap and the stream stays in step with the
+// picture. The render callback does the ramping (see render_cb).
+void kl_audio_set_gain(float gain) {
+    if (gain < 0.0f) gain = 0.0f;
+    if (gain > 1.0f) gain = 1.0f;
+    atomic_store_explicit(&g_gain_target, gain, memory_order_relaxed);
 }
 
 // Rebuild the unit. Used by both the notification path and the watchdog, and it

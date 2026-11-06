@@ -176,6 +176,11 @@ int  kl_audio_restart(void);
 // The scene says the app is off screen — a deliberate silence, latching, so
 // the watchdog's lost-notification escape cannot "recover" the stream back.
 void kl_audio_set_silenced(int silenced);
+
+// The crown's fade: a target gain (0…1) that the render callback walks toward
+// over about 0.3 s. Unlike kl_audio_set_silenced this never stops the unit, so
+// the sound leaves and returns without a gap or a session round-trip.
+void kl_audio_set_gain(float gain);
 // The app is back on screen — call it on any transition that can only mean
 // that, whatever this side believes its own state to be.
 //

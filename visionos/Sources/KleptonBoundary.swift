@@ -94,6 +94,8 @@ final class KLBoundary {
             d.fragmentFunction = lib.makeFunction(name: "klb_wall_f")
             d.colorAttachments[0].pixelFormat = color
             d.depthAttachmentPixelFormat = .depth32Float
+            d.depthAttachmentPixelFormat = .depth32Float
+            d.stencilAttachmentPixelFormat = KleptonImmersion.stencilFormat
             d.maxVertexAmplificationCount = amplification
             let c = d.colorAttachments[0]!
             c.isBlendingEnabled = true
@@ -106,6 +108,8 @@ final class KLBoundary {
             f.fragmentFunction = lib.makeFunction(name: "klb_full_f")
             f.colorAttachments[0].pixelFormat = color
             f.depthAttachmentPixelFormat = .depth32Float
+            f.depthAttachmentPixelFormat = .depth32Float
+            f.stencilAttachmentPixelFormat = KleptonImmersion.stencilFormat
             f.maxVertexAmplificationCount = amplification
             let g = f.colorAttachments[0]!
             g.isBlendingEnabled = true
