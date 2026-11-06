@@ -282,6 +282,11 @@ final class KleptonCompositor {
     // KLRealityPresent.switchAtStart): the running compositor takes the new
     // output, and the guest never notices.
     nonisolated(unsafe) static var live: KleptonCompositor?
+    /// The head's yaw in the space, radians, and when it was written. A window
+    /// opens where the gaze points at that instant, so anything that raises one
+    /// has to know whether the head is still turning (KleptonControllerRecovery).
+    nonisolated(unsafe) static var headYaw: Float = 0
+    nonisolated(unsafe) static var headYawAt: TimeInterval = 0
     nonisolated(unsafe) static var expectingHandover = false
     private let handover = DispatchSemaphore(value: 0)
     private let handoverLock = NSLock()
@@ -844,7 +849,9 @@ final class KleptonCompositor {
             if let accessories {
                 // A fresh anchor stream per provider. The previous one ends
                 // when its provider is replaced, so these do not accumulate.
-                Task { await controllers.consumeAccessoryAnchors(accessories) }
+                // Owned by the controllers, because the recovery releases the
+                // list and has to stop reading it while it is empty.
+                controllers.startAccessoryAnchors(accessories)
             }
         } catch {
             NSLog("[cp] ARKit failed to start: \(error) — falling back to the "
@@ -983,6 +990,14 @@ final class KleptonCompositor {
             // klovrp_derive_motion in runtime/xr/kl_ovrp.c.
             kl_ovrp_set_head_pose_time(presentationTime)
             kl_ovrp_set_head_pose(p.x, p.y, p.z, q.imag.x, q.imag.y, q.imag.z, q.real)
+            // Where the head looks, for anything that has to open a window in
+            // front of the user: KleptonControllerRecovery's prompt waits for
+            // the head to settle first. Yaw only, because a window opens where
+            // the gaze points at that instant and nodding does not move that
+            // direction sideways.
+            let forward = q.act(SIMD3<Float>(0, 0, -1))
+            Self.headYaw = atan2(forward.x, -forward.z)
+            Self.headYawAt = CACurrentMediaTime()
         }
 
         // Hands and controllers both go through KleptonControllers, which is a

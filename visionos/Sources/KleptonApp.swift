@@ -349,6 +349,8 @@ struct KleptonApp: App {
         KLBackup.keepGameFilesOut()
         // Controller buttons after the focus went to another window (KleptonControllers.swift).
         KLControllerFocus.start()
+        // Spatial controllers after a system interruption (KleptonControllerRecovery.swift).
+        KLControllerRecovery.start()
     }
 
     var body: some Scene {
@@ -369,6 +371,24 @@ struct KleptonApp: App {
         WindowGroup(id: "kbentry") { KeyboardEntryView() }
             .defaultSize(width: 560, height: 240)
             .windowResizability(.contentSize)
+
+        // The controller prompt: raised when the button stream has stopped and
+        // the accessory list was handed back to the system (see
+        // KleptonControllerRecovery.swift). A window, not a head-locked view: a
+        // pinch in the immersive space delivered zero spatial events, and the
+        // window is what gives the scene its focus back. The pinch on it is the
+        // one take-back.
+        WindowGroup(id: KLControllerRecovery.promptWindowID) { KLControllerPromptView() }
+            .defaultSize(width: 184, height: 304)
+            .windowResizability(.contentSize)
+            // `.plain` drops the system's glass plate: the circle draws its own,
+            // and a plate behind it reads as a window inside a window.
+            .windowStyle(.plain)
+            // Centred, below the gaze. Without this visionOS scattered the
+            // window around the room and it had to be searched for.
+            .defaultWindowPlacement { _, _ in WindowPlacement(.utilityPanel) }
+            .restorationBehavior(.disabled)
+            .defaultLaunchBehavior(.suppressed)
 
         // A web page the guest asked to open (see KLRun.watchKeyboard). One
         // window per URL; closing it is the way back to the game. Never brought
@@ -1830,6 +1850,7 @@ struct BootView: View {
                             if case .opened = r {
                                 KLRealityPresent.capture(open: openImmersiveSpace, dismiss: dismissImmersiveSpace,
                                                          openWindow: openWindow, dismissWindow: dismissWindow)
+                                KLControllerRecovery.capture(openWindow: openWindow, dismissWindow: dismissWindow)
                             }
                             // An installed game's window has done its job once
                             // the picture is up: hand the keyboard poll to
