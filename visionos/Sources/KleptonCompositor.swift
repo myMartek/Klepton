@@ -282,6 +282,11 @@ final class KleptonCompositor {
     // KLRealityPresent.switchAtStart): the running compositor takes the new
     // output, and the guest never notices.
     nonisolated(unsafe) static var live: KleptonCompositor?
+    /// The picture is gone for good: the render loop ended because the layer
+    /// was invalidated (a crown press to Home, a notification the user opened,
+    /// the game quitting). A system peek leaves the layer running, so this
+    /// stays false for it. `Lifecycle` reads it on `.inactive`.
+    nonisolated(unsafe) static var outputEnded = false
     nonisolated(unsafe) static var expectingHandover = false
     private let handover = DispatchSemaphore(value: 0)
     private let handoverLock = NSLock()
@@ -300,6 +305,7 @@ final class KleptonCompositor {
         }
         let c = KleptonCompositor(layer)
         live = c
+        outputEnded = false
         c.startRenderLoop()
     }
     /// A RealityKit target for the running compositor (the picture moving at
@@ -2060,16 +2066,22 @@ final class KleptonCompositor {
                 rkFrames(rk)
             }
         }
-        // The crown press invalidates the layer with NO scenePhase change at
-        // all (measured on device: none fires), and the system then takes
-        // ~30-60 s to background the process — which is when Lifecycle exits.
-        // Go silent the moment the picture is gone, not when the OS gets to
-        // it; the guest may keep rendering until the join below.
+        // The crown press invalidates the layer. The scene may report
+        // `.inactive` seconds later or not at all (both seen on device), and
+        // the system then takes ~30-60 s to background the process — which is
+        // when Lifecycle used to exit. Go silent the moment the picture is
+        // gone, not when the OS gets to it; the guest may keep rendering until
+        // the join below.
         KleptonAudio.setSilenced(true)
         // Ends the guest's loop and joins it, so its report — which is the
         // lifecycle report, and belongs to the guest's end of the run rather than
         // to this one — has been written before this returns.
         if syncGuest { kl_app_lifecycle_report() } else { kl_app_guest_stop() }
+        // Only now, and not a moment earlier: a Lifecycle that leaves on
+        // `.inactive` would otherwise exit in the middle of that join, taking
+        // the guest's report with it. A peek never reaches this function, so
+        // the flag stays false for it.
+        Self.outputEnded = true
     }
 
     /// What each swapchain stage actually holds, per report interval.
