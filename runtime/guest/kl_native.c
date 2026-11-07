@@ -478,6 +478,13 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
         // are laid out on the Mac by tools/sourcevr_prepare.py. A folder that is
         // not there is left out of its list, as the launcher does.
         const char *profile = kl_sourcevr_profile();
+        if (strcmp(profile, "portal") == 0) {
+            // The loading presenter holds the XR lock across its paced frame,
+            // then immediately takes it again. Let the waiting engine thread
+            // acquire it on unlock instead of repeatedly losing to that loop.
+            // Keep explicit launch overrides for comparison.
+            setenv("KL_MUTEX_POLICY", "fairshare", 0);
+        }
         static const struct { const char *profile, *gamedir; const char *layers[5]; } P[] = {
             { "hl2",         "hl2",         { "hl2vr", "hl2bodyvr", "hl2bodyhla" } },
             { "ep1",         "episodic",    { "ep1vr", "hl2vr", "hl2bodyvr", "hl2bodyhla" } },
