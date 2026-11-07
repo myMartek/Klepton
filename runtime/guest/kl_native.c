@@ -533,6 +533,9 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
             }
             if (out) { fprintf(out, "  [env] SourceVR staged folders: %s\n", rt); fflush(out); }
         }
+        // The staged-folder probes above reuse p. Restore the write game
+        // directory before seeding gameinfo and applying saved-config defaults.
+        snprintf(p, sizeof p, "%s/user/%s", root, gamedir);
         // Two defaults AVP Play ships for Portal (his word, 2026-11-01), each
         // applied ONCE and remembered by a marker beside it, so a player who
         // changes them afterwards keeps the change:
