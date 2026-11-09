@@ -1150,7 +1150,9 @@ static int klxr_ext_gate_open(int gate) {
         // KL_XR_HAND_TRACKING=1 offers it to any guest, =0 withholds it.
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        return kl_env_on("KL_XR_HAND_TRACKING", (t && !strcmp(t, "alyx")) ||
+        // PutterVR (x24782806838055701) gets the joints for its fingers too
+        // (community fix 98; controller-free play not yet seen).
+        return kl_env_on("KL_XR_HAND_TRACKING", (t && (!strcmp(t, "alyx") || !strcmp(t, "x24782806838055701"))) ||
                                                 klxr_ext_gate_open(KLXR_GATE_BRINK_HANDS));
     }
     case KLXR_GATE_REFRESH: {
@@ -2974,6 +2976,7 @@ static int klxr_local_floor_on(void) {
         const char *t = kl_driver_target_name();
         on = kl_env_on("KL_XR_LOCAL_FLOOR", t && (!strcmp(t, "x3635172946605196") || !strcmp(t, "x9449316705178989") ||
                                                   !strcmp(t, "x6946182742093178") ||
+                                                  !strcmp(t, "x24782806838055701") || /* PutterVR */
                                                   !strcmp(t, "x24151641901194680")));
     }
     // Core from 1.1 on; before that it is an extension we do not advertise.
