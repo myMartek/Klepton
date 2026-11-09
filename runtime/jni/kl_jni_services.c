@@ -689,14 +689,29 @@ static void klj_locale_parts(char *lang, size_t lang_sz, char *country, size_t c
     // It is on by default, too, for a title whose installation lists its
     // language packs (kl_ovrplat_asset_files_configured: Deadpool VR picks its
     // voice-over pack by this language); without such a list nothing changes.
-    if (!env || !*env) {
+    // SourceVR's games are another such title: their launcher reads the
+    // language off AConfiguration ("language follows the device", liblauncher)
+    // unless config.cfg archives a vr_language, so the start window's choice
+    // only reaches them through this door — told en_US they stayed English
+    // with Deutsch chosen (headset logs 2026-11-09: "locale told to the guest:
+    // en_US (KL_LOCALE_DEVICE=0, KL_DEVICE_LANG=de_DE)"). Voices need the
+    // language's own voice-over VPK beside the English one (hl2_sound_vo_<lang>);
+    // UI and captions come from the files the game already has.
+    //
+    // The choice wins over LANG, not the other way round: on the headset LANG
+    // IS set (the HL2 log of 2026-11-09 read "en_US (KL_LOCALE_DEVICE=1,
+    // KL_DEVICE_LANG=de_DE)"), and a LANG that has nothing to do with what the
+    // start window shows would otherwise silently keep every such game English.
+    {
         static int from_device = -1;
         if (from_device < 0) {
             const char *t = kl_driver_target_name();
             from_device = kl_env_on("KL_LOCALE_DEVICE", (t && strcmp(t, "wrath2") == 0) ||
+                                                        (t && strncmp(t, "sourcevr-", 9) == 0) ||
                                                         kl_ovrplat_asset_files_configured());
         }
-        if (from_device) env = getenv("KL_DEVICE_LANG");
+        const char *dev = getenv("KL_DEVICE_LANG");
+        if (from_device && dev && *dev) env = dev;
     }
     if (!env || !*env || strncmp(env, "C", 2) == 0) return;
     // "en_US.UTF-8" -> "en" + "US"

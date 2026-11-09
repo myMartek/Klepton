@@ -4844,9 +4844,28 @@ static void klfb_tex_stats_zero(const char *call, int32_t level, int32_t w, int3
 // kl_glfb_make_current); an upload one context has only recorded is not yet in
 // the queue the other context's draws go into. If the per-start black
 // textures stop with this, that ordering is what they are.
+//
+// ON by default for the SourceVR targets (2026-11-09). Their engine uploads on
+// its main thread (1835 of 1878 level-0 uploads in a Portal headset log) and
+// draws on its render thread, each with its own context of one share group.
+// ANGLE on Metal records an upload into the uploading context's command buffer
+// and commits that buffer when THAT thread flushes — and the main thread, which
+// draws nothing, may not flush for a long time, so the render thread samples a
+// texture whose bytes are still sitting in an uncommitted buffer: zero, black.
+// Which textures it hits depends on timing, which is how it presented: the
+// portal rim and the portal crosshair black on some starts and coloured on
+// others, Barney's face black once. With the flush, a headset run showed the
+// rim bright orange and the view through the portal intact. KL_GLFB_TEX_FLUSH=0
+// is the A/B.
 static int klfb_tex_flush(void) {
     static int on = -1;
-    if (on < 0) on = kl_env_on("KL_GLFB_TEX_FLUSH", 0);
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_GLFB_TEX_FLUSH", t && strncmp(t, "sourcevr-", 9) == 0);
+        if (on) fprintf(stderr, "  [glfb] every texture upload is followed by a glFlush, so the "
+                                "render thread's context sees it (KL_GLFB_TEX_FLUSH=0 turns it off)\n");
+    }
     return on;
 }
 static void klfb_tex_flush_now(void) {
@@ -4901,13 +4920,59 @@ static void klfb_TexImage2D(uint32_t target, int32_t level, int32_t ifmt,
     // four-channel reading makes of it, and the game is better off without
     // them. It does NOT cure the lift's interior going black at close range —
     // tried, unchanged.
+    //
+    // KL_GLFB_RGB8_RGBA=2 keeps the fourth byte as the texture's alpha instead
+    // of reading it as one. The bytes of those uploads, dumped on the Mac
+    // (KL_GLFB_RGB8_DUMP, 2026-11-09): the 128x256 ones are Portal's portal
+    // crosshair — white where the two C-shaped halves are and alpha carrying
+    // the shape (146 distinct alpha values, 92% of them zero) — so the data IS
+    // a four-channel sprite, and read with alpha one it is a white slab; read
+    // refused it is black. The fifteen 1x1 ones are all zero either way.
     int rgbx = 0;
-    if (fmt == 0x1908 /* RGBA */ && type == 0x1401 /* UNSIGNED_BYTE */ &&
-        kl_env_on("KL_GLFB_RGB8_RGBA", 0)) {
-        if (ifmt == 0x8051 /* RGB8 */)       { ifmt = 0x8058 /* RGBA8 */;        rgbx = 1; }
-        else if (ifmt == 0x8C41 /* SRGB8 */) { ifmt = 0x8C43 /* SRGB8_ALPHA8 */; rgbx = 1; }
+    //
+    // Mode 3 — the SourceVR default since 2026-11-09 — takes the 1x1 uploads as
+    // mode 2 does and refuses the larger ones. The two sizes want opposite
+    // things: the fifteen 1x1 textures are placeholders the engine creates
+    // EMPTY (every dumped one is zero) and fills later with glTexSubImage2D,
+    // which only lands when the allocation went through — refused, they stay
+    // incomplete and Half-Life 2's shadowed walls come out in posterised
+    // yellow/red/cyan (Marcel, 2026-11-09, mode 0 + the upload flush; the same
+    // room was right in the run before with mode 2). The 128x256 noise sheet is
+    // a hand texture whose bytes are wrong whichever way they are read: alpha
+    // one posterised the hand (2026-10-10), its own alpha put black triangles
+    // on it (2026-11-09), refused the hand is right. KL_GLFB_RGB8_RGBA=0/1/2
+    // are the old readings for an A/B.
+    static int rgb8_mode = -1;
+    if (rgb8_mode < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        rgb8_mode = (int)kl_env_uint("KL_GLFB_RGB8_RGBA",
+                                     t && strncmp(t, "sourcevr-", 9) == 0 ? 3u : 0u);
+    }
+    int mode_here = rgb8_mode == 3 ? (w * h <= 1 ? 2 : 0) : rgb8_mode;
+    if (fmt == 0x1908 /* RGBA */ && type == 0x1401 /* UNSIGNED_BYTE */ && mode_here) {
+        if (ifmt == 0x8051 /* RGB8 */)       { ifmt = 0x8058 /* RGBA8 */;        rgbx = mode_here; }
+        else if (ifmt == 0x8C41 /* SRGB8 */) { ifmt = 0x8C43 /* SRGB8_ALPHA8 */; rgbx = mode_here; }
+    }
+    // KL_GLFB_RGB8_DUMP=<dir>: the bytes of those RGB8-with-RGBA-data uploads,
+    // as handed over, so what the posterised reading above is made of can be
+    // looked at on the Mac (2026-11-08: Portal's cursor is black, and the fifteen
+    // 1x1 and three 128x256 textures are the only refused uploads in its log).
+    if (pixels && type == 0x1401 && fmt == 0x1908 && level == 0 &&
+        (ifmt == 0x8051 || ifmt == 0x8C41 || rgbx)) {
+        static const char *dir; static int looked, n;
+        if (!looked) { looked = 1; dir = getenv("KL_GLFB_RGB8_DUMP"); }
+        if (dir && *dir && n < 64) {
+            int32_t bound = -1;
+            if (a_glGetIntegerv) a_glGetIntegerv(0x8069, &bound);
+            char path[1024];
+            snprintf(path, sizeof path, "%s/rgb8_%03d_tex%d_%dx%d.rgba", dir, n++, bound, w, h);
+            FILE *o = fopen(path, "wb");
+            if (o) { fwrite(pixels, 1, (size_t)w * (size_t)h * 4, o); fclose(o); }
+        }
     }
     if (level == 0) g_census_teximage++;
+    if (level == 0 && w > 0 && h > 0) klfb_note_format((uint32_t)ifmt, w, h, 1, "glTexImage2D");
     if (klfb_tex_stats() && fmt == 0x1908 && type == 0x1401)
         klfb_tex_stats_rgba(level, w, h, (uint32_t)ifmt, pixels);
     if (klfb_tex_stats())
@@ -4929,7 +4994,7 @@ static void klfb_TexImage2D(uint32_t target, int32_t level, int32_t ifmt,
     if (g_real_TexImage2D)
         g_real_TexImage2D(target, level, ifmt, w, h, border, fmt, type, pixels);
     if (pixels && klfb_tex_flush()) klfb_tex_flush_now();
-    if (rgbx) {
+    if (rgbx == 1) {
         static void (*tex_parameteri)(uint32_t, uint32_t, int32_t);
         if (!tex_parameteri) tex_parameteri = asym("glTexParameteri");
         uint32_t pt = (target >= 0x8515 && target <= 0x851A) ? 0x8513 /* CUBE_MAP */ : target;
@@ -4938,6 +5003,11 @@ static void klfb_TexImage2D(uint32_t target, int32_t level, int32_t ifmt,
         if (!said++)
             fprintf(stderr, "  [glfb] glTexImage2D: RGB8 with RGBA data is allocated as RGBA8 with "
                             "alpha read as one (ES 3 refuses the pair; said once)\n");
+    } else if (rgbx) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [glfb] glTexImage2D: RGB8 with RGBA data is allocated as RGBA8 with "
+                            "the data's own alpha (KL_GLFB_RGB8_RGBA=2; said once)\n");
     }
     // Under KL_GLFB_ERRSCAN, the arguments of an upload the backend refused: a
     // texture that fails here stays empty and draws black, and the call name
@@ -6069,18 +6139,350 @@ static void klfb_copytex_report(const char *call, int32_t level, int32_t x, int3
             enc == 0x8C40 ? "SRGB" : enc == 0x2601 ? "LINEAR" : "?", bound,
             err ? "  <-- REFUSED 0x" : "", err ? (err == 0x502 ? "502" : "...") : "");
 }
+// The copy ES 3 refuses, done by hand. KL_GLFB_COPYTEX_FIX (on by default):
+// when glCopyTexSubImage2D / glCopyTexImage2D come back with INVALID_OPERATION,
+// the source attachment is a texture, and the destination is a 2D texture,
+// the rectangle is drawn into the destination instead — one texelFetch per
+// pixel from the read framebuffer's attachment (a 2D texture or one layer of
+// a 2D array: the eye swapchain is an array), so no sizes are needed (ES 3.0
+// has no glGetTexLevelParameteriv) and nothing is filtered.
+//
+// What the guest wanted is the copy the Quest's driver does: the BYTES of the
+// framebuffer, with no colour conversion. A sampler decodes an sRGB source to
+// linear, so when the destination is linear the shader encodes the value
+// again before writing it (encode(decode(v)) is v to the bit for an 8-bit
+// sRGB value); when the source is linear and the destination sRGB — the other
+// refused pairing — it decodes, and the framebuffer's own encode on write
+// puts the byte back. SourceVR's engine copies the eye picture into its RGBA8
+// _rt_FullFrameFB for the portal surfaces' refraction (and the other
+// refract/screen-space materials), and the refract shader treats what it
+// samples as the frame's gamma-encoded bytes.
+static int klfb_copytex_fix_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_GLFB_COPYTEX_FIX", ({ extern const char *kl_driver_target_name(void); const char *t_ = kl_driver_target_name(); t_ && strncmp(t_, "sourcevr-", 9) == 0; }));
+    return on;
+}
+static int klfb_copytex_fallback(const char *call, uint32_t target, int32_t level,
+                                 int32_t xo, int32_t yo, int32_t x, int32_t y,
+                                 int32_t w, int32_t h) {
+    static int tried, ok_program;
+    static uint32_t prog, vao, vbo, fb;
+    static int32_t loc_arr, loc_tex, loc_isarr, loc_layer, loc_level, loc_off, loc_mode, loc_pos;
+    static uint32_t (*r_CreateShader)(uint32_t);
+    static void (*r_ShaderSource)(uint32_t, int32_t, const char *const *, const int32_t *);
+    static void (*r_CompileShader)(uint32_t);
+    static void (*r_GetShaderiv)(uint32_t, uint32_t, int32_t *);
+    static void (*r_GetShaderInfoLog)(uint32_t, int32_t, int32_t *, char *);
+    static uint32_t (*r_CreateProgram)(void);
+    static void (*r_AttachShader)(uint32_t, uint32_t);
+    static void (*r_LinkProgram)(uint32_t);
+    static void (*r_GetProgramiv)(uint32_t, uint32_t, int32_t *);
+    static void (*r_UseProgram)(uint32_t);
+    static int32_t (*r_GetUniformLocation)(uint32_t, const char *);
+    static int32_t (*r_GetAttribLocation)(uint32_t, const char *);
+    static void (*r_Uniform1i)(int32_t, int32_t);
+    static void (*r_Uniform2i)(int32_t, int32_t, int32_t);
+    static void (*r_GenVertexArrays)(int32_t, uint32_t *);
+    static void (*r_BindVertexArray)(uint32_t);
+    static void (*r_GenBuffers)(int32_t, uint32_t *);
+    static void (*r_BindBuffer)(uint32_t, uint32_t);
+    static void (*r_BufferData)(uint32_t, long, const void *, uint32_t);
+    static void (*r_VertexAttribPointer)(uint32_t, int32_t, uint32_t, uint8_t, int32_t, const void *);
+    static void (*r_EnableVertexAttribArray)(uint32_t);
+    static void (*r_DrawArrays)(uint32_t, int32_t, int32_t);
+    static void (*r_ActiveTexture)(uint32_t);
+    static void (*r_BindTexture)(uint32_t, uint32_t);
+    static void (*r_TexParameteri)(uint32_t, uint32_t, int32_t);
+    static void (*r_GetTexParameteriv)(uint32_t, uint32_t, int32_t *);
+    static void (*r_Enable)(uint32_t);
+    static void (*r_Disable)(uint32_t);
+    static uint8_t (*r_IsEnabled)(uint32_t);
+    static void (*r_Viewport)(int32_t, int32_t, int32_t, int32_t);
+    static void (*r_BindFramebuffer2)(uint32_t, uint32_t);
+    static void (*r_FramebufferTexture2D)(uint32_t, uint32_t, uint32_t, uint32_t, int32_t);
+    static uint32_t (*r_CheckFbStatus)(uint32_t);
+    static void (*r_GenFramebuffers)(int32_t, uint32_t *);
+    static void (*r_GetFbAttParam)(uint32_t, uint32_t, uint32_t, int32_t *);
+    static void (*r_GetBooleanv)(uint32_t, uint8_t *);
+    static void (*r_ColorMask)(uint8_t, uint8_t, uint8_t, uint8_t);
+    static unsigned done, said;
+
+    if (target != 0x0DE1 /* TEXTURE_2D */ || w <= 0 || h <= 0) return 0;
+    if (!tried) {
+        tried = 1;
+        r_CreateShader = asym("glCreateShader");
+        r_ShaderSource = asym("glShaderSource");
+        r_CompileShader = asym("glCompileShader");
+        r_GetShaderiv = asym("glGetShaderiv");
+        r_GetShaderInfoLog = asym("glGetShaderInfoLog");
+        r_CreateProgram = asym("glCreateProgram");
+        r_AttachShader = asym("glAttachShader");
+        r_LinkProgram = asym("glLinkProgram");
+        r_GetProgramiv = asym("glGetProgramiv");
+        r_UseProgram = asym("glUseProgram");
+        r_GetUniformLocation = asym("glGetUniformLocation");
+        r_GetAttribLocation = asym("glGetAttribLocation");
+        r_Uniform1i = asym("glUniform1i");
+        r_Uniform2i = asym("glUniform2i");
+        r_GenVertexArrays = asym("glGenVertexArrays");
+        r_BindVertexArray = asym("glBindVertexArray");
+        r_GenBuffers = asym("glGenBuffers");
+        r_BindBuffer = asym("glBindBuffer");
+        r_BufferData = asym("glBufferData");
+        r_VertexAttribPointer = asym("glVertexAttribPointer");
+        r_EnableVertexAttribArray = asym("glEnableVertexAttribArray");
+        r_DrawArrays = asym("glDrawArrays");
+        r_ActiveTexture = asym("glActiveTexture");
+        r_BindTexture = asym("glBindTexture");
+        r_TexParameteri = asym("glTexParameteri");
+        r_GetTexParameteriv = asym("glGetTexParameteriv");
+        r_Enable = asym("glEnable");
+        r_Disable = asym("glDisable");
+        r_IsEnabled = asym("glIsEnabled");
+        r_Viewport = asym("glViewport");
+        r_BindFramebuffer2 = asym("glBindFramebuffer");
+        r_FramebufferTexture2D = asym("glFramebufferTexture2D");
+        r_CheckFbStatus = asym("glCheckFramebufferStatus");
+        r_GenFramebuffers = asym("glGenFramebuffers");
+        r_GetFbAttParam = asym("glGetFramebufferAttachmentParameteriv");
+        r_GetBooleanv = asym("glGetBooleanv");
+        r_ColorMask = asym("glColorMask");
+        if (r_CreateShader && r_ShaderSource && r_CompileShader && r_CreateProgram &&
+            r_AttachShader && r_LinkProgram && r_UseProgram && r_GetUniformLocation &&
+            r_GetAttribLocation && r_Uniform1i && r_Uniform2i && r_GenVertexArrays &&
+            r_BindVertexArray && r_GenBuffers && r_BindBuffer && r_BufferData &&
+            r_VertexAttribPointer && r_EnableVertexAttribArray && r_DrawArrays &&
+            r_ActiveTexture && r_BindTexture && r_Viewport && r_BindFramebuffer2 &&
+            r_FramebufferTexture2D && r_GenFramebuffers && r_GetFbAttParam &&
+            a_glGetIntegerv && a_glGetError) {
+            const char *vs =
+                "#version 300 es\n"
+                "in vec2 aPos;\n"
+                "void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+            const char *fs =
+                "#version 300 es\n"
+                "precision highp float; precision highp int;\n"
+                "uniform highp sampler2DArray uArr; uniform highp sampler2D uTex;\n"
+                "uniform int uIsArr; uniform int uLayer; uniform int uLevel;\n"
+                "uniform ivec2 uOff; uniform int uMode;\n"
+                "out vec4 o;\n"
+                "vec3 enc(vec3 c){ return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055,\n"
+                "                             step(vec3(0.0031308), c)); }\n"
+                "vec3 dec(vec3 c){ return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)),\n"
+                "                             step(vec3(0.04045), c)); }\n"
+                "void main(){\n"
+                "  ivec2 p = ivec2(gl_FragCoord.xy) + uOff;\n"
+                "  vec4 c = uIsArr != 0 ? texelFetch(uArr, ivec3(p, uLayer), uLevel)\n"
+                "                       : texelFetch(uTex, p, uLevel);\n"
+                "  if (uMode == 1) c.rgb = enc(c.rgb); else if (uMode == 2) c.rgb = dec(c.rgb);\n"
+                "  o = c;\n"
+                "}\n";
+            uint32_t v = r_CreateShader(0x8B31), fsh = r_CreateShader(0x8B30);
+            int32_t okv = 1, okf = 1, okl = 1;
+            r_ShaderSource(v, 1, &vs, NULL); r_CompileShader(v);
+            r_ShaderSource(fsh, 1, &fs, NULL); r_CompileShader(fsh);
+            if (r_GetShaderiv) { r_GetShaderiv(v, 0x8B81, &okv); r_GetShaderiv(fsh, 0x8B81, &okf); }
+            prog = r_CreateProgram();
+            r_AttachShader(prog, v); r_AttachShader(prog, fsh);
+            r_LinkProgram(prog);
+            if (r_GetProgramiv) r_GetProgramiv(prog, 0x8B82, &okl);
+            if (okv && okf && okl) {
+                loc_arr   = r_GetUniformLocation(prog, "uArr");
+                loc_tex   = r_GetUniformLocation(prog, "uTex");
+                loc_isarr = r_GetUniformLocation(prog, "uIsArr");
+                loc_layer = r_GetUniformLocation(prog, "uLayer");
+                loc_level = r_GetUniformLocation(prog, "uLevel");
+                loc_off   = r_GetUniformLocation(prog, "uOff");
+                loc_mode  = r_GetUniformLocation(prog, "uMode");
+                loc_pos   = r_GetAttribLocation(prog, "aPos");
+                r_GenVertexArrays(1, &vao);
+                r_GenBuffers(1, &vbo);
+                r_GenFramebuffers(1, &fb);
+                if (loc_pos >= 0 && vao && vbo && fb) ok_program = 1;
+            } else if (r_GetShaderInfoLog) {
+                char log[1024] = ""; int32_t n = 0;
+                r_GetShaderInfoLog(okf ? v : fsh, (int32_t)sizeof log - 1, &n, log);
+                fprintf(stderr, "  [glfb] copytex fix: shader did not build: %s\n", log);
+            }
+            while (a_glGetError()) {}
+        }
+        if (!ok_program)
+            fprintf(stderr, "  [glfb] copytex fix: no program — a refused copy stays refused\n");
+    }
+    if (!ok_program) return 0;
+
+    // The source: the read framebuffer's colour attachment 0, a texture.
+    int32_t rfb = 0, otype = 0, oname = 0, olayer = 0, olevel = 0, enc = 0;
+    a_glGetIntegerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &rfb);
+    if (rfb <= 0) return 0;   // the default framebuffer has no texture to sample
+    r_GetFbAttParam(0x8CA8, 0x8CE0, 0x8CD0 /* OBJECT_TYPE */, &otype);
+    if (otype != 0x1702 /* TEXTURE */) return 0;
+    r_GetFbAttParam(0x8CA8, 0x8CE0, 0x8CD1 /* OBJECT_NAME */, &oname);
+    r_GetFbAttParam(0x8CA8, 0x8CE0, 0x8CD4 /* TEXTURE_LAYER */, &olayer);
+    r_GetFbAttParam(0x8CA8, 0x8CE0, 0x8CD2 /* TEXTURE_LEVEL */, &olevel);
+    r_GetFbAttParam(0x8CA8, 0x8CE0, 0x8210 /* COLOR_ENCODING */, &enc);
+    while (a_glGetError()) {}
+    if (oname <= 0) return 0;
+    int32_t dst = 0;
+    a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &dst);
+    if (dst <= 0 || dst == oname) return 0;
+
+    // Save what the draw disturbs.
+    int32_t s_prog = 0, s_vao = 0, s_vbo = 0, s_at = 0, s_tex2d = 0, s_texarr = 0, s_vp[4] = {0,0,0,0};
+    int32_t s_draw_fb = 0;
+    uint8_t s_mask[4] = {1,1,1,1};
+    a_glGetIntegerv(0x8B8D /* CURRENT_PROGRAM */, &s_prog);
+    a_glGetIntegerv(0x85B5 /* VERTEX_ARRAY_BINDING */, &s_vao);
+    a_glGetIntegerv(0x8894 /* ARRAY_BUFFER_BINDING */, &s_vbo);
+    a_glGetIntegerv(0x84E0 /* ACTIVE_TEXTURE */, &s_at);
+    a_glGetIntegerv(0x0BA2 /* VIEWPORT */, s_vp);
+    a_glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &s_draw_fb);
+    if (r_GetBooleanv) r_GetBooleanv(0x0C23 /* COLOR_WRITEMASK */, s_mask);
+    int blend_was = r_IsEnabled ? (int)r_IsEnabled(0x0BE2) : 0;
+    int depth_was = r_IsEnabled ? (int)r_IsEnabled(0x0B71) : 0;
+    int cull_was  = r_IsEnabled ? (int)r_IsEnabled(0x0B44) : 0;
+    int sciss_was = r_IsEnabled ? (int)r_IsEnabled(0x0C11) : 0;
+    int sten_was  = r_IsEnabled ? (int)r_IsEnabled(0x0B90) : 0;
+    int disc_was  = r_IsEnabled ? (int)r_IsEnabled(0x8C89 /* RASTERIZER_DISCARD */) : 0;
+    int dith_was  = r_IsEnabled ? (int)r_IsEnabled(0x0BD0 /* DITHER */) : 1;
+    int srgb_was  = r_IsEnabled ? (int)r_IsEnabled(0x8DB9 /* FRAMEBUFFER_SRGB */) : 1;
+
+    // Is the source a 2D array? Binding its name to the array target says so.
+    r_ActiveTexture(0x84C0);
+    a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &s_tex2d);
+    a_glGetIntegerv(0x8C1D /* TEXTURE_BINDING_2D_ARRAY */, &s_texarr);
+    r_BindTexture(0x8C1A /* TEXTURE_2D_ARRAY */, (uint32_t)oname);
+    int is_arr = a_glGetError() == 0;
+    int32_t s_tex2d_u1 = 0;
+    if (!is_arr) {
+        r_BindTexture(0x8C1A, (uint32_t)s_texarr);
+        r_ActiveTexture(0x84C1 /* TEXTURE1 */);
+        a_glGetIntegerv(0x8069, &s_tex2d_u1);
+        r_BindTexture(0x0DE1, (uint32_t)oname);   // unit 1 carries the 2D source
+        while (a_glGetError()) {}
+    }
+    uint32_t src_target = is_arr ? 0x8C1A : 0x0DE1;
+    int32_t s_min = 0x2600, s_mag = 0x2600;
+    if (r_GetTexParameteriv && r_TexParameteri) {
+        r_GetTexParameteriv(src_target, 0x2801, &s_min);
+        r_GetTexParameteriv(src_target, 0x2800, &s_mag);
+        r_TexParameteri(src_target, 0x2801, 0x2600 /* NEAREST */);   // complete without mipmaps
+        r_TexParameteri(src_target, 0x2800, 0x2600);
+    }
+
+    // The destination: the guest's 2D texture, level `level`.
+    int drew = 0;
+    r_BindFramebuffer2(0x8CA9 /* DRAW_FRAMEBUFFER */, fb);
+    r_FramebufferTexture2D(0x8CA9, 0x8CE0, 0x0DE1, (uint32_t)dst, level);
+    int32_t denc = 0;
+    r_GetFbAttParam(0x8CA9, 0x8CE0, 0x8210, &denc);
+    if (!r_CheckFbStatus || r_CheckFbStatus(0x8CA9) == 0x8CD5 /* COMPLETE */) {
+        int src_srgb = enc == 0x8C40, dst_srgb = denc == 0x8C40;
+        int mode = 0;
+        if (src_srgb && !dst_srgb) mode = 1;                 // encode by hand: linear target
+        else if (!src_srgb && dst_srgb) mode = srgb_was ? 2 : 0;   // the framebuffer encodes
+        if (depth_was && r_Disable) r_Disable(0x0B71);
+        if (cull_was  && r_Disable) r_Disable(0x0B44);
+        if (sciss_was && r_Disable) r_Disable(0x0C11);
+        if (blend_was && r_Disable) r_Disable(0x0BE2);
+        if (sten_was  && r_Disable) r_Disable(0x0B90);
+        if (disc_was  && r_Disable) r_Disable(0x8C89);
+        if (dith_was  && r_Disable) r_Disable(0x0BD0);
+        if (r_ColorMask) r_ColorMask(1, 1, 1, 1);
+        r_Viewport(xo, yo, w, h);
+        static const float quad[8] = { -1, -1,  1, -1,  -1, 1,  1, 1 };
+        r_BindVertexArray(vao);
+        r_BindBuffer(0x8892, vbo);
+        r_BufferData(0x8892, (long)sizeof quad, quad, 0x88E4 /* STATIC_DRAW */);
+        r_EnableVertexAttribArray((uint32_t)loc_pos);
+        r_VertexAttribPointer((uint32_t)loc_pos, 2, 0x1406, 0, 2 * (int)sizeof(float), (const void *)0);
+        r_UseProgram(prog);
+        if (loc_arr   >= 0) r_Uniform1i(loc_arr, 0);
+        if (loc_tex   >= 0) r_Uniform1i(loc_tex, 1);
+        if (loc_isarr >= 0) r_Uniform1i(loc_isarr, is_arr);
+        if (loc_layer >= 0) r_Uniform1i(loc_layer, olayer);
+        if (loc_level >= 0) r_Uniform1i(loc_level, olevel);
+        if (loc_off   >= 0) r_Uniform2i(loc_off, x - xo, y - yo);
+        if (loc_mode  >= 0) r_Uniform1i(loc_mode, mode);
+        r_DrawArrays(0x0005 /* TRIANGLE_STRIP */, 0, 4);
+        drew = 1;
+        if (said < 8) {
+            said++;
+            fprintf(stderr, "  [glfb] %s refused by ES 3 (source %s, destination %s): drawn by "
+                            "hand instead — tex %d%s layer %d level %d (%d,%d) -> tex %d level %d "
+                            "(%d,%d) %dx%d, %s (KL_GLFB_COPYTEX_FIX=0 leaves it refused)\n",
+                    call, src_srgb ? "SRGB" : "LINEAR", dst_srgb ? "SRGB" : "LINEAR",
+                    oname, is_arr ? " (2D array)" : "", olayer, olevel, x, y, dst, level, xo, yo,
+                    w, h, mode == 1 ? "re-encoded in the shader"
+                                    : mode == 2 ? "decoded in the shader, the target encodes"
+                                                : "bytes as sampled");
+        }
+        // Restore the raster state.
+        if (r_ColorMask) r_ColorMask(s_mask[0], s_mask[1], s_mask[2], s_mask[3]);
+        if (dith_was  && r_Enable) r_Enable(0x0BD0);
+        if (disc_was  && r_Enable) r_Enable(0x8C89);
+        if (sten_was  && r_Enable) r_Enable(0x0B90);
+        if (blend_was && r_Enable) r_Enable(0x0BE2);
+        if (sciss_was && r_Enable) r_Enable(0x0C11);
+        if (cull_was  && r_Enable) r_Enable(0x0B44);
+        if (depth_was && r_Enable) r_Enable(0x0B71);
+        r_Viewport(s_vp[0], s_vp[1], s_vp[2], s_vp[3]);
+        r_UseProgram((uint32_t)s_prog);
+        r_BindBuffer(0x8892, (uint32_t)s_vbo);
+        r_BindVertexArray((uint32_t)s_vao);
+    } else if (said < 8) {
+        said++;
+        fprintf(stderr, "  [glfb] %s refused by ES 3, and tex %d level %d is not a complete "
+                        "colour target either — left as it is\n", call, dst, level);
+    }
+    r_FramebufferTexture2D(0x8CA9, 0x8CE0, 0x0DE1, 0, 0);
+    r_BindFramebuffer2(0x8CA9, (uint32_t)s_draw_fb);
+
+    // The source texture's parameters, then the unit bindings.
+    if (r_GetTexParameteriv && r_TexParameteri) {
+        r_TexParameteri(src_target, 0x2801, s_min);
+        r_TexParameteri(src_target, 0x2800, s_mag);
+    }
+    if (is_arr) {
+        r_BindTexture(0x8C1A, (uint32_t)s_texarr);
+    } else {
+        r_ActiveTexture(0x84C1);
+        r_BindTexture(0x0DE1, (uint32_t)s_tex2d_u1);   // unit 1's own 2D texture back
+        r_ActiveTexture(0x84C0);
+    }
+    r_BindTexture(0x0DE1, (uint32_t)s_tex2d);
+    r_ActiveTexture((uint32_t)s_at);
+    while (a_glGetError()) {}
+    if (drew) done++;
+    return drew;
+}
 static void (*g_real_CopyTexImage2D)(uint32_t, int32_t, uint32_t, int32_t, int32_t,
                                      int32_t, int32_t, int32_t);
 static void klfb_CopyTexImage2D(uint32_t target, int32_t level, uint32_t ifmt, int32_t x,
                                 int32_t y, int32_t w, int32_t h, int32_t border) {
     int32_t saved = 0;
     int redirected = klfb_mvs_read_begin(&saved);
-    int scan = (glfb_errscan() || klfb_trace_tex()) && a_glGetError;
+    int fix = klfb_copytex_fix_on() && target == 0x0DE1;
+    int scan = (glfb_errscan() || klfb_trace_tex() || fix) && a_glGetError;
     if (scan) while (a_glGetError()) {}
     if (g_real_CopyTexImage2D) g_real_CopyTexImage2D(target, level, ifmt, x, y, w, h, border);
     if (scan) {
         uint32_t e = a_glGetError();
         if (e || klfb_trace_tex()) klfb_copytex_report("glCopyTexImage2D", level, x, y, w, h, e);
+        // A refused glCopyTexImage2D has not defined the level either: give it
+        // an 8-bit RGBA store first (the formats the guest copies into), then
+        // draw into it.
+        if (e == 0x502 && fix && (ifmt == 0x8058 /* RGBA8 */ || ifmt == 0x1908 /* RGBA */ ||
+                                  ifmt == 0x8C43 /* SRGB8_ALPHA8 */)) {
+            static void (*teximg)(uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
+                                  uint32_t, uint32_t, const void *);
+            if (!teximg) teximg = asym("glTexImage2D");
+            if (teximg) {
+                teximg(target, level, (int32_t)ifmt, w, h, 0, 0x1908, 0x1401, NULL);
+                while (a_glGetError()) {}
+                klfb_copytex_fallback("glCopyTexImage2D", target, level, 0, 0, x, y, w, h);
+            }
+        }
     }
     if (redirected) g_real_BindFramebuffer(0x8CA8, (uint32_t)saved);
 }
@@ -6090,12 +6492,15 @@ static void klfb_CopyTexSubImage2D(uint32_t target, int32_t level, int32_t xo, i
                                    int32_t x, int32_t y, int32_t w, int32_t h) {
     int32_t saved = 0;
     int redirected = klfb_mvs_read_begin(&saved);
-    int scan = (glfb_errscan() || klfb_trace_tex()) && a_glGetError;
+    int fix = klfb_copytex_fix_on() && target == 0x0DE1;
+    int scan = (glfb_errscan() || klfb_trace_tex() || fix) && a_glGetError;
     if (scan) while (a_glGetError()) {}
     if (g_real_CopyTexSubImage2D) g_real_CopyTexSubImage2D(target, level, xo, yo, x, y, w, h);
     if (scan) {
         uint32_t e = a_glGetError();
         if (e || klfb_trace_tex()) klfb_copytex_report("glCopyTexSubImage2D", level, x, y, w, h, e);
+        if (e == 0x502 && fix)
+            klfb_copytex_fallback("glCopyTexSubImage2D", target, level, xo, yo, x, y, w, h);
     }
     if (redirected) g_real_BindFramebuffer(0x8CA8, (uint32_t)saved);
 }
@@ -6453,6 +6858,24 @@ static void klfb_TexSubImage2D(uint32_t target, int32_t level, int32_t xoff,
                 pixels ? "" : " (NULL)");
     if (klfb_tex_stats() && xoff == 0 && yoff == 0)
         klfb_tex_stats_zero("glTexSubImage2D", level, w, h, format, type, pixels, 0);
+    // KL_GLFB_RGB8_DUMP: the sub-image data of an RGB8-allocated texture too
+    // (the engine allocates with one upload and fills with a second).
+    if (pixels && level == 0 && format == 0x1908 && type == 0x1401 && a_glGetIntegerv && w > 1) {
+        static const char *dir; static int looked, n;
+        if (!looked) { looked = 1; dir = getenv("KL_GLFB_RGB8_DUMP"); }
+        if (dir && *dir && n < 64) {
+            int32_t bound = -1; uint32_t tf = 0;
+            a_glGetIntegerv(0x8069, &bound);
+            if (bound > 0 && klfb_tex_info((uint32_t)bound, &tf, NULL, NULL) &&
+                (tf == 0x8051 || tf == 0x8C41 || tf == 0x8058)) {
+                char path[1024];
+                snprintf(path, sizeof path, "%s/sub_%03d_tex%d_%dx%d_at%d,%d.rgba", dir, n++, bound,
+                         w, h, xoff, yoff);
+                FILE *o = fopen(path, "wb");
+                if (o) { fwrite(pixels, 1, (size_t)w * (size_t)h * 4, o); fclose(o); }
+            }
+        }
+    }
     if (g_real_TexSubImage2D)
         g_real_TexSubImage2D(target, level, xoff, yoff, w, h, format, type, pixels);
     if (pixels && klfb_tex_flush()) klfb_tex_flush_now();
@@ -9604,7 +10027,132 @@ static int klfb_timeline(void) {
     return on;
 }
 
+
+// --- KL_GLFB_STENCIL_LOG: one line per frame on how the stencil test was used ---
+//
+// Portal draws its see-through portals through the stencil buffer (the portal
+// quad raises the value, the room behind is drawn with EQUAL against it), and
+// on the Vision Pro the inside of a portal stays black while the Mac host run
+// shows the room behind (2026-11-09; same engine, same ANGLE, same two-context
+// layout, the canted projection reproduced on the Mac and ruled out). The
+// engine does not say which of its passes it skipped or lost, so this counts
+// the draws of a frame by the stencil state they were issued under and prints
+// the frame's buckets at swap time — on both machines, to be diffed: a frame
+// without EQUAL draws is the engine not drawing the view (its decision, on the
+// CPU); a frame with them is the GPU side losing it. Diagnostic; off unless
+// KL_GLFB_STENCIL_LOG=1. KL_GLFB_STENCIL_LOG_MAX caps the lines (3000).
+static int klfb_stn_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_GLFB_STENCIL_LOG", 0);
+    return on;
+}
+static __thread int t_stn_enabled;
+static __thread uint32_t t_stn_func = 0x0207 /* ALWAYS */, t_stn_ref, t_stn_fmask = 0xffffffffu;
+static __thread uint32_t t_stn_sfail = 0x1E00, t_stn_dpfail = 0x1E00, t_stn_dppass = 0x1E00; /* KEEP */
+static __thread uint32_t t_stn_wmask = 0xffffffffu;
+#define KLFB_STN_BUCKETS 16
+static struct { uint32_t en, func, ref, fmask, sfail, dpfail, dppass, wmask; int32_t fb; unsigned draws; }
+    g_stn_b[KLFB_STN_BUCKETS];
+static unsigned g_stn_nb, g_stn_overflow, g_stn_clears, g_stn_frame, g_stn_lines;
+static pthread_mutex_t g_stn_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void klfb_stn_draw(int32_t fb) {
+    if (!klfb_stn_on()) return;
+    pthread_mutex_lock(&g_stn_mu);
+    unsigned i;
+    for (i = 0; i < g_stn_nb; i++) {
+        if (g_stn_b[i].en == (uint32_t)t_stn_enabled && g_stn_b[i].fb == fb &&
+            (!t_stn_enabled ||
+             (g_stn_b[i].func == t_stn_func && g_stn_b[i].ref == t_stn_ref &&
+              g_stn_b[i].fmask == t_stn_fmask && g_stn_b[i].sfail == t_stn_sfail &&
+              g_stn_b[i].dpfail == t_stn_dpfail && g_stn_b[i].dppass == t_stn_dppass &&
+              g_stn_b[i].wmask == t_stn_wmask)))
+            break;
+    }
+    if (i == g_stn_nb) {
+        if (g_stn_nb == KLFB_STN_BUCKETS) { g_stn_overflow++; pthread_mutex_unlock(&g_stn_mu); return; }
+        g_stn_b[i].en = (uint32_t)t_stn_enabled; g_stn_b[i].fb = fb;
+        g_stn_b[i].func = t_stn_func; g_stn_b[i].ref = t_stn_ref; g_stn_b[i].fmask = t_stn_fmask;
+        g_stn_b[i].sfail = t_stn_sfail; g_stn_b[i].dpfail = t_stn_dpfail; g_stn_b[i].dppass = t_stn_dppass;
+        g_stn_b[i].wmask = t_stn_wmask; g_stn_b[i].draws = 0;
+        g_stn_nb++;
+    }
+    g_stn_b[i].draws++;
+    pthread_mutex_unlock(&g_stn_mu);
+}
+static const char *klfb_stn_func_name(uint32_t f) {
+    switch (f) {
+    case 0x0200: return "NEVER";   case 0x0201: return "LESS";    case 0x0202: return "EQUAL";
+    case 0x0203: return "LEQUAL";  case 0x0204: return "GREATER"; case 0x0205: return "NOTEQUAL";
+    case 0x0206: return "GEQUAL";  case 0x0207: return "ALWAYS";  default: return "?";
+    }
+}
+static const char *klfb_stn_op_name(uint32_t o) {
+    switch (o) {
+    case 0: return "ZERO";         case 0x1E00: return "KEEP"; case 0x1E01: return "REPL";
+    case 0x1E02: return "INCR";    case 0x1E03: return "DECR"; case 0x150A: return "INV";
+    case 0x8507: return "INCRW";   case 0x8508: return "DECRW"; default: return "?";
+    }
+}
+// At swap time: the frame's buckets, one line, only for frames that used the test.
+static void klfb_stn_frame_end(void) {
+    if (!klfb_stn_on()) return;
+    pthread_mutex_lock(&g_stn_mu);
+    g_stn_frame++;
+    int used = 0;
+    for (unsigned i = 0; i < g_stn_nb; i++) if (g_stn_b[i].en) used = 1;
+    static int max = -1;
+    if (max < 0) max = kl_env_int("KL_GLFB_STENCIL_LOG_MAX", 3000);
+    if (used && g_stn_lines < (unsigned)max) {
+        g_stn_lines++;
+        char line[1600];
+        int n = snprintf(line, sizeof line, "  [stn] f=%u sclears=%u", g_stn_frame, g_stn_clears);
+        for (unsigned i = 0; i < g_stn_nb && n < (int)sizeof line - 160; i++) {
+            if (!g_stn_b[i].en)
+                n += snprintf(line + n, sizeof line - (size_t)n, " | fb%d off x%u", g_stn_b[i].fb, g_stn_b[i].draws);
+            else
+                n += snprintf(line + n, sizeof line - (size_t)n, " | fb%d %s r=%u m=%x op=%s/%s/%s w=%x x%u",
+                              g_stn_b[i].fb, klfb_stn_func_name(g_stn_b[i].func), g_stn_b[i].ref,
+                              g_stn_b[i].fmask & 0xff, klfb_stn_op_name(g_stn_b[i].sfail),
+                              klfb_stn_op_name(g_stn_b[i].dpfail), klfb_stn_op_name(g_stn_b[i].dppass),
+                              g_stn_b[i].wmask & 0xff, g_stn_b[i].draws);
+        }
+        if (g_stn_overflow) n += snprintf(line + n, sizeof line - (size_t)n, " | +%u draws beyond the buckets", g_stn_overflow);
+        fprintf(stderr, "%s\n", line);
+    }
+    g_stn_nb = 0; g_stn_overflow = 0; g_stn_clears = 0;
+    pthread_mutex_unlock(&g_stn_mu);
+}
+static void (*g_real_StencilFunc)(uint32_t, int32_t, uint32_t);
+static void klfb_StencilFunc(uint32_t f, int32_t r, uint32_t m) {
+    t_stn_func = f; t_stn_ref = (uint32_t)r; t_stn_fmask = m;
+    if (g_real_StencilFunc) g_real_StencilFunc(f, r, m);
+}
+static void (*g_real_StencilFuncSeparate)(uint32_t, uint32_t, int32_t, uint32_t);
+static void klfb_StencilFuncSeparate(uint32_t face, uint32_t f, int32_t r, uint32_t m) {
+    if (face != 0x0405 /* BACK */) { t_stn_func = f; t_stn_ref = (uint32_t)r; t_stn_fmask = m; }
+    if (g_real_StencilFuncSeparate) g_real_StencilFuncSeparate(face, f, r, m);
+}
+static void (*g_real_StencilOp)(uint32_t, uint32_t, uint32_t);
+static void klfb_StencilOp(uint32_t a, uint32_t b, uint32_t c) {
+    t_stn_sfail = a; t_stn_dpfail = b; t_stn_dppass = c;
+    if (g_real_StencilOp) g_real_StencilOp(a, b, c);
+}
+static void (*g_real_StencilOpSeparate)(uint32_t, uint32_t, uint32_t, uint32_t);
+static void klfb_StencilOpSeparate(uint32_t face, uint32_t a, uint32_t b, uint32_t c) {
+    if (face != 0x0405) { t_stn_sfail = a; t_stn_dpfail = b; t_stn_dppass = c; }
+    if (g_real_StencilOpSeparate) g_real_StencilOpSeparate(face, a, b, c);
+}
+static void (*g_real_StencilMask)(uint32_t);
+static void klfb_StencilMask(uint32_t m) { t_stn_wmask = m; if (g_real_StencilMask) g_real_StencilMask(m); }
+static void (*g_real_StencilMaskSeparate)(uint32_t, uint32_t);
+static void klfb_StencilMaskSeparate(uint32_t face, uint32_t m) {
+    if (face != 0x0405) t_stn_wmask = m;
+    if (g_real_StencilMaskSeparate) g_real_StencilMaskSeparate(face, m);
+}
+
 static void klfb_Clear(uint32_t mask) {
+    if ((mask & 0x00000400 /* GL_STENCIL_BUFFER_BIT */) && klfb_stn_on()) g_stn_clears++;
     // KL_HL2_FORCE_CLEAR: Source never clears the scene COLOUR (the skybox is meant to
     // cover it). When the skybox pass draws to only one multiview eye/layer, the other
     // eye's sky region shows the previous frame and smears. On the scene's depth clear of
@@ -9781,6 +10329,7 @@ static void klfb_ClearColor(float r, float g, float b, float a) {
 }
 static void klfb_RenderbufferStorageMultisample(uint32_t target, int32_t samples,
                                                 uint32_t fmt, int32_t w, int32_t h) {
+    klfb_note_format(fmt, w, h, samples, "glRenderbufferStorageMultisample");
     if (klfb_timeline() && a_glGetIntegerv) {
         int32_t rb = -1;
         a_glGetIntegerv(0x8CA7 /* RENDERBUFFER_BINDING */, &rb);
@@ -9801,6 +10350,7 @@ static void klfb_RenderbufferStorageMultisample(uint32_t target, int32_t samples
 }
 static void klfb_RenderbufferStorage(uint32_t target, uint32_t fmt,
                                      int32_t w, int32_t h) {
+    klfb_note_format(fmt, w, h, 1, "glRenderbufferStorage");
     if (klfb_timeline() && a_glGetIntegerv) {
         int32_t rb = -1;
         a_glGetIntegerv(0x8CA7, &rb);
@@ -10897,6 +11447,7 @@ static void klfb_note_draw(void) {
     // The framebuffer the last DRAW CALL went to, which is not the last binding:
     // this guest draws into one framebuffer and blits out of another.
     if (fb > 0) g_last_draw_fb = (uint32_t)fb;
+    klfb_stn_draw(fb);
     // The same timeline the blit probe reads: order the draws against the
     // clears/invalidates/blits, because "black at blit time" is meaningless
     // without knowing whether a draw came after the last clear. Program,
@@ -13263,6 +13814,7 @@ static void klfb_srgb_note(int enabled) {
 
 static void klfb_Enable(uint32_t cap) {
     if (cap == KLFB_GL_FRAMEBUFFER_SRGB) { klfb_srgb_note(1); return; }
+    if (cap == 0x0B90 /* GL_STENCIL_TEST */) t_stn_enabled = 1;
     // KL_HL2_NO_CULL=1: swallow glEnable(GL_CULL_FACE) so nothing is back-face culled.
     // Diagnostic for "walls invisible from the inside" — if geometry (train interior)
     // reappears with culling off, the faces are being back-face culled (winding), not
@@ -13282,6 +13834,7 @@ static void klfb_Enable(uint32_t cap) {
 
 static void klfb_Disable(uint32_t cap) {
     if (cap == KLFB_GL_FRAMEBUFFER_SRGB) { klfb_srgb_note(0); return; }
+    if (cap == 0x0B90 /* GL_STENCIL_TEST */) t_stn_enabled = 0;
     if (g_real_Disable) g_real_Disable(cap);
 }
 
@@ -13325,6 +13878,13 @@ static const struct { const char *name; void *thunk; void **real; } g_thunks[] =
     // GL_FRAMEBUFFER_SRGB only — every other cap falls straight through
     {"glEnable",  (void *)klfb_Enable,  (void **)&g_real_Enable},
     {"glDisable", (void *)klfb_Disable, (void **)&g_real_Disable},
+    // KL_GLFB_STENCIL_LOG — state tracking only, the calls pass through
+    {"glStencilFunc",         (void *)klfb_StencilFunc,         (void **)&g_real_StencilFunc},
+    {"glStencilFuncSeparate", (void *)klfb_StencilFuncSeparate, (void **)&g_real_StencilFuncSeparate},
+    {"glStencilOp",           (void *)klfb_StencilOp,           (void **)&g_real_StencilOp},
+    {"glStencilOpSeparate",   (void *)klfb_StencilOpSeparate,   (void **)&g_real_StencilOpSeparate},
+    {"glStencilMask",         (void *)klfb_StencilMask,         (void **)&g_real_StencilMask},
+    {"glStencilMaskSeparate", (void *)klfb_StencilMaskSeparate, (void **)&g_real_StencilMaskSeparate},
     {"glFlush",  (void *)klfb_Flush,  (void **)&g_real_Flush},
     // Buffer lifecycle trace (KL_GLFB_TRACE_BUF) — pass-through wrappers that log
     // the map result, to diagnose togl's "failed to lock vertex buffer" (hl2).
@@ -14216,6 +14776,7 @@ static void chunk(FILE *f, const char *t, const uint8_t *d, uint32_t n) {
 // path only: a registered frame sink is a live display, not a batch of files,
 // so it wants every swap and dir may be NULL.
 unsigned kl_glfb_present(const char *dir) {
+    klfb_stn_frame_end();
     if (!g_ready || (!dir && !g_frame_sink && !g_gpu_fence)) return g_presented;
     // A registered GPU fence replaces the readback entirely — the compositor
     // samples the eye texture itself and only needs to know when the guest's
