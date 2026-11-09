@@ -596,6 +596,33 @@ enum AlyxLanguage: Int, CaseIterable, Identifiable {
     }
 }
 
+/// Steam Workshop add-ons. An installer stages each one the way the engine
+/// keeps a local add-on: game/hlvr_addons/<name>/pak01_dir.vpk. The engine
+/// lists such a folder in its own "Manage Addons" menu without asking Steam
+/// ("local: <name>", measured on a Mac 2026-11-09), and `addon_enable` plus
+/// "Start game with the following addons" mount it — the Workshop's single
+/// <id>.vpk is a complete one-part archive, so it needs no other file.
+///
+/// Taking one off works as for the voices: the installer overwrites the
+/// archive with an empty file, and here a file too short for an archive
+/// header is removed at the next start, with its folder if nothing else
+/// (something the game wrote there) is in it.
+func klAlyxClearWithdrawnAddons() {
+    let fm = FileManager.default
+    guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+    let root = docs.appendingPathComponent("lx/game/hlvr_addons", isDirectory: true)
+    guard let names = try? fm.contentsOfDirectory(atPath: root.path) else { return }
+    for name in names.sorted() {
+        let folder = root.appendingPathComponent(name, isDirectory: true)
+        let archive = folder.appendingPathComponent("pak01_dir.vpk")
+        guard let size = (try? fm.attributesOfItem(atPath: archive.path))?[.size] as? NSNumber,
+              size.int64Value < 28 else { continue }
+        try? fm.removeItem(at: archive)
+        if (try? fm.contentsOfDirectory(atPath: folder.path))?.isEmpty == true { try? fm.removeItem(at: folder) }
+        NSLog("[app] Alyx: add-on \(name) was withdrawn — the emptied archive is removed")
+    }
+}
+
 /// Put the language search path into the game's gameinfo.gi, or take it out —
 /// the header has the story. Only the one line is touched and the file keeps
 /// its line endings; a file that does not look as expected is left alone, which
@@ -900,6 +927,7 @@ func klAlyxApply() {
     let loading = klAlyxLoadingScreens()
     // The language, and whether its voices come from a staged archive.
     AlyxLanguage.clearWithdrawnVoices()
+    klAlyxClearWithdrawnAddons()
     let language = AlyxLanguage.stored
     let voices = language.voiceArchive != nil && AlyxLanguage.voicesWanted
     let voicePath = klAlyxSetVoicePath(voices)
