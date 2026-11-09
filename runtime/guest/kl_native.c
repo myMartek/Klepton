@@ -514,7 +514,15 @@ static const char *kl_sourcevr_steam_language(const char *tag) {
 }
 
 static void kl_sourcevr_language(const char *game, FILE *out) {
-    const char *steam = kl_sourcevr_steam_language(getenv("KL_DEVICE_LANG"));
+    // The start window's "English" only switches the device language off
+    // (KL_LOCALE_DEVICE=0, KleptonLanguage.apply) and leaves KL_DEVICE_LANG
+    // holding the headset's own, so on a German headset Portal stayed German
+    // with English chosen (headset log 2026-11-10: "KL_LOCALE_DEVICE=0,
+    // KL_DEVICE_LANG=de_DE" -> vr_language 'german'). Off means English here too.
+    const char *tag = getenv("KL_DEVICE_LANG");
+    const char *from_device = getenv("KL_LOCALE_DEVICE");
+    if (from_device && strcmp(from_device, "0") == 0) tag = "en";
+    const char *steam = kl_sourcevr_steam_language(tag);
     const char *want = steam && strcmp(steam, "english") != 0 ? steam : "";
     char path[1500];
     snprintf(path, sizeof path, "%s/cfg/config.cfg", game);
@@ -531,7 +539,10 @@ static void kl_sourcevr_language(const char *game, FILE *out) {
     if (hit) {
         char *end = strchr(hit + 13, '"');
         if (!end) return;
-        if (strncmp(hit, line, strlen(line)) == 0 && end + 1 == hit + strlen(line)) return;   // already so
+        if (strncmp(hit, line, strlen(line)) == 0 && end + 1 == hit + strlen(line)) {   // already so
+            if (out) { fprintf(out, "  [env] SourceVR: vr_language \"%s\" kept (start window: %s)\n", want, tag ? tag : "(unset)"); fflush(out); }
+            return;
+        }
         if ((f = fopen(path, "wb")) != NULL) {
             fwrite(text, 1, (size_t)(hit - text), f);
             fputs(line, f);
@@ -541,7 +552,7 @@ static void kl_sourcevr_language(const char *game, FILE *out) {
     } else {
         if ((f = fopen(path, "ab")) != NULL) { fprintf(f, "%s\n", line); fclose(f); }
     }
-    if (out) { fprintf(out, "  [env] SourceVR: vr_language \"%s\" (start window: %s)\n", want, getenv("KL_DEVICE_LANG") ? getenv("KL_DEVICE_LANG") : "(unset)"); fflush(out); }
+    if (out) { fprintf(out, "  [env] SourceVR: vr_language \"%s\" (start window: %s)\n", want, tag ? tag : "(unset)"); fflush(out); }
 }
 
 static void kl_sourcevr_portal_defaults(const char *game, FILE *out) {
