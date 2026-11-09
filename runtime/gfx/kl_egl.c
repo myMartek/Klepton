@@ -427,6 +427,8 @@ static int klgl_want_msrtt(void) {
                                             strcmp(t, "x6946182742093178") == 0 ||
                                             strcmp(t, "x4723352327707414") == 0 ||
                                             strcmp(t, "x5437449896288644") == 0 ||
+                                            /* PutterVR: incomplete SinglePassInstanced eye framebuffer. */
+                                            strcmp(t, "x24782806838055701") == 0 ||
                                             strcmp(t, "x24151641901194680") == 0 ||
                                             strcmp(t, "x3967680489996895") == 0)));
     }

@@ -5160,13 +5160,17 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // ...and on a GLES guest the enqueue path's panels (ovrp_EnqueueSubmitLayer2)
     // are copied here too, as ovrp_EndFrame and the OpenXR frame end do. Without
     // it Vacation Simulator (x2393300320759737), whose quad overlays come that
-    // way next to EndFrame4, stayed black (community fix 94).
-    //   KL_OVRP_ENQ_MIRROR_EF4=0|1 — default 1 for x2393300320759737, else 0.
+    // way next to EndFrame4, stayed black (community fix 94), and Drop Dead: Dual
+    // Strike Edition (x1935017546592600, Unity 2021.3) never showed its weapon's
+    // active-reload bar, an OVROverlay Quad filed the same way (community fix 99;
+    // owner, headset, 2026-11-07).
+    //   KL_OVRP_ENQ_MIRROR_EF4=0|1 — default 1 for those two, else 0.
     static int enq_mirror = -1;
     if (enq_mirror < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        if (t) enq_mirror = kl_env_on("KL_OVRP_ENQ_MIRROR_EF4", !strcmp(t, "x2393300320759737"));
+        if (t) enq_mirror = kl_env_on("KL_OVRP_ENQ_MIRROR_EF4",
+                                      !strcmp(t, "x2393300320759737") || !strcmp(t, "x1935017546592600"));
     }
     if (enq_mirror > 0) klovrp_mirror_enq_gl();
     // GL array eyes reach the compositor by copy, and the copy has to land

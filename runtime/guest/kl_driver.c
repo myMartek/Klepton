@@ -550,6 +550,11 @@ void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) 
         kl_egl_set_gles_version(3, 0);
         fprintf(stderr, "  [gl] Tentacular: GLES 3.0 capability profile (ANGLE backend)\n");
     }
+    if (t && !strcmp(t->name, "x24782806838055701")) {
+        // PutterVR: test the ES 3.0 path for stretched geometry and a blank menu.
+        kl_egl_set_gles_version(3, 0);
+        fprintf(stderr, "  [gl] PutterVR: GLES 3.0 capability profile (ANGLE backend)\n");
+    }
     // KL_GLES_VERSION=<major>.<minor> — the GLES level described to any guest,
     // for trying a title on the 3.0 profile above without a build.
     {
