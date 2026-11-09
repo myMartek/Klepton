@@ -515,6 +515,17 @@ static const char *const g_gl_ext_candidates[] = {
     "GL_EXT_texture_filter_anisotropic",
     "GL_EXT_texture_format_BGRA8888",
     "GL_KHR_texture_compression_astc_hdr",
+    // GL_EXT_clip_control: the zero-to-one depth range. SourceVR's engine
+    // (libshaderapidx9) turns its reverse-Z path on only when this name is in
+    // the string — glClipControlEXT(LOWER_LEFT, ZERO_TO_ONE), float depth,
+    // GEQUAL — and otherwise logs "GLM: reverse-Z OFF (clip_control MISSING)"
+    // and keeps the reversed projection on the [-1,1] range, where the far
+    // field has almost no depth resolution (Half-Life 2 on the headset,
+    // 2026-11-01: the departure boards and other distant surfaces flicker,
+    // and close geometry wins the depth test with its own back faces). ANGLE
+    // on Metal carries the extension and exports glClipControlEXT, which the
+    // guest resolves through kl_glfb_sym.
+    "GL_EXT_clip_control",
 };
 #define KL_GL_EXT_CANDIDATES \
     ((int)(sizeof g_gl_ext_candidates / sizeof g_gl_ext_candidates[0]))
@@ -541,6 +552,24 @@ void kl_gl_cap_adopt_backend_extensions(const char *backend_ext) {
     for (int i = 0; i < KL_GL_EXT_CANDIDATES; i++) {
         const char *name = g_gl_ext_candidates[i];
         size_t len = strlen(name);
+        // ...except clip_control for the Portal profiles. With reverse-Z on,
+        // Portal's view through a portal is drawn (stencil EQUAL, hundreds of
+        // draws a frame) and never shows: the depth reset inside the portal
+        // region (ClearBuffersObeyStencil, the ___buffer_clear_obey_stencil
+        // materials) puts its quad at the wrong end of the reversed range, so
+        // the view fails the depth test and the wall stays (Mac host run and
+        // headset, 2026-11-09; `-noreversez` in launch_args shows the room
+        // behind the portal, the rim bright orange). Withholding the name is
+        // the engine's own "clip_control MISSING" path, nothing else changes.
+        // Half-Life 2 keeps it: it has no portals and needs the far-field
+        // depth. KL_GL_CLIP_CONTROL=1 puts it back for an A/B.
+        if (strcmp(name, "GL_EXT_clip_control") == 0 && t &&
+            (strcmp(t, "sourcevr-portal") == 0 || strcmp(t, "sourcevr-portal2") == 0) &&
+            !kl_env_on("KL_GL_CLIP_CONTROL", 0)) {
+            fprintf(stderr, "  [gl] GL_EXT_clip_control withheld for %s: the engine's reverse-Z "
+                            "hides the view through its portals (KL_GL_CLIP_CONTROL=1 restores it)\n", t);
+            continue;
+        }
         // Whole-token match: "..._s3tc" is a prefix of "..._s3tc_srgb" in some
         // drivers, and strstr alone would adopt the shorter name off the longer.
         const char *q = backend_ext;

@@ -9,6 +9,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 
 #include "klepton.h"
@@ -321,6 +322,239 @@ static int kl_once(const char *marker) {
     if (f) fclose(f);
     return 1;
 }
+// --- a reader for the one file we take out of a VPK -------------------------
+//
+// Valve's VPK: a directory file (<name>_dir.vpk, v1 or v2 header) whose tree is
+// extension -> path -> name -> entry {crc u32, preload u16, archive u16, offset
+// u32, length u32, 0xffff}, the preload bytes following the entry; the data is
+// in <name>_NNN.vpk at the offset, or (archive 0x7fff) in the directory file
+// itself after the tree. Enough to find one script; nothing is cached.
+static unsigned char *kl_vpk_read(const char *dirvpk, const char *want, size_t *out_len) {
+    FILE *f = fopen(dirvpk, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz <= 28 || sz > (64 << 20)) { fclose(f); return NULL; }
+    unsigned char *b = malloc((size_t)sz);
+    if (!b) { fclose(f); return NULL; }
+    fseek(f, 0, SEEK_SET);
+    if (fread(b, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(b); return NULL; }
+    fclose(f);
+    uint32_t sig = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+    uint32_t ver = (uint32_t)b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+    uint32_t tree = (uint32_t)b[8] | (uint32_t)b[9] << 8 | (uint32_t)b[10] << 16 | (uint32_t)b[11] << 24;
+    if (sig != 0x55aa1234u || (ver != 1 && ver != 2)) { free(b); return NULL; }
+    size_t i = ver == 1 ? 12 : 28, data0 = i + tree;
+    unsigned char *result = NULL;
+    // `want` is "path/name.ext"; split it the way the tree is keyed.
+    const char *dot = strrchr(want, '.'), *slash = strrchr(want, '/');
+    if (!dot || !slash || dot < slash) { free(b); return NULL; }
+    char wext[32], wpath[256], wname[128];
+    snprintf(wext, sizeof wext, "%s", dot + 1);
+    snprintf(wpath, sizeof wpath, "%.*s", (int)(slash - want), want);
+    snprintf(wname, sizeof wname, "%.*s", (int)(dot - slash - 1), slash + 1);
+    #define KL_VPK_STR(dst) do { size_t n0 = i; while (i < data0 && b[i]) i++; if (i >= data0) goto out; \
+                                 snprintf(dst, sizeof dst, "%.*s", (int)(i - n0), (const char *)b + n0); i++; } while (0)
+    for (;;) {
+        char ext[32]; KL_VPK_STR(ext);
+        if (!ext[0]) break;
+        for (;;) {
+            char path[256]; KL_VPK_STR(path);
+            if (!path[0]) break;
+            for (;;) {
+                char name[128]; KL_VPK_STR(name);
+                if (!name[0]) break;
+                if (i + 18 > data0) goto out;
+                uint16_t pre  = (uint16_t)(b[i + 4] | b[i + 5] << 8);
+                uint16_t arch = (uint16_t)(b[i + 6] | b[i + 7] << 8);
+                uint32_t off  = (uint32_t)b[i + 8] | (uint32_t)b[i + 9] << 8 | (uint32_t)b[i + 10] << 16 | (uint32_t)b[i + 11] << 24;
+                uint32_t len  = (uint32_t)b[i + 12] | (uint32_t)b[i + 13] << 8 | (uint32_t)b[i + 14] << 16 | (uint32_t)b[i + 15] << 24;
+                i += 18;
+                const unsigned char *preload = b + i;
+                i += pre;
+                if (strcmp(ext, wext) == 0 && strcmp(name, wname) == 0 &&
+                    strcmp(path[0] == ' ' && !path[1] ? "" : path, wpath) == 0) {
+                    if ((size_t)pre + len > (16 << 20)) goto out;
+                    result = malloc((size_t)pre + len + 1);
+                    if (!result) goto out;
+                    memcpy(result, preload, pre);
+                    if (len) {
+                        if (arch == 0x7fff) {
+                            if ((size_t)data0 + off + len > (size_t)sz) { free(result); result = NULL; goto out; }
+                            memcpy(result + pre, b + data0 + off, len);
+                        } else {
+                            char apath[1600];
+                            const char *d = strstr(dirvpk, "_dir.vpk");
+                            if (!d) { free(result); result = NULL; goto out; }
+                            snprintf(apath, sizeof apath, "%.*s_%03u.vpk", (int)(d - dirvpk), dirvpk, (unsigned)arch);
+                            FILE *a = fopen(apath, "rb");
+                            if (!a || fseek(a, (long)off, SEEK_SET) != 0 || fread(result + pre, 1, len, a) != len) {
+                                if (a) fclose(a);
+                                free(result); result = NULL; goto out;
+                            }
+                            fclose(a);
+                        }
+                    }
+                    result[pre + len] = 0;
+                    *out_len = (size_t)pre + len;
+                    goto out;
+                }
+            }
+        }
+    }
+out:
+    #undef KL_VPK_STR
+    free(b);
+    return result;
+}
+
+// The damage flash. The retail HUD animations (HL2's, which Portal and Portal
+// 2 share) paint the WHOLE HUD surface orange, then red, when the player takes
+// a big hit — `event HudTakeDamageHigh`: HudDamageIndicator DmgFullscreenColor
+// "255 88 0 200" -> "255 0 0 200" -> out — and on this port the HUD surface is
+// a quad 60 degrees wide in front of the eyes, so the flash is a BOX in the
+// middle of the view (Marcel, 2026-11-09: "eine orangene Box, die dann rot
+// wird"). The directional bars at the surface's edges (DmgColorLeft/Right,
+// DmgHighColor*) are separate and stay.
+//
+// The retail scripts/hudanimations.txt is read out of the game's own VPK, every
+// `Animate HudDamageIndicator DmgFullscreenColor "r g b a"` line gets a = 0,
+// and the whole file is written to the write root's scripts/, where a loose
+// file beats the VPK's (the menu backdrop takes the same door). A manifest that
+// lists a small file of ours before the retail one was the first attempt
+// (2026-11-09); whether the controller keeps the first or the last definition
+// of an event could not be settled, and a complete file asks no such question.
+// Written once (marker): a user who edits the file keeps the edit.
+// KL_SOURCEVR_DAMAGE_FLASH=1 leaves the retail file alone.
+static void kl_sourcevr_hud_flash_off(const char *root, const char *gamedir, const char *game, FILE *out) {
+    if (kl_env_on("KL_SOURCEVR_DAMAGE_FLASH", 0)) return;
+    char path[1500], marker[1500];
+    snprintf(marker, sizeof marker, "%s/scripts/.avpplay-hudanimations-full", game);
+    snprintf(path, sizeof path, "%s/scripts", game);
+    kl_mkdir_p(path);
+    if (!kl_once(marker)) return;
+    // The first attempt's files, should they be there: the full copy makes them pointless.
+    snprintf(path, sizeof path, "%s/scripts/hudanimations_manifest.txt", game); unlink(path);
+    snprintf(path, sizeof path, "%s/scripts/hudanimations_avpplay.txt", game);  unlink(path);
+    // Where the retail script lives: Portal's pak, HL2's misc pak, Portal 2's pak01.
+    const char *vpk = strcmp(gamedir, "portal") == 0 ? "common/portal/portal_pak_dir.vpk"
+                    : strcmp(gamedir, "hl2") == 0    ? "common/hl2/hl2_misc_dir.vpk"
+                    :                                  "common/portal2/pak01_dir.vpk";
+    snprintf(path, sizeof path, "%s/%s", root, vpk);
+    size_t n = 0;
+    unsigned char *text = kl_vpk_read(path, "scripts/hudanimations.txt", &n);
+    if (!text) {
+        if (out) { fprintf(out, "  [env] SourceVR: scripts/hudanimations.txt not found in %s; the damage flash stays\n", vpk); fflush(out); }
+        unlink(marker);          // next start tries again (the data may still be arriving)
+        return;
+    }
+    // Line by line: on a DmgFullscreenColor animate line, the last number inside the quotes becomes 0.
+    int patched = 0;
+    size_t i = 0;
+    while (i < n) {
+        size_t e = i;
+        while (e < n && text[e] != '\n') e++;
+        if (memmem(text + i, e - i, "DmgFullscreenColor", 18) && memmem(text + i, e - i, "Animate", 7)) {
+            unsigned char *q1 = memchr(text + i, '"', e - i);
+            unsigned char *q2 = q1 ? memchr(q1 + 1, '"', (size_t)(text + e - q1 - 1)) : NULL;
+            if (q1 && q2) {
+                // Walk back from the closing quote over the alpha digits and blank them to "0".
+                unsigned char *d = q2 - 1;
+                while (d > q1 && (*d == ' ' || *d == '\t')) d--;
+                unsigned char *dend = d + 1;
+                while (d > q1 && *d >= '0' && *d <= '9') d--;
+                d++;
+                if (dend > d) { *d = '0'; for (unsigned char *z = d + 1; z < dend; z++) *z = ' '; patched++; }
+            }
+        }
+        i = e + 1;
+    }
+    snprintf(path, sizeof path, "%s/scripts/hudanimations.txt", game);
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(text, 1, n, f); fclose(f); }
+    free(text);
+    if (out) { fprintf(out, "  [env] SourceVR: full-screen damage flash off — scripts/hudanimations.txt (%zu bytes, %d lines patched) from %s into the write root, once\n", n, patched, vpk); fflush(out); }
+}
+
+// The game's language, from the start window's choice. SourceVR's launcher
+// takes the language from config.cfg's archived `vr_language <steam name>` and
+// only without one "follows the device"; a wrong name ("de", typed into its
+// console) is rejected with "use an installed Steam language's short name".
+// Klepton carries the start window's choice as KL_DEVICE_LANG ("de_DE"); here it
+// becomes the Steam name and is written into config.cfg before the launcher
+// reads it (every start, so a change in the start window takes effect; the
+// game's own language row writes the same cvar). No choice, or English: the
+// line is emptied so the launcher follows the device, which kl_jni now tells
+// the same language. Voices need the language's VO VPK beside the English one.
+static const char *kl_sourcevr_steam_language(const char *tag) {
+    if (!tag || !*tag) return NULL;
+    char l[8] = {0}, c[8] = {0};
+    size_t i = 0;
+    for (; tag[i] && tag[i] != '_' && tag[i] != '-' && tag[i] != '.' && i < 7; i++) l[i] = (char)tolower((unsigned char)tag[i]);
+    if (tag[i] == '_' || tag[i] == '-') {
+        size_t j = 0;
+        for (i++; tag[i] && tag[i] != '.' && j < 7; i++) c[j++] = (char)toupper((unsigned char)tag[i]);
+    }
+    static const struct { const char *l, *c, *steam; } map[] = {
+        {"en", "",   "english"},  {"de", "",   "german"},    {"fr", "",   "french"},
+        {"es", "MX", "latam"},    {"es", "",   "spanish"},   {"it", "",   "italian"},
+        {"pt", "BR", "brazilian"},{"pt", "",   "portuguese"},{"ru", "",   "russian"},
+        {"ko", "",   "koreana"},  {"ja", "",   "japanese"},  {"zh", "TW", "tchinese"},
+        {"zh", "HK", "tchinese"}, {"zh", "",   "schinese"},  {"pl", "",   "polish"},
+        {"nl", "",   "dutch"},    {"sv", "",   "swedish"},   {"da", "",   "danish"},
+        {"fi", "",   "finnish"},  {"no", "",   "norwegian"}, {"nb", "",   "norwegian"},
+        {"cs", "",   "czech"},    {"hu", "",   "hungarian"}, {"tr", "",   "turkish"},
+        {"th", "",   "thai"},     {"el", "",   "greek"},     {"bg", "",   "bulgarian"},
+        {"ro", "",   "romanian"}, {"uk", "",   "ukrainian"}, {"vi", "",   "vietnamese"},
+        {"id", "",   "indonesian"},
+    };
+    for (size_t k = 0; k < sizeof map / sizeof map[0]; k++)
+        if (strcmp(map[k].l, l) == 0 && (!*map[k].c || strcmp(map[k].c, c) == 0)) return map[k].steam;
+    return NULL;
+}
+
+static void kl_sourcevr_language(const char *game, FILE *out) {
+    // The start window's "English" only switches the device language off
+    // (KL_LOCALE_DEVICE=0, KleptonLanguage.apply) and leaves KL_DEVICE_LANG
+    // holding the headset's own, so on a German headset Portal stayed German
+    // with English chosen (headset log 2026-11-10: "KL_LOCALE_DEVICE=0,
+    // KL_DEVICE_LANG=de_DE" -> vr_language 'german'). Off means English here too.
+    const char *tag = getenv("KL_DEVICE_LANG");
+    const char *from_device = getenv("KL_LOCALE_DEVICE");
+    if (from_device && strcmp(from_device, "0") == 0) tag = "en";
+    const char *steam = kl_sourcevr_steam_language(tag);
+    const char *want = steam && strcmp(steam, "english") != 0 ? steam : "";
+    char path[1500];
+    snprintf(path, sizeof path, "%s/cfg/config.cfg", game);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;               // no config yet: the wizard has not run; next start
+    static char text[65536];
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    if (n >= sizeof text - 1) return;
+    text[n] = 0;
+    char line[64];
+    snprintf(line, sizeof line, "vr_language \"%s\"", want);
+    char *hit = strstr(text, "vr_language \"");
+    if (hit) {
+        char *end = strchr(hit + 13, '"');
+        if (!end) return;
+        if (strncmp(hit, line, strlen(line)) == 0 && end + 1 == hit + strlen(line)) {   // already so
+            if (out) { fprintf(out, "  [env] SourceVR: vr_language \"%s\" kept (start window: %s)\n", want, tag ? tag : "(unset)"); fflush(out); }
+            return;
+        }
+        if ((f = fopen(path, "wb")) != NULL) {
+            fwrite(text, 1, (size_t)(hit - text), f);
+            fputs(line, f);
+            fputs(end + 1, f);
+            fclose(f);
+        }
+    } else {
+        if ((f = fopen(path, "ab")) != NULL) { fprintf(f, "%s\n", line); fclose(f); }
+    }
+    if (out) { fprintf(out, "  [env] SourceVR: vr_language \"%s\" (start window: %s)\n", want, tag ? tag : "(unset)"); fflush(out); }
+}
+
 static void kl_sourcevr_portal_defaults(const char *game, FILE *out) {
     char path[1500], marker[1500];
     // The menu backdrop.
@@ -511,9 +745,19 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
         snprintf(p, sizeof p, "%s/user", root);
         kl_mkdir_p(p);
         setenv("VALVE_GAME_PATH", p, 1);
-        snprintf(p, sizeof p, "%s/user/%s", root, gamedir);
-        kl_mkdir_p(p);
-        setenv("SOURCEVR_WRITE_GAME_PATH", p, 1);
+        // The write game directory, <root>/user/<gamedir>: kept in its own
+        // buffer because `p` is reused for the staged folders below, and the
+        // three per-game edits after that (the Portal defaults, the
+        // vr_eye_resolution rewrite, the gameinfo.txt seed) belong HERE, not in
+        // the overlay — with `p` they landed in runtime/v1/overlay/<profile>,
+        // which worked on the headset only because the overlay is a search
+        // path too, and left the Mac host run without a gameinfo.txt in the
+        // write root ("Setup file 'gameinfo.txt' doesn't exist in subdirectory
+        // 'hl2'", 2026-11-06).
+        char wr[1400];
+        snprintf(wr, sizeof wr, "%s/user/%s", root, gamedir);
+        kl_mkdir_p(wr);
+        setenv("SOURCEVR_WRITE_GAME_PATH", wr, 1);
         // Where the staged folders (overlay, vr layers) are: <root>/runtime/v1
         // when tools/sourcevr_prepare.py laid them out into the data folder on
         // the Mac, else the app's assets — AVP Play unpacks the APK into the
@@ -543,7 +787,12 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
         //   - `r_portal_stencil_depth "1"` instead of the "2" the first-run
         //     wizard writes: the second recursion is what dropped him to 34 fps
         //     standing in a portal (GPU 99 %).
-        if (strcmp(gamedir, "portal") == 0) kl_sourcevr_portal_defaults(p, out);
+        if (strcmp(gamedir, "portal") == 0 || strcmp(gamedir, "hl2") == 0 ||
+            strcmp(gamedir, "portal2") == 0) {
+            kl_sourcevr_hud_flash_off(root, gamedir, wr, out);
+            kl_sourcevr_language(wr, out);
+        }
+        if (strcmp(gamedir, "portal") == 0) kl_sourcevr_portal_defaults(wr, out);
         // The picture size. The engine writes vr_eye_resolution "2064x2208" — a
         // Quest 3's own panel — into its config at its first exit and from then
         // on starts at that size whatever this headset recommends (the first
@@ -554,7 +803,7 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
         // leaves the file alone altogether.
         if (!kl_env_on("KL_SOURCEVR_KEEP_RES", 0)) {
             char cfg[1500];
-            snprintf(cfg, sizeof cfg, "%s/cfg/config.cfg", p);
+            snprintf(cfg, sizeof cfg, "%s/cfg/config.cfg", wr);
             FILE *f = fopen(cfg, "rb");
             if (f) {
                 static char text[65536];
@@ -579,7 +828,7 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
         {
             char from[1500], to[1500];
             snprintf(from, sizeof from, "%s/common/%s/gameinfo.txt", root, gamedir);
-            snprintf(to, sizeof to, "%s/gameinfo.txt", p);
+            snprintf(to, sizeof to, "%s/gameinfo.txt", wr);
             struct stat gs;
             if (stat(to, &gs) != 0 || !S_ISREG(gs.st_mode)) {
                 FILE *in = fopen(from, "rb"), *o = in ? fopen(to, "wb") : NULL;
