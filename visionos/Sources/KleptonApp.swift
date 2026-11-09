@@ -185,6 +185,19 @@ enum Lifecycle {
         case .active:   KleptonAudio.setSilenced(false)
         default: break
         }
+        // A real crown press ends the picture. When the scene then goes
+        // inactive, the system can take 30-60 s to send .background, and an
+        // app left in that state is woken by the next tap on the icon instead
+        // of starting fresh (measured 2026-11-02: 48 s inactive with the game
+        // still running at 0% immersion). Leave now, while the app is still in
+        // front. A system peek leaves the layer running, so `outputEnded`
+        // stays false and this is not reached for it.
+        if phase == .inactive, KleptonCompositor.outputEnded,
+           klEnvOn("KL_EXIT_ON_BACKGROUND", default: true) {
+            NSLog("[app] crown press — exiting before the system backgrounds us")
+            leave()
+            return
+        }
         // Coming back is the audio's cue, and it needs one: this OS silently
         // stops calling CoreAudio's render callback across a scene transition —
         // the boot window being closed while the immersive space runs is one,
