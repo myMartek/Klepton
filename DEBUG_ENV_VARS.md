@@ -4903,3 +4903,20 @@ in front. A tap into the other window and then one on the game brought it back.
   RealityKit space (`KL_RK_PRESENT=1`), so a look and a tap on the game gives it
   the focus back (`[focus] tap on the game`). Without them the RealityKit space
   had nothing a tap could land on.
+
+## Spatial controllers after an interruption (`KLControllerRecovery`, `KleptonControllerRecovery.swift`)
+
+A return to the foreground is the one moment the question "does the stream still
+deliver" has a trigger. The recovery waits for the head to settle, hands the
+accessory list to the system and raises one window with a pinch target. The
+pinch rebuilds the list from whatever is paired now and takes the controllers
+back, so tracking and poses need it even when the buttons work again.
+- `KL_CTRL_RECOVERY=0` — default 1. Off means no release, no prompt and no
+  take-back, and no `[ctrl] recovery armed` line at startup.
+- `[ctrl] …` lines: `stream dead — prompt up`, `controllers back (n), n states
+  in the probe`, `take-back did not restore input (n states) — prompt stays`,
+  `accessory list re-asserted without releasing`.
+- The Digital Crown HUD in `.mixed` is not covered: it takes the input without
+  a scene, focus or controller change of any kind, so there is nothing to react
+  to. That needs the progressive path.
+

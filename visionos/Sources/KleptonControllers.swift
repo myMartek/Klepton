@@ -433,6 +433,7 @@ final class KleptonControllers {
     }
 
     init() {
+        Self.active = self
         surreal.setSettings(.stored())
         if usesSurrealSDK {
             // The SDK owns the controllers' Bluetooth: our backend lets go of them first
@@ -503,6 +504,16 @@ final class KleptonControllers {
 
     // 0 = left, 1 = right, matching kl_ovrp's hand indices (nodes 3 and 4).
     private var state: [KleptonHandState] = [KleptonHandState(), KleptonHandState()]
+
+    /// Input states delivered since the process started, bumped on the render
+    /// thread. Only meaningful right after the app returns to the foreground:
+    /// an idle pair and a dead one both deliver zero a second
+    /// (KleptonControllerRecovery.swift).
+    nonisolated(unsafe) static var inputStates = 0
+
+    /// The instance the app runs with. The watchdog needs it to reach the
+    /// accessory provider; there is one per process.
+    nonisolated(unsafe) private(set) static weak var active: KleptonControllers?
 
     // Poses arrive asynchronously from AccessoryTrackingProvider's anchor
     // stream, while buttons are polled synchronously on the render thread, so
@@ -641,6 +652,112 @@ final class KleptonControllers {
         let p = AccessoryTrackingProvider(accessories: accessories)
         lock.lock(); accessoryProvider = p; lock.unlock()
         return p
+    }
+
+    /// The task draining the accessory anchor stream. It owns the provider, and
+    /// through it the `Accessory` objects: releasing the controllers means
+    /// cancelling it, because a stream that is still being read keeps them
+    /// claimed by this process.
+    private var accessoryAnchorTask: Task<Void, Never>?
+
+    /// Start the anchor stream. Replaces any previous consumer, since two of
+    /// them would race for the same updates.
+    func startAccessoryAnchors(_ provider: any DataProvider) {
+        accessoryAnchorTask?.cancel()
+        accessoryAnchorTask = Task { [weak self] in
+            await self?.consumeAccessoryAnchors(provider)
+        }
+    }
+
+    /// Let go of the spatial controllers without tearing down the ARKit session
+    /// that also feeds the head and the hands.
+    ///
+    /// `updateAccessories([])` is the visionOS 27 hot-swap: the provider stays
+    /// in the session and only its list is emptied. Before that OS there is
+    /// nothing to call, and saying so is better than pretending it worked.
+    @discardableResult
+    func suspendAccessories() async -> Bool {
+        guard #available(visionOS 27.0, *) else {
+            NSLog("[ctrl] release asked for, but this OS has no accessory hot-swap")
+            return false
+        }
+        lock.lock()
+        let provider = accessoryProvider
+        lock.unlock()
+        guard let provider else {
+            NSLog("[ctrl] release asked for, but there is no provider")
+            return false
+        }
+        do {
+            try await provider.updateAccessories([])
+        } catch {
+            NSLog("[ctrl] release failed: \(error)")
+            return false
+        }
+        accessoryAnchorTask?.cancel()
+        accessoryAnchorTask = nil
+        releaseHaptics()
+        lock.lock()
+        accessoryAnchor.removeAll()
+        for i in 0...1 { state[i] = KleptonHandState() }
+        lock.unlock()
+        senseConnected = false
+        NSLog("[ctrl] controllers released")
+        return true
+    }
+
+    /// Build the accessory list for whatever is paired now and hot-swap it into
+    /// the live provider, without emptying the list first.
+    ///
+    /// Shared by the take-back and the re-assert: both need the same "what is
+    /// paired now, as ARKit accessories" answer and the same bookkeeping.
+    private func rebuildAccessoryList() async -> (AccessoryTrackingProvider, [Accessory])? {
+        guard #available(visionOS 27.0, *) else { return nil }
+        lock.lock()
+        let provider = accessoryProvider
+        lock.unlock()
+        guard let provider else { return nil }
+
+        let spatial = Self.spatialControllers()
+        var accessories: [Accessory] = []
+        for c in spatial {
+            do { accessories.append(try await Accessory(device: c)) }
+            catch { NSLog("[ctrl] accessory re-init failed for \(c.vendorName ?? "?"): \(error)") }
+        }
+        do {
+            try await provider.updateAccessories(accessories)
+        } catch {
+            NSLog("[ctrl] accessory list update failed: \(error)")
+            return nil
+        }
+        tracked = spatial
+        senseConnected = !accessories.isEmpty
+        return (provider, accessories)
+    }
+
+    /// Take them back: rebuild the list from whatever is paired now and
+    /// hot-swap it into the live provider. Returns the number of controllers,
+    /// or nil when there is no provider to update.
+    func resumeAccessories() async -> Int? {
+        guard let (provider, accessories) = await rebuildAccessoryList() else { return nil }
+        startAccessoryAnchors(provider)
+        NSLog("[ctrl] controller list rebuilt (\(accessories.count) controller(s))")
+        return accessories.count
+    }
+
+    /// Re-assert the accessory list **without** emptying it first.
+    ///
+    /// The hot-swap can hand the anchor stream back while GameController still
+    /// gets no buttons (2026-11-02: `anchor 0.01 s` but `states 0/91` for eight
+    /// seconds, then a second hot-swap delivered 31 states at once). Asking the
+    /// provider for the same accessories again is what fixes that state. The
+    /// anchor consumer is left alone: it is already draining this provider, and
+    /// a second consumer would race it for updates.
+    func refreshAccessories() async -> Bool {
+        guard let (_, accessories) = await rebuildAccessoryList() else { return false }
+        NSLog("[ctrl] accessory list re-asserted without releasing "
+              + "(\(accessories.count) controller(s))")
+        return true
     }
 
     /// Every element name a controller carries, once, when it attaches.
@@ -1360,6 +1477,7 @@ final class KleptonControllers {
             // released". Leave this hand's last sample standing — see the
             // clear-on-attachment note above, which is the other half of this.
             guard let s = c.input.nextInputState() else { continue }
+            Self.inputStates &+= 1
             let b = s.buttons, ax = s.axes, dp = s.dpads
 
             // The PSVR2 Sense element names, per controller. Both controllers
@@ -2939,6 +3057,13 @@ enum KLControllerFocus {
         }
         watch(UIApplication.willResignActiveNotification, "app resigns active")
         watch(UIApplication.didBecomeActiveNotification, "app active")
+        // The controller recovery's only trigger. A working stream delivers
+        // states within a second of coming back; a dead one delivers none
+        // (KleptonControllerRecovery.swift).
+        tokens.append(nc.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                     object: nil, queue: .main) { _ in
+            KLControllerRecovery.focusReturned()
+        })
         watch(UIScene.willDeactivateNotification, "scene deactivates", scene: true)
         watch(UIScene.didActivateNotification, "scene active", scene: true)
         watch(.GCControllerDidBecomeCurrent, "controller current")

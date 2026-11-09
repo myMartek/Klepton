@@ -1085,6 +1085,12 @@ build/t_pinch: tests/t_pinch.swift visionos/Sources/KleptonPinch.swift
 	@mkdir -p build
 	swiftc -o $@ visionos/Sources/KleptonPinch.swift tests/t_pinch.swift
 
+# When the controller recovery calls a stopped stream a stall, how long it waits
+# and when the prompt goes away. Shipped policy, no headset needed.
+build/t_ctrlrecovery: tests/t_ctrlrecovery.swift visionos/Sources/KleptonControllerRecoveryPolicy.swift
+	@mkdir -p build
+	swiftc -o $@ visionos/Sources/KleptonControllerRecoveryPolicy.swift tests/t_ctrlrecovery.swift
+
 # Hardware-independent tests for the actual shipped Surreal decoder, mapper and fusion.
 SURREAL_CORE := visionos/Sources/KleptonControllerInput.swift visionos/Sources/KleptonControllerMode.swift visionos/Sources/KleptonSurrealInput.swift visionos/Sources/KleptonSurrealAim.swift
 build/t_surreal: $(SURREAL_CORE) tests/t_surreal.swift
@@ -1099,6 +1105,11 @@ surreal: build/t_surreal
 .PHONY: pinch
 pinch: build/t_pinch
 	./build/t_pinch
+
+# The controller recovery watchdog's timing (KleptonControllerRecoveryPolicy.swift).
+.PHONY: ctrlrecovery
+ctrlrecovery: build/t_ctrlrecovery
+	./build/t_ctrlrecovery
 
 # The MetalFX switch and the resolution (KleptonMetalFXPreset.swift): on at
 # 100 % sets 75 %, off gives 100 % back only if the switch lowered it and the
@@ -1215,7 +1226,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_tmnt build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands build/t_xrhands
+check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_tmnt build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_ctrlrecovery build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands build/t_xrhands
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1302,6 +1313,8 @@ check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load buil
 	@head -1 build/assetcfg.log && tail -1 build/assetcfg.log
 	@./build/t_pinch > build/pinch.log 2>&1 || { cat build/pinch.log; exit 1; }
 	@echo "=== discrete hand pinch ===" && tail -1 build/pinch.log
+	@./build/t_ctrlrecovery > build/ctrlrecovery.log 2>&1 || { cat build/ctrlrecovery.log; exit 1; }
+	@echo "=== controller recovery timing ===" && tail -1 build/ctrlrecovery.log
 	@./build/t_room > build/room.log 2>&1 || { cat build/room.log; exit 1; }
 	@echo "=== room and play area ===" && tail -1 build/room.log
 	@./build/t_brink_depth > build/brink-depth.log 2>&1 || { cat build/brink-depth.log; exit 1; }
