@@ -561,6 +561,7 @@ int kl_glfb_init(void) {
         // ...and the extensions the description may REPEAT rather than assert
         // (kl_egl.c): adopted only if this string names them, and only where
         // KL_GL_BACKEND_EXT asks for it — so the line is printed only then.
+        if (kl_env_on("KL_GL_EXT_DUMP", 0)) fprintf(stderr, "  [glfb] ANGLE GL_EXTENSIONS: %s\n", ext);
         kl_gl_cap_adopt_backend_extensions(ext);
         int adopted = kl_gl_cap_adopted_extension_count();
         if (adopted || kl_env_on("KL_GL_BACKEND_EXT", 0)) {
@@ -3549,6 +3550,70 @@ static int klfb_doctor_shader(char *buf, size_t cap) {
     return changed || needs_eye || cameras;
 }
 
+
+// ------------------------------------------------------ shader text experiments
+//
+// Literal rewrites of the guest's GLSL as it arrives, for A/B runs that need no
+// rebuild of the guest. KL_GLFB_X_GUARD_RCP=1: every `= 1.0 / <operand>;` becomes
+// `= 1.0 / max(<operand>, 0.02);` (HL2's bumped lightmap shader divides by the
+// sum of its three bump weights, which a normal map with no positive basis
+// component makes zero). KL_GLFB_X_ZERO_CUBE=1: every `texture( sampler2, ... )`
+// becomes `vec4(0.0)` (the cube map term of LightmappedGeneric).
+// KL_GLFB_SHADER_SED=old=>new||old2=>new2: arbitrary literal substitutions.
+static int klfb_src_splice(char *buf, size_t *off, size_t cap, size_t at, size_t oldlen, const char *rep) {
+    size_t rl = strlen(rep);
+    if (*off - oldlen + rl + 1 > cap) return 0;
+    memmove(buf + at + rl, buf + at + oldlen, *off - at - oldlen + 1);
+    memcpy(buf + at, rep, rl);
+    *off = *off - oldlen + rl;
+    return 1;
+}
+static int klfb_src_experiments(uint32_t shader, char *buf, size_t *off, size_t cap) {
+    static int init, guard, zcube; static const char *sed, *sed_if;
+    if (!init) { init = 1; guard = kl_env_on("KL_GLFB_X_GUARD_RCP", 0); zcube = kl_env_on("KL_GLFB_X_ZERO_CUBE", 0); sed = kl_env_str("KL_GLFB_SHADER_SED", NULL); sed_if = kl_env_str("KL_GLFB_SHADER_SED_IF", NULL); }
+    int n = 0;
+    // KL_GLFB_SHADER_SED_IF=<text>: the SED pairs apply only to shaders whose source contains <text>.
+    const char *sed_here = (sed && sed_if && *sed_if && !strstr(buf, sed_if)) ? NULL : sed;
+    if (guard) {
+        size_t pos = 0; char *m;
+        while ((m = strstr(buf + pos, "= 1.0 / ")) != NULL) {
+            char *semi = strchr(m, ';');
+            if (!semi) break;
+            size_t oplen = (size_t)(semi - (m + 8));
+            if (oplen == 0 || oplen > 40 || strncmp(m + 8, "max(", 4) == 0) { pos = (size_t)(semi - buf); continue; }
+            char rep[96]; snprintf(rep, sizeof rep, "= 1.0 / max(%.*s, 0.02)", (int)oplen, m + 8);
+            if (!klfb_src_splice(buf, off, cap, (size_t)(m - buf), (size_t)(semi - m), rep)) break;
+            n++; pos = (size_t)(m - buf) + strlen(rep);
+        }
+    }
+    if (zcube) {
+        size_t pos = 0; char *m;
+        while ((m = strstr(buf + pos, "texture( sampler2, ")) != NULL) {
+            char *end = strstr(m, " );");
+            if (!end) break;
+            if (!klfb_src_splice(buf, off, cap, (size_t)(m - buf), (size_t)(end + 2 - m), "vec4(0.0)")) break;
+            n++; pos = (size_t)(m - buf) + 9;
+        }
+    }
+    if (sed_here && *sed_here) {
+        char *spec = strdup(sed_here), *save = NULL;
+        for (char *pair = strtok_r(spec, "|", &save); pair; pair = strtok_r(NULL, "|", &save)) {
+            char *arrow = strstr(pair, "=>"); if (!arrow) continue;
+            *arrow = 0; const char *old = pair, *rep = arrow + 2;
+            if (!*old) continue;
+            size_t pos = 0; char *m;
+            while ((m = strstr(buf + pos, old)) != NULL) {
+                if (!klfb_src_splice(buf, off, cap, (size_t)(m - buf), strlen(old), rep)) break;
+                n++; pos = (size_t)(m - buf) + strlen(rep);
+            }
+        }
+        free(spec);
+    }
+    if (n) {
+        fprintf(stderr, "  [glfb] shader %u: %d text experiment rewrite(s) (KL_GLFB_X_GUARD_RCP/ZERO_CUBE/SHADER_SED)\n", shader, n);
+    }
+    return n;
+}
 static void klfb_ShaderSource(uint32_t shader, int32_t count,
                               const char *const *strings, const int32_t *lengths) {
     if (strings && count > 0) {
@@ -3652,6 +3717,7 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
                                         "integer constant; KL_GLFB_DENORM=0 disables)\n", shader, dn);
                 }
             }
+            if (klfb_src_experiments(shader, buf, &off, cap)) dbg_modified = 1;
             // KL_GLFB_VS_FINITE: a vertex whose clip position is not finite
             // (an exponent of all ones: infinity or NaN) is moved outside the
             // view. Synth Riders shows its pooled rail LineRenderers for two
@@ -4204,6 +4270,28 @@ static void klfb_vfx_mark(uint32_t program) {
                 fprintf(stderr, "  [glfb] VFX draws left out so far: %u\n", g_vfx_skipped); \
             return; } } while (0)
 
+
+// ------------------------------------------------------ vertex dump
+//
+// KL_GLFB_VTXDUMP_LABEL=<substring of a shader source> KL_GLFB_VTXDUMP_DIR=<dir>
+// [KL_GLFB_VTXDUMP_FROM=<frames after the first frame a matching program drew>]
+// [KL_GLFB_VTXDUMP_FRAMES=<n>, default 1]
+// [KL_GLFB_VTXDUMP_EVERY=<n>, default 1] [KL_GLFB_VTXDUMP_N=<draws>, default 2000]:
+// for every draw inside the chosen frames that runs a program whose shader text
+// contains the label, write the draw's index list, the texture bound to each
+// sampler unit, and every enabled vertex attribute of the vertices the draw
+// touches (decoded) into <dir>/vtx_f<frame>_<n>_prog<p>.txt. For the HL2 room
+// whose walls read their lightmap at the wrong place (2026-11-10): the engine's
+// own lightmap coordinates per vertex (the bump VS samples at v3 + k*v4), to be
+// held against the BSP's faces and the dumped lightmap pages.
+#define KLFB_VTXDUMP_PROGS 32
+static uint32_t g_vtxdump_progs[KLFB_VTXDUMP_PROGS];
+static unsigned g_vtxdump_nprogs;
+static const char *klfb_vtxdump_label(void) {
+    static const char *label = (const char *)1;
+    if (label == (const char *)1) label = kl_env_str("KL_GLFB_VTXDUMP_LABEL", NULL);
+    return label;
+}
 static void klfb_LinkProgram(uint32_t program) {
     if (!g_real_LinkProgram) return;
     klfb_ssbo_forget(program);
@@ -4330,6 +4418,21 @@ static void klfb_LinkProgram(uint32_t program) {
                 const char *src = klfb_shader_src(sh[i]);
                 fprintf(stderr, "[shaderdump] prog %u shader %u:\n%s\n[shaderdump-end]\n",
                         program, sh[i], src ? src : "(none)");
+            }
+        }
+    }
+    // KL_GLFB_VTXDUMP_LABEL: remember the programs whose shader text carries the label.
+    if (klfb_vtxdump_label() && g_vtxdump_nprogs < KLFB_VTXDUMP_PROGS) {
+        static void (*r_gas2)(uint32_t, int32_t, int32_t *, uint32_t *);
+        if (!r_gas2) r_gas2 = asym("glGetAttachedShaders");
+        uint32_t sh[8]; int32_t n = 0;
+        if (r_gas2) r_gas2(program, 8, &n, sh);
+        for (int32_t i = 0; i < n; i++) {
+            const char *src = klfb_shader_src(sh[i]);
+            if (src && strstr(src, klfb_vtxdump_label())) {
+                g_vtxdump_progs[g_vtxdump_nprogs++] = program;
+                fprintf(stderr, "  [vtxdump] program %u matches \"%s\"\n", program, klfb_vtxdump_label());
+                break;
             }
         }
     }
@@ -4893,6 +4996,91 @@ static void klfb_tex_stats_dxt5(int32_t level, int32_t w, int32_t h, const uint8
                 g_txs_cscanned, g_txs_cdark);
 }
 
+// KL_GLFB_TEXDUMP=<W>x<H>:<dir> — every level-0 upload (glTexImage2D data and
+// each glTexSubImage2D rectangle) into a 2D texture of exactly that size,
+// written raw as handed over, with the rectangle in the file name:
+// <dir>/texdump_<n>_tex<name>_<w>x<h>_at<x>,<y>_fmt<f>.raw. For Half-Life 2's
+// lightmap pages (512x256 RGBA8, "M4LM: lightmap page 0 512x256"): the page can
+// be rebuilt from the files, which says whether the engine's bytes already
+// carry the colour cast seen on the walls of one room (2026-11-09) or the
+// GPU-side texture does. Capped at 4000 files.
+static int klfb_texdump_want(int32_t w, int32_t h, char *dir, size_t dsz) {
+    static int looked, W, H; static char D[1024];
+    if (!looked) {
+        looked = 1;
+        const char *e = getenv("KL_GLFB_TEXDUMP");
+        if (e && sscanf(e, "%dx%d:%1023s", &W, &H, D) == 3) ;
+        else W = H = 0;
+    }
+    if (!W || w != W || h != H) return 0;
+    snprintf(dir, dsz, "%s", D);
+    return 1;
+}
+// KL_GLFB_TEXDUMP_PAINT=1 — instead of dumping, REPLACE the bytes of every such
+// upload with a pattern: R = x across the texture, G = y down it, B = the n-th
+// texture of that size seen (x 24), A = 255. A frame drawn with the lightmap
+// pages painted this way shows, per surface, which page and where in it the
+// surface samples — a surface that reads the wrong place shows it as a colour
+// that does not fit its neighbours. Diagnostic; the picture is wrong by design.
+static int klfb_texdump_paint(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_GLFB_TEXDUMP_PAINT", 0);
+    return on;
+}
+static const void *klfb_texdump_painted(uint32_t tex, int32_t x, int32_t y, int32_t w, int32_t h,
+                                        uint32_t fmt, uint32_t type, int32_t texw, int32_t texh) {
+    static uint32_t seen[64]; static int nseen;
+    static unsigned char *buf; static size_t cap;
+    if (type != 0x1401 || (fmt != 0x1908 && fmt != 0x80E1)) return NULL;
+    int idx = -1;
+    for (int i = 0; i < nseen; i++) if (seen[i] == tex) idx = i;
+    if (idx < 0 && nseen < 64) { seen[nseen] = tex; idx = nseen++; }
+    size_t need = (size_t)w * (size_t)h * 4;
+    if (need > cap) { free(buf); buf = malloc(need); cap = buf ? need : 0; }
+    if (!buf) return NULL;
+    // Mode 2: the outermost two texel rows and columns BLUE, the inside a
+    // red/green checker of 16-texel cells — a surface whose lightmap coordinates
+    // fall outside the page clamps to the edge and comes out blue, one that
+    // reads inside shows the checker. Mode 1 is the linear ramp.
+    int mode = (int)kl_env_uint("KL_GLFB_TEXDUMP_PAINT", 1);
+    for (int32_t j = 0; j < h; j++)
+        for (int32_t i = 0; i < w; i++) {
+            unsigned char *q = buf + ((size_t)j * (size_t)w + (size_t)i) * 4;
+            int32_t X = x + i, Y = y + j;
+            if (mode == 2) {
+                int edge = X < 2 || Y < 2 || X >= texw - 2 || Y >= texh - 2;
+                int cell = ((X / 16) + (Y / 16)) & 1;
+                q[0] = edge ? 0 : (cell ? 255 : 0);
+                q[1] = edge ? 0 : (cell ? 0 : 255);
+                q[2] = edge ? 255 : 0;
+            } else if (mode == 3) {
+                // One flat colour per texture of this size, in the order seen:
+                // which page a surface samples, whatever its coordinates.
+                static const unsigned char pal[16][3] = {
+                    {255,0,0},{0,255,0},{0,0,255},{255,255,0},{255,0,255},{0,255,255},{255,128,0},{128,0,255},
+                    {0,128,255},{128,255,0},{255,0,128},{0,255,128},{128,128,128},{255,255,255},{128,64,0},{64,0,128}};
+                const unsigned char *c = pal[(idx < 0 ? 15 : idx) & 15];
+                q[0] = c[0]; q[1] = c[1]; q[2] = c[2];
+            } else {
+                q[0] = (unsigned char)(X * 255 / (texw > 1 ? texw - 1 : 1));
+                q[1] = (unsigned char)(Y * 255 / (texh > 1 ? texh - 1 : 1));
+                q[2] = (unsigned char)((idx < 0 ? 63 : idx) * 24 & 0xff);
+            }
+            q[3] = 255;
+        }
+    return buf;
+}
+static void klfb_texdump_write(const char *dir, uint32_t tex, int32_t x, int32_t y, int32_t w, int32_t h,
+                               uint32_t fmt, uint32_t type, const void *px) {
+    static int n;
+    if (!px || n >= 4000) return;
+    int bpp = type == 0x1401 ? (fmt == 0x1908 || fmt == 0x80E1 ? 4 : fmt == 0x1907 ? 3 : 1) : 0;
+    if (!bpp) return;
+    char path[1200];
+    snprintf(path, sizeof path, "%s/texdump_%04d_tex%u_%dx%d_at%d,%d_fmt%x.raw", dir, n++, tex, w, h, x, y, fmt);
+    FILE *o = fopen(path, "wb");
+    if (o) { fwrite(px, 1, (size_t)w * (size_t)h * (size_t)bpp, o); fclose(o); }
+}
 static void (*g_real_TexImage2D)(uint32_t, int32_t, int32_t, int32_t, int32_t,
                                  int32_t, uint32_t, uint32_t, const void *);
 // Defined in the ABI-thunks block below; the texture-allocation thunks feed it.
@@ -4969,6 +5157,18 @@ static void klfb_TexImage2D(uint32_t target, int32_t level, int32_t ifmt,
             snprintf(path, sizeof path, "%s/rgb8_%03d_tex%d_%dx%d.rgba", dir, n++, bound, w, h);
             FILE *o = fopen(path, "wb");
             if (o) { fwrite(pixels, 1, (size_t)w * (size_t)h * 4, o); fclose(o); }
+        }
+    }
+    if (level == 0 && pixels && target == 0x0DE1) {
+        char ddir[1024];
+        if (klfb_texdump_want(w, h, ddir, sizeof ddir)) {
+            int32_t bound = -1;
+            if (a_glGetIntegerv) a_glGetIntegerv(0x8069, &bound);
+            if (klfb_texdump_paint()) {
+                const void *painted = klfb_texdump_painted((uint32_t)bound, 0, 0, w, h, fmt, type, w, h);
+                if (painted) pixels = painted;
+            } else
+                klfb_texdump_write(ddir, (uint32_t)bound, 0, 0, w, h, fmt, type, pixels);
         }
     }
     if (level == 0) g_census_teximage++;
@@ -6791,9 +6991,12 @@ static int32_t klfb_depth_filter_fix(uint32_t name, uint32_t pname, int32_t para
 }
 
 static void klfb_TexParameteri(uint32_t target, uint32_t pname, int32_t param) {
-    if (klfb_trace_tex())
+    if (klfb_trace_tex()) {
+        int32_t tb = -1;
+        if (a_glGetIntegerv) a_glGetIntegerv(target == 0x8513 ? 0x8514 : target == 0x8C1A ? 0x8C1D : 0x8069, &tb);
         fprintf(stderr, "  [glfb] #%u glTexParameteri target=0x%04x pname=0x%04x "
-                        "param=0x%04x\n", g_texcalls++, target, pname, param);
+                        "param=0x%04x (tex=%d)\n", g_texcalls++, target, pname, param, tb);
+    }
     static int noswz = -1;
     if (noswz < 0) noswz = kl_env_on("KL_GLFB_NOSWIZZLE", 0);
     if (noswz && pname >= GL_TEXTURE_SWIZZLE_R && pname <= GL_TEXTURE_SWIZZLE_A) return;
@@ -6841,6 +7044,73 @@ static int klfb_upload_budget(void) {
 }
 static unsigned g_uploads;
 
+
+// KL_GLFB_LM_DARKFILL (on for the SourceVR targets): Source's 8-bit lightmap
+// pages, their darkest step. The engine turns each linear lightmap value into
+// a page byte through a table indexed by the linear value, so the dark end is
+// coarse and PER CHANNEL: everything below the first step is 0, then 5, 7, 9
+// (13-15 in the three bump blocks, which are rescaled). A texel of a shadowed
+// room whose true colour is a dim warm grey - linear (0.0020, 0.0017, 0.0008)
+// - goes up as (14, 0, 0); its neighbour as (14, 14, 0) or (0, 15, 12). After
+// the page's sRGB decode, the lightmap scale and the encode that is about
+// 16/255 of pure red, yellow or cyan next to black: invisible on a 2004
+// monitor, plain to see on the Vision Pro's OLED in a dark room (Half-Life 2's
+// storage room behind the station fence, 2026-11-10 - what was left once the
+// double sRGB encode was gone). The lost value cannot be recovered, but its
+// range is known: a zero beside a small non-zero channel was below the first
+// step, not absent. Such a zero is put at about the middle of that range
+// (0.7 of the texel's smallest non-zero channel, at most 9), which turns the
+// coloured blotch into a dark near-grey one. Only dark texels (largest channel
+// at most 48) with at least one channel present are touched; black stays
+// black. Lightmap pages are recognised as 512x256 SRGB8_ALPHA8 textures fed
+// RGBA bytes at level 0 - the material system's fixed page size.
+static const void *klfb_lm_darkfill(uint32_t target, int32_t level, int32_t w, int32_t h,
+                                    uint32_t format, uint32_t type, const void *pixels) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_GLFB_LM_DARKFILL", t && strncmp(t, "sourcevr-", 9) == 0);
+    }
+    if (!on || !pixels || target != 0x0DE1 || level != 0 || format != 0x1908 || type != 0x1401 ||
+        w <= 0 || h <= 0 || !a_glGetIntegerv)
+        return NULL;
+    int32_t bound = 0, pbo = 0, rowlen = 0; uint32_t tf = 0; int32_t tw = 0, th = 0;
+    a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &bound);
+    if (bound <= 0 || !klfb_tex_info((uint32_t)bound, &tf, &tw, &th) || tf != GL_SRGB8_ALPHA8 ||
+        tw != 512 || th != 256)
+        return NULL;
+    a_glGetIntegerv(0x88EF /* PIXEL_UNPACK_BUFFER_BINDING */, &pbo);
+    a_glGetIntegerv(0x0CF2 /* UNPACK_ROW_LENGTH */, &rowlen);
+    if (pbo || (rowlen && rowlen != w)) return NULL;
+    static __thread uint8_t *buf; static __thread size_t cap;
+    size_t n = (size_t)w * (size_t)h;
+    if (cap < n * 4) {
+        free(buf); buf = malloc(n * 4); cap = buf ? n * 4 : 0;
+        if (!buf) return NULL;
+    }
+    memcpy(buf, pixels, n * 4);
+    size_t changed = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t *q = buf + i * 4;
+        uint8_t mx = q[0] > q[1] ? q[0] : q[1];
+        if (q[2] > mx) mx = q[2];
+        if (!mx || mx > 48 || (q[0] && q[1] && q[2])) continue;
+        uint8_t mn = 255;
+        for (int c = 0; c < 3; c++) if (q[c] && q[c] < mn) mn = q[c];
+        uint8_t z = (uint8_t)((mn * 7 + 5) / 10);
+        if (z > 9) z = 9;
+        if (z < 1) z = 1;
+        for (int c = 0; c < 3; c++) if (!q[c]) q[c] = z;
+        changed++;
+    }
+    static int said;
+    if (changed && said++ < 3)
+        fprintf(stderr, "  [glfb] lightmap page tex %d: %zu of %zu dark texels had a colour channel rounded "
+                        "to zero; filled to mid-step (KL_GLFB_LM_DARKFILL=0 leaves them)\n", bound, changed, n);
+    return changed ? buf : NULL;
+}
+
 static void klfb_TexSubImage2D(uint32_t target, int32_t level, int32_t xoff,
                                int32_t yoff, int32_t w, int32_t h, uint32_t format,
                                uint32_t type, const void *pixels) {
@@ -6850,6 +7120,19 @@ static void klfb_TexSubImage2D(uint32_t target, int32_t level, int32_t xoff,
         if (klfb_trace_tex())
             fprintf(stderr, "  [glfb] upload %u DROPPED (budget %d)\n", idx, budget);
         return;
+    }
+    if (level == 0 && pixels && target == 0x0DE1 && a_glGetIntegerv) {
+        int32_t bound = -1;
+        a_glGetIntegerv(0x8069, &bound);
+        uint32_t tf = 0; int32_t tw = 0, th = 0;
+        char ddir[1024];
+        if (bound > 0 && klfb_tex_info((uint32_t)bound, &tf, &tw, &th) && klfb_texdump_want(tw, th, ddir, sizeof ddir)) {
+            if (klfb_texdump_paint()) {
+                const void *painted = klfb_texdump_painted((uint32_t)bound, xoff, yoff, w, h, format, type, tw, th);
+                if (painted) pixels = painted;
+            } else
+                klfb_texdump_write(ddir, (uint32_t)bound, xoff, yoff, w, h, format, type, pixels);
+        }
     }
     if (klfb_trace_tex())
         fprintf(stderr, "  [glfb] #%u glTexSubImage2D target=0x%04x level=%d "
@@ -6875,6 +7158,10 @@ static void klfb_TexSubImage2D(uint32_t target, int32_t level, int32_t xoff,
                 if (o) { fwrite(pixels, 1, (size_t)w * (size_t)h * 4, o); fclose(o); }
             }
         }
+    }
+    {
+        const void *filled = klfb_lm_darkfill(target, level, w, h, format, type, pixels);
+        if (filled) pixels = filled;
     }
     if (g_real_TexSubImage2D)
         g_real_TexSubImage2D(target, level, xoff, yoff, w, h, format, type, pixels);
@@ -11448,6 +11735,37 @@ static void klfb_note_draw(void) {
     // this guest draws into one framebuffer and blits out of another.
     if (fb > 0) g_last_draw_fb = (uint32_t)fb;
     klfb_stn_draw(fb);
+    // KL_GLFB_ATTR_LOG=<n> [KL_GLFB_ATTR_LOG_FROM=<presented frame>]: for n draws,
+    // the vertex attribute state ANGLE sees (pointer API, which Source's togl
+    // uses): program, draw framebuffer, and per attribute enabled/size/type/
+    // normalized/stride/buffer/offset. For the HL2 room whose walls read their
+    // lightmap at the wrong place (2026-11-10): which draws carry an attribute
+    // that does not fit the others.
+    {
+        static int alog = -1, afrom, alogged;
+        if (alog < 0) { alog = kl_env_int("KL_GLFB_ATTR_LOG", 0); afrom = kl_env_int("KL_GLFB_ATTR_LOG_FROM", 0); }
+        if (alog > 0 && alogged < alog && (int)g_presented >= afrom && a_glGetIntegerv) {
+            static void (*getvai)(uint32_t, uint32_t, int32_t *);
+            static void (*getvap)(uint32_t, uint32_t, void **);
+            if (!getvai) { getvai = asym("glGetVertexAttribiv"); getvap = asym("glGetVertexAttribPointerv"); }
+            if (getvai) {
+                alogged++;
+                int32_t prog = -1, vao = -1;
+                a_glGetIntegerv(0x8B8D, &prog); a_glGetIntegerv(0x85B5, &vao);
+                char line[900]; int n = snprintf(line, sizeof line, "  [attr] f=%u prog=%d fb=%d vao=%d:", g_presented, prog, fb, vao);
+                for (uint32_t i = 0; i < 8 && n < (int)sizeof line - 80; i++) {
+                    int32_t en = 0, sz = 0, ty = 0, nm = 0, st = 0, bb = 0; void *ptr = NULL;
+                    getvai(i, 0x8622, &en);
+                    if (!en) continue;
+                    getvai(i, 0x8623, &sz); getvai(i, 0x8625, &ty); getvai(i, 0x886A, &nm);
+                    getvai(i, 0x8624, &st); getvai(i, 0x889F, &bb);
+                    if (getvap) getvap(i, 0x8645, &ptr);
+                    n += snprintf(line + n, sizeof line - (size_t)n, " a%u[%dx%x%s st%d b%d +%llu]", i, sz, ty, nm ? "n" : "", st, bb, (unsigned long long)(uintptr_t)ptr);
+                }
+                fprintf(stderr, "%s\n", line);
+            }
+        }
+    }
     // The same timeline the blit probe reads: order the draws against the
     // clears/invalidates/blits, because "black at blit time" is meaningless
     // without knowing whether a draw came after the last clear. Program,
@@ -12141,6 +12459,167 @@ static void klfb_doctor_set_eye(void) {
     }
 }
 
+
+static size_t klfb_vtx_typesize(uint32_t t) {
+    switch (t) {
+    case 0x1400: case 0x1401: return 1;
+    case 0x1402: case 0x1403: case 0x140B: return 2;
+    default: return 4;
+    }
+}
+static double klfb_vtx_decode(const uint8_t *p, uint32_t t, int norm) {
+    switch (t) {
+    case 0x1406: { float f; memcpy(&f, p, 4); return f; }
+    case 0x1401: return norm ? p[0] / 255.0 : p[0];
+    case 0x1400: { int8_t v = (int8_t)p[0]; return norm ? v / 127.0 : v; }
+    case 0x1403: { uint16_t v; memcpy(&v, p, 2); return norm ? v / 65535.0 : v; }
+    case 0x1402: { int16_t v; memcpy(&v, p, 2); return norm ? v / 32767.0 : v; }
+    case 0x1405: { uint32_t v; memcpy(&v, p, 4); return v; }
+    case 0x1404: { int32_t v; memcpy(&v, p, 4); return v; }
+    case 0x140B: { uint16_t h; memcpy(&h, p, 2); int sg = h >> 15, e = (h >> 10) & 31, m = h & 1023;
+                   double v = e == 0 ? ldexp(m, -24) : e == 31 ? (m ? NAN : INFINITY) : ldexp(m + 1024, e - 25);
+                   return sg ? -v : v; }
+    default: { uint32_t v; memcpy(&v, p, 4); return v; }
+    }
+}
+// type == 0 means a glDrawArrays-style draw of [first, first+count).
+static void klfb_vtxdump(uint32_t mode, int32_t first, int32_t count, uint32_t type, const void *indices, int32_t basevertex) {
+    static int from = -1, frames, every, max_n, n_done; static const char *dir;
+    if (!klfb_vtxdump_label() || !g_vtxdump_nprogs || !a_glGetIntegerv || count <= 0) return;
+    if (from < 0) {
+        from = kl_env_int("KL_GLFB_VTXDUMP_FROM", 0); frames = kl_env_int("KL_GLFB_VTXDUMP_FRAMES", 1);
+        every = kl_env_int("KL_GLFB_VTXDUMP_EVERY", 1); max_n = kl_env_int("KL_GLFB_VTXDUMP_N", 2000);
+        dir = kl_env_str("KL_GLFB_VTXDUMP_DIR", NULL);
+        if (every < 1) every = 1;
+    }
+    if (!dir || n_done >= max_n) return;
+    int32_t prog = -1; a_glGetIntegerv(0x8B8D, &prog);
+    unsigned k; for (k = 0; k < g_vtxdump_nprogs && g_vtxdump_progs[k] != (uint32_t)prog; k++) ;
+    if (k == g_vtxdump_nprogs) return;
+    // FROM counts from the first frame on which a matching program drew at all (the
+    // world's first frame): the loading screen's length differs by minutes between runs.
+    static int first_world = -1;
+    if (first_world < 0) { first_world = (int)g_presented; fprintf(stderr, "  [vtxdump] first world frame %u\n", g_presented); }
+    int rel = (int)g_presented - first_world - from;
+    if (rel < 0 || rel % every || rel / every >= frames) return;
+    static void (*getvai)(uint32_t, uint32_t, int32_t *); static void (*getvap)(uint32_t, uint32_t, void **);
+    static void *(*mapr)(uint32_t, intptr_t, intptr_t, uint32_t); static uint8_t (*unmap)(uint32_t);
+    static void (*bindb)(uint32_t, uint32_t); static void (*activetex)(uint32_t);
+    if (!getvai) {
+        getvai = asym("glGetVertexAttribiv"); getvap = asym("glGetVertexAttribPointerv");
+        mapr = asym("glMapBufferRange"); unmap = asym("glUnmapBuffer");
+        bindb = asym("glBindBuffer"); activetex = asym("glActiveTexture");
+    }
+    if (!getvai || !getvap || !mapr || !unmap || !bindb) return;
+    n_done++;
+    char path[1024]; snprintf(path, sizeof path, "%s/vtx_f%u_%04d_prog%d.txt", dir, g_presented, n_done, prog);
+    FILE *f = fopen(path, "w"); if (!f) return;
+    int32_t fb = -1, vao = -1; a_glGetIntegerv(0x8CA6, &fb); a_glGetIntegerv(0x85B5, &vao);
+    fprintf(f, "# frame %u draw %d prog %d fb %d vao %d mode 0x%x first %d count %d type 0x%x basevertex %d\n",
+            g_presented, n_done, prog, fb, vao, mode, first, count, type, basevertex);
+    if (activetex) {
+        int32_t active = 0; a_glGetIntegerv(0x84E0, &active);
+        fprintf(f, "# tex2d per unit:");
+        for (uint32_t u = 0; u < 16; u++) { int32_t t = 0; activetex(0x84C0 + u); a_glGetIntegerv(0x8069, &t); fprintf(f, " %u=%d", u, t); }
+        activetex((uint32_t)active); fprintf(f, "\n");
+    }
+    // every active uniform of the program, with its current value (KL_GLFB_VTXDUMP_UNIFORMS=0 skips)
+    {
+        static int want = -1; if (want < 0) want = kl_env_on("KL_GLFB_VTXDUMP_UNIFORMS", 1);
+        static void (*gau)(uint32_t, uint32_t, int32_t, int32_t *, int32_t *, uint32_t *, char *);
+        static int32_t (*gul)(uint32_t, const char *); static void (*guf)(uint32_t, int32_t, float *); static void (*gui)(uint32_t, int32_t, int32_t *);
+        static void (*gpi)(uint32_t, uint32_t, int32_t *);
+        if (want && !gau) { gau = asym("glGetActiveUniform"); gul = asym("glGetUniformLocation"); guf = asym("glGetUniformfv"); gui = asym("glGetUniformiv"); gpi = asym("glGetProgramiv"); }
+        if (want && gau && gul && guf && gui && gpi) {
+            int32_t nu = 0; gpi((uint32_t)prog, 0x8B86 /* ACTIVE_UNIFORMS */, &nu);
+            for (int32_t u = 0; u < nu; u++) {
+                char name[128]; int32_t len = 0, size = 0; uint32_t ut = 0;
+                gau((uint32_t)prog, (uint32_t)u, sizeof name, &len, &size, &ut, name);
+                char *br = strstr(name, "[0]"); if (br) *br = 0;
+                int is_sampler = ut == 0x8B5E || ut == 0x8B60 || ut == 0x8B5F || ut == 0x8DC1 || ut == 0x8B62 || ut == 0x8DCA || ut == 0x8DD2 || ut == 0x8DCF || ut == 0x8DD7 || ut == 0x8DC5;
+                int comps = (ut == 0x8B50 || ut == 0x8B53 || ut == 0x8B57) ? 2 : (ut == 0x8B51 || ut == 0x8B54 || ut == 0x8B58) ? 3 : (ut == 0x8B52 || ut == 0x8B55 || ut == 0x8B59) ? 4 : ut == 0x8B5C ? 16 : ut == 0x8B5B ? 9 : ut == 0x8B5A ? 4 : 1;
+                int is_int = ut == 0x1404 || ut == 0x8B53 || ut == 0x8B54 || ut == 0x8B55 || ut == 0x1405 || ut == 0x8B56 || ut == 0x8B57 || ut == 0x8B58 || ut == 0x8B59 || is_sampler;
+                for (int32_t e = 0; e < size && e < 64; e++) {
+                    char full[160]; if (size > 1) snprintf(full, sizeof full, "%s[%d]", name, e); else snprintf(full, sizeof full, "%s", name);
+                    int32_t loc = gul((uint32_t)prog, full); if (loc < 0) continue;
+                    fprintf(f, "U %s =", full);
+                    if (is_int) { int32_t iv[16] = {0}; gui((uint32_t)prog, loc, iv); for (int c = 0; c < comps; c++) fprintf(f, " %d", iv[c]); }
+                    else { float fv[16] = {0}; guf((uint32_t)prog, loc, fv); for (int c = 0; c < comps; c++) fprintf(f, " %.6g", fv[c]); }
+                    fprintf(f, "\n");
+                }
+            }
+        }
+    }
+    static int noverts = -1; if (noverts < 0) noverts = kl_env_on("KL_GLFB_VTXDUMP_NOVERTS", 0);
+    if (noverts) { fclose(f); if (n_done == 1 || n_done == max_n) fprintf(stderr, "  [vtxdump] %s (draw %d)\n", path, n_done); return; }
+    uint32_t *idx = NULL; int32_t nidx = 0; uint32_t imin, imax;
+    if (type) {
+        size_t isz = type == 0x1405 ? 4 : type == 0x1403 ? 2 : 1;
+        int32_t ebo = 0; a_glGetIntegerv(0x8895, &ebo);
+        const uint8_t *src = NULL; void *mapped = NULL;
+        if (ebo) { mapped = mapr(0x8893, (intptr_t)(uintptr_t)indices, (intptr_t)(isz * (size_t)count), 1); src = mapped; }
+        else src = indices;
+        if (src) {
+            idx = malloc(sizeof *idx * (size_t)count);
+            for (int32_t i = 0; i < count; i++)
+                idx[i] = (uint32_t)((isz == 4 ? ((const uint32_t *)src)[i] : isz == 2 ? ((const uint16_t *)src)[i] : src[i]) + (uint32_t)basevertex);
+            nidx = count;
+        }
+        if (mapped) unmap(0x8893);
+        if (!idx) { fprintf(f, "# indices unreadable (ebo %d)\n", ebo); fclose(f); return; }
+        imin = imax = idx[0];
+        for (int32_t i = 1; i < nidx; i++) { if (idx[i] < imin) imin = idx[i]; if (idx[i] > imax) imax = idx[i]; }
+        fprintf(f, "# ebo %d indices %d range %u..%u\n", ebo, nidx, imin, imax);
+        fprintf(f, "I");
+        for (int32_t i = 0; i < nidx; i++) fprintf(f, " %u", idx[i]);
+        fprintf(f, "\n");
+    } else {
+        imin = (uint32_t)first; imax = (uint32_t)(first + count - 1);
+        fprintf(f, "# arrays %u..%u\n", imin, imax);
+    }
+    uint32_t nv = imax - imin + 1;
+    if (nv > 200000) { fprintf(f, "# too many vertices\n"); free(idx); fclose(f); return; }
+    uint8_t *used = calloc(nv, 1);
+    if (idx) for (int32_t i = 0; i < nidx; i++) used[idx[i] - imin] = 1; else memset(used, 1, nv);
+    struct { int32_t en, sz, ty, nm, st, bb; uintptr_t off; size_t stride, elem; uint8_t *copy; uintptr_t lo; } at[8];
+    memset(at, 0, sizeof at);
+    int32_t copyread = 0; a_glGetIntegerv(0x8F36, &copyread);
+    for (uint32_t i = 0; i < 8; i++) {
+        getvai(i, 0x8622, &at[i].en); if (!at[i].en) continue;
+        getvai(i, 0x8623, &at[i].sz); getvai(i, 0x8625, &at[i].ty); getvai(i, 0x886A, &at[i].nm);
+        getvai(i, 0x8624, &at[i].st); getvai(i, 0x889F, &at[i].bb);
+        void *p = NULL; getvap(i, 0x8645, &p); at[i].off = (uintptr_t)p;
+        at[i].elem = klfb_vtx_typesize((uint32_t)at[i].ty) * (size_t)at[i].sz;
+        at[i].stride = at[i].st ? (size_t)at[i].st : at[i].elem;
+        fprintf(f, "# a%u size %d type 0x%x%s stride %zu buffer %d offset %llu\n", i, at[i].sz, at[i].ty,
+                at[i].nm ? " norm" : "", at[i].stride, at[i].bb, (unsigned long long)at[i].off);
+        if (!at[i].bb) continue;
+        at[i].lo = at[i].off + (uintptr_t)imin * at[i].stride;
+        intptr_t len = (intptr_t)((uintptr_t)(imax - imin) * at[i].stride + at[i].elem);
+        bindb(0x8F36, (uint32_t)at[i].bb);
+        void *m = mapr(0x8F36, (intptr_t)at[i].lo, len, 1);
+        if (!m) { fprintf(f, "# a%u map failed\n", i); at[i].en = 0; continue; }
+        at[i].copy = malloc((size_t)len); memcpy(at[i].copy, m, (size_t)len); unmap(0x8F36);
+    }
+    bindb(0x8F36, (uint32_t)copyread);
+    for (uint32_t v = 0; v < nv; v++) {
+        if (!used[v]) continue;
+        fprintf(f, "V %u", imin + v);
+        for (uint32_t i = 0; i < 8; i++) {
+            if (!at[i].en) continue;
+            uintptr_t addr = at[i].off + (uintptr_t)(imin + v) * at[i].stride;
+            const uint8_t *p = at[i].bb ? at[i].copy + (addr - at[i].lo) : (const uint8_t *)addr;
+            fprintf(f, " a%u=(", i);
+            for (int32_t c = 0; c < at[i].sz; c++)
+                fprintf(f, "%s%.9g", c ? " " : "", klfb_vtx_decode(p + (size_t)c * klfb_vtx_typesize((uint32_t)at[i].ty), (uint32_t)at[i].ty, at[i].nm));
+            fprintf(f, ")");
+        }
+        fprintf(f, "\n");
+    }
+    for (uint32_t i = 0; i < 8; i++) free(at[i].copy);
+    free(used); free(idx); fclose(f);
+    if (n_done == 1 || n_done == max_n) fprintf(stderr, "  [vtxdump] %s (draw %d)\n", path, n_done);
+}
 static void klfb_DrawElements(uint32_t mode, int32_t count, uint32_t type,
                               const void *indices) {
     KLFB_VFX_SKIP();
@@ -12151,6 +12630,7 @@ static void klfb_DrawElements(uint32_t mode, int32_t count, uint32_t type,
     klfb_doctor_set_eye();
     klfb_service_capture();
     klfb_note_draw();
+    klfb_vtxdump(mode, 0, count, type, indices, 0);
     klfb_errprobe0("glDrawElements(before)");
     if (g_real_DrawElements) g_real_DrawElements(mode, count, type, indices);
     klfb_draw_probe(count);
@@ -12164,6 +12644,7 @@ static void klfb_DrawArrays(uint32_t mode, int32_t first, int32_t count) {
     klfb_doctor_set_eye();
     klfb_service_capture();
     klfb_note_draw();
+    klfb_vtxdump(mode, first, count, 0, NULL, 0);
     klfb_errprobe0("glDrawArrays(before)");
     if (g_real_DrawArrays) g_real_DrawArrays(mode, first, count);
     klfb_draw_probe(count);
@@ -12182,6 +12663,7 @@ static void klfb_DrawRangeElements(uint32_t mode, uint32_t start, uint32_t end,
     klfb_doctor_set_eye();
     klfb_service_capture();
     klfb_note_draw();
+    klfb_vtxdump(mode, 0, count, type, indices, 0);
     klfb_errprobe0("glDrawRangeElements(before)");
     if (g_real_DrawRangeElements)
         g_real_DrawRangeElements(mode, start, end, count, type, indices);
@@ -12199,6 +12681,7 @@ static void klfb_DrawElementsInstanced(uint32_t mode, int32_t count, uint32_t ty
     klfb_apply_vertex_bindings();
     klfb_doctor_set_eye();
     klfb_note_draw();
+    klfb_vtxdump(mode, 0, count, type, indices, 0);
     klfb_errprobe0("glDrawElementsInstanced(before)");
     if (g_real_DrawElementsInstanced)
         g_real_DrawElementsInstanced(mode, count, type, indices, instances);
@@ -12228,6 +12711,7 @@ static void klfb_DrawElementsBaseVertex(uint32_t mode, int32_t count, uint32_t t
     klfb_apply_vertex_bindings();
     klfb_doctor_set_eye();
     klfb_note_draw();
+    klfb_vtxdump(mode, 0, count, type, indices, basevertex);
     static int resolved;
     if (!resolved) {
         resolved = 1;
@@ -12276,6 +12760,7 @@ static void klfb_DrawRangeElementsBaseVertex(uint32_t mode, uint32_t start, uint
     klfb_doctor_set_eye();
     klfb_service_capture();
     klfb_note_draw();
+    klfb_vtxdump(mode, 0, count, type, indices, basevertex);
     static int resolved;
     if (!resolved) {
         resolved = 1;
@@ -12319,6 +12804,7 @@ static void klfb_DrawArraysInstanced(uint32_t mode, int32_t first, int32_t count
     klfb_apply_vertex_bindings();
     klfb_doctor_set_eye();
     klfb_note_draw();
+    klfb_vtxdump(mode, first, count, 0, NULL, 0);
     klfb_errprobe0("glDrawArraysInstanced(before)");
     if (g_real_DrawArraysInstanced)
         g_real_DrawArraysInstanced(mode, first, count, instances);
@@ -13812,8 +14298,24 @@ static void klfb_srgb_note(int enabled) {
     klfb_srgb_settle();
 }
 
+// Where GL_EXT_sRGB_write_control was offered to the guest (kl_egl.c, the
+// SourceVR targets), the enable/disable is swallowed WITHOUT the record above:
+// ANGLE on Metal has no such switch (an enable raises INVALID_ENUM), the
+// encode stays on, and that is what the guest's 3D passes want — it writes
+// linear values and its sRGB target encodes them once. The composite must not
+// undo an encode that was meant.
+static int klfb_srgb_write_control_offered(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = kl_gl_cap_has_adopted("GL_EXT_sRGB_write_control");
+        if (on) fprintf(stderr, "  [glfb] GL_FRAMEBUFFER_SRGB: the guest was offered "
+                                "GL_EXT_sRGB_write_control; its enable/disable is dropped, "
+                                "the encode stays on, nothing is undone in the composite\n");
+    }
+    return on;
+}
 static void klfb_Enable(uint32_t cap) {
-    if (cap == KLFB_GL_FRAMEBUFFER_SRGB) { klfb_srgb_note(1); return; }
+    if (cap == KLFB_GL_FRAMEBUFFER_SRGB) { if (!klfb_srgb_write_control_offered()) klfb_srgb_note(1); return; }
     if (cap == 0x0B90 /* GL_STENCIL_TEST */) t_stn_enabled = 1;
     // KL_HL2_NO_CULL=1: swallow glEnable(GL_CULL_FACE) so nothing is back-face culled.
     // Diagnostic for "walls invisible from the inside" — if geometry (train interior)
@@ -13833,7 +14335,7 @@ static void klfb_Enable(uint32_t cap) {
 }
 
 static void klfb_Disable(uint32_t cap) {
-    if (cap == KLFB_GL_FRAMEBUFFER_SRGB) { klfb_srgb_note(0); return; }
+    if (cap == KLFB_GL_FRAMEBUFFER_SRGB) { if (!klfb_srgb_write_control_offered()) klfb_srgb_note(0); return; }
     if (cap == 0x0B90 /* GL_STENCIL_TEST */) t_stn_enabled = 0;
     if (g_real_Disable) g_real_Disable(cap);
 }

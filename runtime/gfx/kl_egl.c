@@ -526,6 +526,18 @@ static const char *const g_gl_ext_candidates[] = {
     // on Metal carries the extension and exports glClipControlEXT, which the
     // guest resolves through kl_glfb_sym.
     "GL_EXT_clip_control",
+    // GL_EXT_sRGB_write_control: glEnable/glDisable(GL_FRAMEBUFFER_SRGB) as a
+    // switch. SourceVR's engine asks for exactly this name (its log:
+    // "ToGL sRGB write path"): with it, it writes linear values and lets the
+    // sRGB render target encode them once; without it, it appends its own
+    // gamma encode to every pixel shader AND still renders into the sRGB
+    // target it asked its swapchain for — every pixel encoded twice, which
+    // lifts dark values enormously (0.0004 -> 0.17) and turns the lightmap
+    // channels of a dark room that round to zero into saturated yellow, red
+    // and cyan patches (Half-Life 2's storage room, 2026-11-10). Offered to
+    // the SourceVR targets only (KL_GL_SRGB_WRITE_CONTROL=1 for others); see
+    // the adoption loop for why it is offered without ANGLE behind it.
+    "GL_EXT_sRGB_write_control",
 };
 #define KL_GL_EXT_CANDIDATES \
     ((int)(sizeof g_gl_ext_candidates / sizeof g_gl_ext_candidates[0]))
@@ -570,6 +582,22 @@ void kl_gl_cap_adopt_backend_extensions(const char *backend_ext) {
                             "hides the view through its portals (KL_GL_CLIP_CONTROL=1 restores it)\n", t);
             continue;
         }
+        // ...and GL_EXT_sRGB_write_control is the one name offered WITHOUT the
+        // backend behind it. ANGLE's Metal backend does not carry it (its GL
+        // backend does, which is how a desktop test first said otherwise), so
+        // the switch cannot be real: kl_glfb swallows the enable/disable and
+        // the encode stays on. That is still the engine's "native writes" path
+        // — linear values into the sRGB target, encoded once by the hardware —
+        // which is what its 3D passes want; a pass that disables the encode to
+        // store code values would come out brighter. SourceVR targets only.
+        if (strcmp(name, "GL_EXT_sRGB_write_control") == 0) {
+            if (!kl_env_on("KL_GL_SRGB_WRITE_CONTROL", t && strncmp(t, "sourcevr-", 9) == 0)) continue;
+            g_gl_ext_adopted[g_gl_ext_adopted_n++] = name;
+            fprintf(stderr, "  [gl] GL_EXT_sRGB_write_control offered to %s without a backend switch: "
+                            "the engine drops its own gamma encode and the sRGB target encodes once "
+                            "(KL_GL_SRGB_WRITE_CONTROL=0 withholds it)\n", t ? t : "?");
+            continue;
+        }
         // Whole-token match: "..._s3tc" is a prefix of "..._s3tc_srgb" in some
         // drivers, and strstr alone would adopt the shorter name off the longer.
         const char *q = backend_ext;
@@ -592,6 +620,11 @@ int kl_gl_cap_backend_has_dxt(void) {
 }
 
 int kl_gl_cap_adopted_extension_count(void) { return g_gl_ext_adopted_n; }
+int kl_gl_cap_has_adopted(const char *name) {
+    for (int i = 0; i < g_gl_ext_adopted_n; i++)
+        if (strcmp(g_gl_ext_adopted[i], name) == 0) return 1;
+    return 0;
+}
 const char *kl_gl_cap_adopted_extension(int i) {
     return (i >= 0 && i < g_gl_ext_adopted_n) ? g_gl_ext_adopted[i] : NULL;
 }
