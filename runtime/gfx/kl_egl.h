@@ -82,6 +82,7 @@ int kl_gl_cap_names_multiview(void);
 void        kl_gl_cap_adopt_backend_extensions(const char *backend_ext);
 int         kl_gl_cap_backend_has_dxt(void);
 int         kl_gl_cap_adopted_extension_count(void);
+int         kl_gl_cap_has_adopted(const char *name);
 const char *kl_gl_cap_adopted_extension(int i);
 
 #endif
