@@ -4263,8 +4263,46 @@ static void klfb_vfx_mark(uint32_t program) {
     }
     klfb_vfx_mark_names(program);
 }
+// Depth clamp for a guest that runs reverse-Z through GL_EXT_clip_control.
+//
+// SourceVR's engine, given the name, reverses its depth (float buffer, GEQUAL,
+// clip range 0..1) — and Half-Life 2's 2D sky is then not drawn at all: black
+// above City 17's plaza on the headset and in the Mac host run alike, there
+// again with `-noreversez`, and every hardware occlusion query answers 0
+// (50000 of 50000 in the headset log, so no glow or flare either). The sky box
+// and the query proxies sit ON the far plane, which under reverse-Z is z = 0,
+// and Metal clips what lands a hair beyond it where a Quest's driver does not.
+// With GL_DEPTH_CLAMP_EXT (ANGLE's Metal backend has it: MTLDepthClipModeClamp)
+// the fragments are kept and their depth is clamped: sky back, 7 of the first
+// 200 queries zero instead of all (Mac host run, 2026-11-10). The engine does
+// not know the extension, so nothing else switches it; it is enabled here, in
+// every context that draws (the guest's contexts are several and handed
+// around, so it is asked for again every 64 draws of a thread — a no-op when
+// set). Only where the reverse-Z name was actually handed over: the Portal
+// profiles have it withheld and are left alone. KL_GL_DEPTH_CLAMP=0/1.
+static void klfb_depth_clamp_tick(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        extern int kl_gl_cap_has_adopted(const char *name);
+        const char *t = kl_driver_target_name();
+        int v = kl_env_on("KL_GL_DEPTH_CLAMP", t && strncmp(t, "sourcevr-", 9) == 0 &&
+                                               kl_gl_cap_has_adopted("GL_EXT_clip_control"));
+        if (v) fprintf(stderr, "  [glfb] GL_DEPTH_CLAMP_EXT is on in every drawing context: the guest's "
+                               "reverse-Z puts its sky and its occlusion queries on the far plane, and "
+                               "Metal clips them there (KL_GL_DEPTH_CLAMP=0 turns it off)\n");
+        on = v;
+    }
+    if (!on) return;
+    static _Thread_local unsigned n;
+    if ((n++ & 63) != 0) return;
+    static void (*en)(uint32_t);
+    if (!en) en = asym("glEnable");
+    if (en) en(0x864F /* GL_DEPTH_CLAMP_EXT */);
+}
 // In each draw thunk: a marked program's draw does not happen.
 #define KLFB_VFX_SKIP() do { \
+        klfb_depth_clamp_tick(); \
         if (g_cur_prog < KLFB_VFX_PROGS && g_vfx_prog[g_cur_prog]) { \
             if ((g_vfx_skipped++ & 0x3fff) == 0) \
                 fprintf(stderr, "  [glfb] VFX draws left out so far: %u\n", g_vfx_skipped); \
@@ -12756,6 +12794,7 @@ static void (*g_real_DrawRangeElementsBaseVertexEXT)(uint32_t, uint32_t, uint32_
 static void klfb_DrawRangeElementsBaseVertex(uint32_t mode, uint32_t start, uint32_t end,
                                              int32_t count, uint32_t type,
                                              const void *indices, int32_t basevertex) {
+    klfb_depth_clamp_tick();
     klfb_apply_vertex_bindings();
     klfb_doctor_set_eye();
     klfb_service_capture();
