@@ -1075,7 +1075,16 @@ static void (*g_real_GetShaderInfoLog)(uint32_t, int32_t, int32_t *, char *);
 //
 // Both rewrite the captured copy, so the failure reporter and the
 // KL_DUMP_SHADERS output show what ANGLE actually compiled.
-#define KLFB_MAX_SHADERS 1024
+#define KLFB_MAX_SHADERS 16384
+// How many shader sources are KEPT for the diagnostics that read them back
+// (labels, dumps): 1024, as it always was — each is the whole text, and a long
+// session sources thousands. KL_GLFB_SRC_KEEP=<n> raises it for a run whose
+// late shaders matter (Half-Life 2's sky shader is past the first thousand).
+static unsigned klfb_src_keep(void) {
+    static int n = -1;
+    if (n < 0) { n = kl_env_int("KL_GLFB_SRC_KEEP", 1024); if (n < 0) n = 0; if (n > KLFB_MAX_SHADERS) n = KLFB_MAX_SHADERS; }
+    return (unsigned)n;
+}
 static struct { uint32_t name; char *src; } g_fb_shaders[KLFB_MAX_SHADERS];
 static unsigned g_fb_nshaders;
 
@@ -1930,12 +1939,13 @@ static int klfb_rewrite_bfe(char *buf, size_t cap) {
 // Shader stage, remembered from glCreateShader so the varying-location strip
 // below knows which of in/out is the inter-stage varying. GL_VERTEX_SHADER is
 // 0x8B31, GL_FRAGMENT_SHADER 0x8B30.
-static struct { uint32_t name, type; } g_fb_type[KLFB_MAX_SHADERS];
+#define KLFB_MAX_SHADER_TYPES 1024      // as before KLFB_MAX_SHADERS grew: what is done by type stays as it was
+static struct { uint32_t name, type; } g_fb_type[KLFB_MAX_SHADER_TYPES];
 static unsigned g_fb_ntype;
 static void klfb_note_type(uint32_t name, uint32_t type) {
     for (unsigned i = 0; i < g_fb_ntype; i++)
         if (g_fb_type[i].name == name) { g_fb_type[i].type = type; return; }
-    if (g_fb_ntype < KLFB_MAX_SHADERS) {
+    if (g_fb_ntype < KLFB_MAX_SHADER_TYPES) {
         g_fb_type[g_fb_ntype].name = name;
         g_fb_type[g_fb_ntype].type = type;
         g_fb_ntype++;
@@ -3614,6 +3624,20 @@ static int klfb_src_experiments(uint32_t shader, char *buf, size_t *off, size_t 
     }
     return n;
 }
+// The depth flip of klfb_DepthRangef's inverted range (the comment there): the
+// engine's translated vertex shaders all end in `gl_Position = vTempPos;`.
+static int klfb_inv_range_on(void);
+static int klfb_src_zflip(char *buf, size_t *off, size_t cap) {
+    static const char tail[] = "gl_Position = vTempPos;", head[] = "void main()";
+    char *vm = strstr(buf, head), *m = vm ? strstr(vm, tail) : NULL;
+    if (!vm || !m || strstr(buf, "kl_zflip")) return 0;
+    if (!klfb_src_splice(buf, off, cap, (size_t)(vm - buf), sizeof head - 1,
+                         "uniform highp float kl_zflip;\nvoid main()")) return 0;
+    m = strstr(buf, tail);
+    if (!m) return 0;
+    return klfb_src_splice(buf, off, cap, (size_t)(m - buf), sizeof tail - 1,
+                           "vTempPos.z += kl_zflip * (vTempPos.w - 2.0 * vTempPos.z);\n\tgl_Position = vTempPos;");
+}
 static void klfb_ShaderSource(uint32_t shader, int32_t count,
                               const char *const *strings, const int32_t *lengths) {
     if (strings && count > 0) {
@@ -3718,6 +3742,7 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
                 }
             }
             if (klfb_src_experiments(shader, buf, &off, cap)) dbg_modified = 1;
+            if (klfb_inv_range_on() && klfb_src_zflip(buf, &off, cap)) dbg_modified = 1;
             // KL_GLFB_VS_FINITE: a vertex whose clip position is not finite
             // (an exponent of all ones: infinity or NaN) is moved outside the
             // view. Synth Riders shows its pooled rail LineRenderers for two
@@ -3909,7 +3934,7 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
             }
             char *rewritten = klfb_rewrite_glsl(buf, cap, shader);
             int stored = 0;
-            if (g_fb_nshaders < KLFB_MAX_SHADERS) {
+            if (g_fb_nshaders < klfb_src_keep()) {
                 pthread_mutex_lock(&g_compile_lock);
                 g_fb_shaders[g_fb_nshaders].name = shader;
                 g_fb_shaders[g_fb_nshaders].src  = buf;
@@ -4263,35 +4288,102 @@ static void klfb_vfx_mark(uint32_t program) {
     }
     klfb_vfx_mark_names(program);
 }
-// Depth clamp for a guest that runs reverse-Z through GL_EXT_clip_control.
+// An inverted depth range, for a guest that reverses its depth that way.
 //
-// SourceVR's engine, given the name, reverses its depth (float buffer, GEQUAL,
-// clip range 0..1) — and Half-Life 2's 2D sky is then not drawn at all: black
-// above City 17's plaza on the headset and in the Mac host run alike, there
-// again with `-noreversez`, and every hardware occlusion query answers 0
-// (50000 of 50000 in the headset log, so no glow or flare either). The sky box
-// and the query proxies sit ON the far plane, which under reverse-Z is z = 0,
-// and Metal clips what lands a hair beyond it where a Quest's driver does not.
-// With GL_DEPTH_CLAMP_EXT (ANGLE's Metal backend has it: MTLDepthClipModeClamp)
-// the fragments are kept and their depth is clamped: sky back, 7 of the first
-// 200 queries zero instead of all (Mac host run, 2026-11-10). The engine does
-// not know the extension, so nothing else switches it; it is enabled here, in
-// every context that draws (the guest's contexts are several and handed
-// around, so it is asked for again every 64 draws of a thread — a no-op when
-// set). Only where the reverse-Z name was actually handed over: the Portal
-// profiles have it withheld and are left alone. KL_GL_DEPTH_CLAMP=0/1.
-static void klfb_depth_clamp_tick(void) {
+// SourceVR's engine, given GL_EXT_clip_control, runs reverse-Z (float buffer,
+// GEQUAL, clip range 0..1). Its world goes through a reversed projection — but
+// some passes keep the ORDINARY projection and reverse the depth RANGE instead:
+// glDepthRangef(1, 0). The 2D sky is one (dumped on the Mac, 2026-11-10: depth
+// test off, range 1..0, a standard projection with near 2 and far 54960), the
+// occlusion-query proxies are another, and so is everything the water passes
+// draw, because those clip at the water line with an OBLIQUE near plane
+// (-nouserclip), which only the ordinary projection has. A Quest's driver maps
+// depth through such a range. Metal, handed a viewport whose near is above its
+// far, discards every fragment of the draw. So in Half-Life 2: no sky (black
+// above City 17's plaza, on the headset and in the Mac host run alike), every
+// occlusion query 0 (50000 of 50000 in a headset log — no glow, no flare), and
+// from the canal's bank a black hole where the water is.
+//
+// The range is therefore not handed over inverted. glDepthRangef(n, f) with
+// n > f goes to the driver as (f, n), and the draws made under it flip their
+// depth themselves: every vertex shader of the engine ends in the same line,
+// `gl_Position = vTempPos;`, and gets `z += kl_zflip * (w - 2 z)` before it —
+// z' = w - z when the uniform is 1, nothing when it is 0 (kl_src_zflip). That
+// is the same window depth, n + (z/w)(f - n), and the same clip volume: z' in
+// 0..w is z in 0..w, so the oblique plane still cuts. The uniform is set per
+// program at the draw (klfb_zflip_tick), only when its state differs from the
+// thread's current range.
+//
+// What came before, and why not: GL_DEPTH_CLAMP_EXT keeps the fragments too.
+// On for every draw (toolchain 879 / AVP Play 1.10.11) it brought the sky back
+// and took the near-plane clip away from the water passes — the canal bed drew
+// through the water from the bank (Marcel, the same evening). On only under an
+// inverted range it still did, because the water passes ARE under one.
+// KL_GL_DEPTH_CLAMP=1 is that first version, for an A/B; KL_GL_INVERTED_RANGE=0
+// hands the range over as the guest gives it. Only where the reverse-Z name was
+// handed over: the Portal profiles have it withheld and are left alone.
+#define KLFB_ZFLIP_PROGS 8192
+static int32_t g_zflip_loc[KLFB_ZFLIP_PROGS];     // 0 not asked yet, -1 no such uniform, else location + 1
+static uint8_t g_zflip_val[KLFB_ZFLIP_PROGS];     // what the program's kl_zflip holds
+static unsigned g_zflip_noflip;
+static int klfb_inv_range_on(void) {
     static int on = -1;
     if (on < 0) {
         extern const char *kl_driver_target_name(void);
         extern int kl_gl_cap_has_adopted(const char *name);
         const char *t = kl_driver_target_name();
-        int v = kl_env_on("KL_GL_DEPTH_CLAMP", t && strncmp(t, "sourcevr-", 9) == 0 &&
+        on = kl_env_on("KL_GL_INVERTED_RANGE", t && strncmp(t, "sourcevr-", 9) == 0 &&
                                                kl_gl_cap_has_adopted("GL_EXT_clip_control"));
-        if (v) fprintf(stderr, "  [glfb] GL_DEPTH_CLAMP_EXT is on in every drawing context: the guest's "
-                               "reverse-Z puts its sky and its occlusion queries on the far plane, and "
-                               "Metal clips them there (KL_GL_DEPTH_CLAMP=0 turns it off)\n");
-        on = v;
+        if (on) fprintf(stderr, "  [glfb] an inverted depth range (glDepthRangef(1, 0): the guest's sky, occlusion "
+                                "queries, water passes) is drawn as its mirror with depth flipped in the vertex "
+                                "shader — Metal discards a draw under a real one (KL_GL_INVERTED_RANGE=0)\n");
+    }
+    return on;
+}
+static void (*g_real_DepthRangef)(float, float);
+static _Thread_local int t_depth_inverted;
+static void klfb_DepthRangef(float n, float f) {
+    if (n > f && klfb_inv_range_on()) {
+        if (!t_depth_inverted) {
+            static int said;
+            if (!__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED))
+                fprintf(stderr, "  [glfb] glDepthRangef(%g, %g): first inverted range, handed over as (%g, %g)\n", n, f, f, n);
+        }
+        t_depth_inverted = 1;
+        if (g_real_DepthRangef) g_real_DepthRangef(f, n);
+        return;
+    }
+    t_depth_inverted = 0;
+    if (g_real_DepthRangef) g_real_DepthRangef(n, f);
+}
+static void klfb_zflip_forget(uint32_t program) {
+    if (program < KLFB_ZFLIP_PROGS) { g_zflip_loc[program] = 0; g_zflip_val[program] = 0; }
+}
+static void klfb_zflip_tick(void) {
+    uint32_t p = g_cur_prog;
+    if (!p || p >= KLFB_ZFLIP_PROGS) return;
+    int want = t_depth_inverted;
+    if (g_zflip_val[p] == want) return;
+    static int32_t (*gul)(uint32_t, const char *); static void (*u1f)(int32_t, float);
+    if (!gul) { gul = asym("glGetUniformLocation"); u1f = asym("glUniform1f"); }
+    if (!gul || !u1f) return;
+    int32_t loc = g_zflip_loc[p];
+    if (!loc) { int32_t l = gul(p, "kl_zflip"); loc = g_zflip_loc[p] = l < 0 ? -1 : l + 1; }
+    if (loc > 0) u1f(loc - 1, (float)want);
+    else if (want) {
+        unsigned k = __atomic_add_fetch(&g_zflip_noflip, 1, __ATOMIC_RELAXED);
+        if (k == 1 || k == 1000)
+            fprintf(stderr, "  [glfb] program %u draws under an inverted depth range without the engine's "
+                            "vertex epilogue: its depth is NOT flipped (%u such draw state(s))\n", p, k);
+    }
+    g_zflip_val[p] = (uint8_t)want;
+}
+static void klfb_depth_clamp_tick(void) {
+    klfb_zflip_tick();
+    static int on = -1;
+    if (on < 0) {
+        on = kl_env_on("KL_GL_DEPTH_CLAMP", 0);
+        if (on) fprintf(stderr, "  [glfb] GL_DEPTH_CLAMP_EXT is on for every draw (KL_GL_DEPTH_CLAMP=1)\n");
     }
     if (!on) return;
     static _Thread_local unsigned n;
@@ -4332,6 +4424,7 @@ static const char *klfb_vtxdump_label(void) {
 }
 static void klfb_LinkProgram(uint32_t program) {
     if (!g_real_LinkProgram) return;
+    klfb_zflip_forget(program);
     klfb_ssbo_forget(program);
     pthread_mutex_lock(&g_compile_lock);
     uint64_t slow_t0 = klfb_slow_ms() ? klfb_slow_now() : 0;
@@ -12555,6 +12648,16 @@ static void klfb_vtxdump(uint32_t mode, int32_t first, int32_t count, uint32_t t
     int32_t fb = -1, vao = -1; a_glGetIntegerv(0x8CA6, &fb); a_glGetIntegerv(0x85B5, &vao);
     fprintf(f, "# frame %u draw %d prog %d fb %d vao %d mode 0x%x first %d count %d type 0x%x basevertex %d\n",
             g_presented, n_done, prog, fb, vao, mode, first, count, type, basevertex);
+    {
+        static uint8_t (*isen)(uint32_t); static void (*getf)(uint32_t, float *);
+        if (!isen) { isen = asym("glIsEnabled"); getf = asym("glGetFloatv"); }
+        int32_t dfunc = 0, dmask = 0, vp[4] = {0}; float dr[2] = {0};
+        a_glGetIntegerv(0x0B74, &dfunc); a_glGetIntegerv(0x0B72, &dmask); a_glGetIntegerv(0x0BA2, vp);
+        if (getf) getf(0x0B70, dr);
+        fprintf(f, "# depth test %d func 0x%x mask %d range %.6g..%.6g clamp %d blend %d cull %d viewport %d,%d %dx%d\n",
+                isen ? isen(0x0B71) : -1, dfunc, dmask, dr[0], dr[1], isen ? isen(0x864F) : -1,
+                isen ? isen(0x0BE2) : -1, isen ? isen(0x0B44) : -1, vp[0], vp[1], vp[2], vp[3]);
+    }
     if (activetex) {
         int32_t active = 0; a_glGetIntegerv(0x84E0, &active);
         fprintf(f, "# tex2d per unit:");
@@ -14390,6 +14493,7 @@ static const struct { const char *name; void *thunk; void **real; } g_thunks[] =
     {"glActiveTexture", (void *)klfb_ActiveTexture, (void **)&g_real_ActiveTexture},
     {"glUseProgram",  (void *)klfb_UseProgram,  (void **)&g_real_UseProgram},
     {"glGetQueryObjectuiv", (void *)klfb_GetQueryObjectuiv, (void **)&g_real_GetQueryObjectuiv},
+    {"glDepthRangef", (void *)klfb_DepthRangef, (void **)&g_real_DepthRangef},
     {"glBindTexture", (void *)klfb_BindTexture, (void **)&g_real_BindTexture},
     {"glTexBuffer",      (void *)klfb_TexBuffer,      (void **)&g_real_TexBuffer},
     {"glTexBufferRange", (void *)klfb_TexBufferRange, (void **)&g_real_TexBufferRange},
