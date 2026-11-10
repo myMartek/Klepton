@@ -4263,8 +4263,46 @@ static void klfb_vfx_mark(uint32_t program) {
     }
     klfb_vfx_mark_names(program);
 }
+// Depth clamp for a guest that runs reverse-Z through GL_EXT_clip_control.
+//
+// SourceVR's engine, given the name, reverses its depth (float buffer, GEQUAL,
+// clip range 0..1) — and Half-Life 2's 2D sky is then not drawn at all: black
+// above City 17's plaza on the headset and in the Mac host run alike, there
+// again with `-noreversez`, and every hardware occlusion query answers 0
+// (50000 of 50000 in the headset log, so no glow or flare either). The sky box
+// and the query proxies sit ON the far plane, which under reverse-Z is z = 0,
+// and Metal clips what lands a hair beyond it where a Quest's driver does not.
+// With GL_DEPTH_CLAMP_EXT (ANGLE's Metal backend has it: MTLDepthClipModeClamp)
+// the fragments are kept and their depth is clamped: sky back, 7 of the first
+// 200 queries zero instead of all (Mac host run, 2026-11-10). The engine does
+// not know the extension, so nothing else switches it; it is enabled here, in
+// every context that draws (the guest's contexts are several and handed
+// around, so it is asked for again every 64 draws of a thread — a no-op when
+// set). Only where the reverse-Z name was actually handed over: the Portal
+// profiles have it withheld and are left alone. KL_GL_DEPTH_CLAMP=0/1.
+static void klfb_depth_clamp_tick(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        extern int kl_gl_cap_has_adopted(const char *name);
+        const char *t = kl_driver_target_name();
+        int v = kl_env_on("KL_GL_DEPTH_CLAMP", t && strncmp(t, "sourcevr-", 9) == 0 &&
+                                               kl_gl_cap_has_adopted("GL_EXT_clip_control"));
+        if (v) fprintf(stderr, "  [glfb] GL_DEPTH_CLAMP_EXT is on in every drawing context: the guest's "
+                               "reverse-Z puts its sky and its occlusion queries on the far plane, and "
+                               "Metal clips them there (KL_GL_DEPTH_CLAMP=0 turns it off)\n");
+        on = v;
+    }
+    if (!on) return;
+    static _Thread_local unsigned n;
+    if ((n++ & 63) != 0) return;
+    static void (*en)(uint32_t);
+    if (!en) en = asym("glEnable");
+    if (en) en(0x864F /* GL_DEPTH_CLAMP_EXT */);
+}
 // In each draw thunk: a marked program's draw does not happen.
 #define KLFB_VFX_SKIP() do { \
+        klfb_depth_clamp_tick(); \
         if (g_cur_prog < KLFB_VFX_PROGS && g_vfx_prog[g_cur_prog]) { \
             if ((g_vfx_skipped++ & 0x3fff) == 0) \
                 fprintf(stderr, "  [glfb] VFX draws left out so far: %u\n", g_vfx_skipped); \
@@ -12756,6 +12794,7 @@ static void (*g_real_DrawRangeElementsBaseVertexEXT)(uint32_t, uint32_t, uint32_
 static void klfb_DrawRangeElementsBaseVertex(uint32_t mode, uint32_t start, uint32_t end,
                                              int32_t count, uint32_t type,
                                              const void *indices, int32_t basevertex) {
+    klfb_depth_clamp_tick();
     klfb_apply_vertex_bindings();
     klfb_doctor_set_eye();
     klfb_service_capture();
@@ -14818,6 +14857,54 @@ static uint64_t g_gl_holder;          // who has it, for the message below
 static int g_gl_holder_frame;
 static int g_gl_callback;             // a waiter wants the frame hold back
 static int g_gl_waiters;
+// A call that went on WITHOUT the lock is counted while it runs, and the thread
+// that has the lock waits for it before its own next call. Until 2026-11-10 it
+// was not: Portal 2's headset logs show the miss once per start, at the first
+// map load — the engine's thread holds its frame through a GL-silent stretch of
+// more than 300 ms (mounting the map), the presentation thread goes on without
+// the lock, and the engine's thread, which never gave the lock up, then makes
+// its next calls beside it: "HDRSWITCH: the material system will release and
+// re-upload every live texture" is what follows. Two threads inside ANGLE on
+// one share group, at the moment every texture is specified again — and on one
+// start in three the orange portal's colour ramp sampled black for the whole
+// session (Marcel, 2026-11-10; the per-start black textures of Portal and
+// Half-Life 2 had the same shape). So the miss stays what it was for the
+// thread that waited — it must not freeze — but it is no longer concurrency:
+// whoever holds the lock lets a lock-less call finish first (same 300 ms
+// limit). A frame hold that cannot be taken at all is not run lock-less from
+// end to end any more either: that frame's calls take the lock one by one.
+static int g_gl_lockless;             // calls in flight that gave up waiting
+static _Thread_local int t_gl_lockless;
+static unsigned g_gl_lockless_n, g_gl_lockless_waited;
+static void gl_lock_wait_lockless(void) {
+    if (!__atomic_load_n(&g_gl_lockless, __ATOMIC_RELAXED)) return;
+    unsigned n = __atomic_add_fetch(&g_gl_lockless_waited, 1, __ATOMIC_RELAXED);
+    for (int i = 0; i < 1500 && __atomic_load_n(&g_gl_lockless, __ATOMIC_RELAXED); i++) usleep(200);
+    if (n == 1 || n == 10 || n == 100 || n == 1000)
+        fprintf(stderr, "  [glfb] the GL lock's holder waited for a call that had gone on without it "
+                        "(%u time(s); %u lock-less call(s) so far)\n", n,
+                __atomic_load_n(&g_gl_lockless_n, __ATOMIC_RELAXED));
+}
+// Both ends look before they go: the holder says when it is inside a call, and
+// a thread about to go on without the lock lets that call end first.
+static int g_gl_incall;
+// The holder's calls are counted, so a thread that has already waited out one
+// GL-silent stretch of a hold does not wait 300 ms again for every call it makes
+// during the same stretch (a frame of calls would take minutes): while the count
+// has not moved, the holder is known to be outside GL, and the wait is short.
+static unsigned g_gl_holder_calls;
+static _Thread_local unsigned t_gl_miss_calls;
+static _Thread_local int t_gl_miss_valid;
+static void gl_lock_holder_call_begin(void) {
+    __atomic_add_fetch(&g_gl_holder_calls, 1, __ATOMIC_RELAXED);
+    for (int round = 0; round < 3; round++) {
+        gl_lock_wait_lockless();
+        __atomic_store_n(&g_gl_incall, 1, __ATOMIC_SEQ_CST);
+        if (!__atomic_load_n(&g_gl_lockless, __ATOMIC_SEQ_CST)) return;
+        __atomic_store_n(&g_gl_incall, 0, __ATOMIC_SEQ_CST);
+    }
+    __atomic_store_n(&g_gl_incall, 1, __ATOMIC_SEQ_CST);
+}
 static void gl_lock_enter(void) {
     if (t_gl_holds != 0 && t_gl_frame && t_gl_owned && t_gl_holds == 1 &&
         __atomic_load_n(&g_gl_callback, __ATOMIC_RELAXED)) {
@@ -14831,12 +14918,18 @@ static void gl_lock_enter(void) {
                             "and given up between two calls\n");
         usleep(300);                  // let the waiter in before asking again
     }
-    if (t_gl_holds++ != 0) return;
+    if (t_gl_holds++ != 0) {
+        // A call inside this thread's frame hold: not beside a lock-less one.
+        if (t_gl_holds == 2 && t_gl_owned && t_gl_frame) gl_lock_holder_call_begin();
+        return;
+    }
     uint64_t self = 0;
     pthread_threadid_np(NULL, &self);
     if (pthread_mutex_trylock(&g_gl_lock) == 0) goto got;
     __atomic_fetch_add(&g_gl_waiters, 1, __ATOMIC_RELAXED);
-    for (int i = 0; i < 1500; i++) {
+    int limit = t_gl_miss_valid &&
+                t_gl_miss_calls == __atomic_load_n(&g_gl_holder_calls, __ATOMIC_RELAXED) ? 3 : 1500;
+    for (int i = 0; i < limit; i++) {
         if (pthread_mutex_trylock(&g_gl_lock) == 0) {
             __atomic_fetch_sub(&g_gl_waiters, 1, __ATOMIC_RELAXED);
             goto got;
@@ -14849,12 +14942,29 @@ static void gl_lock_enter(void) {
     goto missed;
 got:
     t_gl_owned = 1;
+    t_gl_miss_valid = 0;
     __atomic_store_n(&g_gl_holder, self, __ATOMIC_RELAXED);
     __atomic_store_n(&g_gl_holder_frame, t_gl_frame, __ATOMIC_RELAXED);
     __atomic_store_n(&g_gl_callback, 0, __ATOMIC_RELAXED);
+    if (!t_gl_frame) gl_lock_holder_call_begin();     // a frame hold is not a call yet
     return;
 missed:
     t_gl_owned = 0;
+    if (__atomic_load_n(&g_gl_holder_frame, __ATOMIC_RELAXED))
+        __atomic_store_n(&g_gl_callback, 1, __ATOMIC_RELAXED);   // still wanted back at the holder's next call
+    t_gl_miss_calls = __atomic_load_n(&g_gl_holder_calls, __ATOMIC_RELAXED);
+    t_gl_miss_valid = 1;
+    if (t_gl_frame) {
+        // The frame hold itself was not to be had: no hold, and each call of
+        // this frame asks for the lock on its own. kl_glfb_frame_leave commits
+        // the frame the way it does after a call-back.
+        t_gl_frame = 0; t_gl_holds = 0; t_gl_called_back = 1;
+    } else {
+        t_gl_lockless = 1;
+        __atomic_add_fetch(&g_gl_lockless, 1, __ATOMIC_SEQ_CST);
+        __atomic_add_fetch(&g_gl_lockless_n, 1, __ATOMIC_RELAXED);
+        for (int i = 0; i < 1500 && __atomic_load_n(&g_gl_incall, __ATOMIC_SEQ_CST); i++) usleep(200);
+    }
     static int said;
     if (__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 12)
         fprintf(stderr, "  [glfb] GL lock not obtained in 300 ms by thread %llu — it goes on without it; "
@@ -14863,13 +14973,23 @@ missed:
                 __atomic_load_n(&g_gl_holder_frame, __ATOMIC_RELAXED) ? "a frame hold" : "a single call");
 }
 static void gl_lock_leave(void) {
-    if (!t_gl_holds || --t_gl_holds != 0) return;
+    if (!t_gl_holds) return;
+    --t_gl_holds;
+    if (t_gl_owned && (t_gl_holds == 0 || (t_gl_holds == 1 && t_gl_frame)))
+        __atomic_store_n(&g_gl_incall, 0, __ATOMIC_SEQ_CST);
+    if (t_gl_holds != 0) return;
     if (t_gl_owned) {
         // Someone is waiting: do not hand over with commands still open.
         if (g_real_Flush && __atomic_load_n(&g_gl_waiters, __ATOMIC_RELAXED) > 0)
             g_real_Flush();
         t_gl_owned = 0;
         pthread_mutex_unlock(&g_gl_lock);
+    } else if (t_gl_lockless) {
+        // The call that went on without the lock is over. Not flushed: a
+        // presentation thread drawing through a silent hold would commit a
+        // command buffer per call.
+        t_gl_lockless = 0;
+        __atomic_sub_fetch(&g_gl_lockless, 1, __ATOMIC_SEQ_CST);
     }
 }
 // KL_GLFB_ERRSCAN on this path too: the trace trampoline is where it lived, and

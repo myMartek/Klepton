@@ -933,7 +933,31 @@ static const kl_gp_word k_mgsvr_forge_binned3[] = {
     { 0x157351c, 0x927f8508, 0x927f8508, "fingerprint only (and x8, x8, #0x7fffffffe, kept)" },
 };
 
+// ---------------------------------------------------------------------------
+// Portal 2 through SourceVR (libserver.so of SourceVRCore 0.1.28, profile
+// portal2): "Node Graph out of Date. Rebuilding..." in the middle of the view
+// at the first visit of every level (Marcel, 2026-11-10).
+//
+// Portal 2 ships no AI node graphs (no .ain in any of its VPKs, no maps/graphs
+// folder), and the port's server is the Half-Life 2 line, which builds a
+// missing graph at the first load of a map, says so with UTIL_CenterPrintAll,
+// and saves it to <write root>/maps/graphs/<map>.ain (81 to 211 bytes for the
+// first seven maps) — so the line shows once per level and never again.
+// `ai_norebuildgraph 1` is NOT the way: a save loaded without a graph ends in
+// "ERROR: Loaded save game with no node graph", which switches the AI off (Mac
+// run, 2026-11-10). So the build stays and only the centre print goes: the
+// string's first character becomes NUL. It is data, not code: the word holds
+// 'k' NUL 'N' 'o' — the tail of the string before it and "No" — and the DevMsg
+// twin with "(%d, %d, %d)" at 0x789a1 is left alone.
+static const kl_gp_word k_sourcevr_p2_nodegraph_print[] = {
+    { 0x9a0f8, 0x6f4e006b, 0x6f00006b, "\"Node Graph out of Date. Rebuilding...\" -> \"\"" },
+};
+
 static const kl_gp_patch k_patches[] = {
+    { "sourcevr-portal2-nodegraph-print", "libserver.so",
+      "the node graph is still built at a level's first visit, without the line in the view",
+      k_sourcevr_p2_nodegraph_print,
+      sizeof k_sourcevr_p2_nodegraph_print / sizeof *k_sourcevr_p2_nodegraph_print },
     { "roboquest-meta-pak-no-mmio", "libUnreal.so",
       "pak bulk data is read, not memory-mapped (mmio.enable's own path): the read-through cannot map it",
       k_roboquest_meta_pak_no_mmio, sizeof k_roboquest_meta_pak_no_mmio / sizeof *k_roboquest_meta_pak_no_mmio },

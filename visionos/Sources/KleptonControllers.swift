@@ -3037,6 +3037,27 @@ enum KLControllerFocus {
     nonisolated(unsafe) private static var started = false
     nonisolated(unsafe) private static var tokens: [NSObjectProtocol] = []
 
+    nonisolated(unsafe) private static var currentChanges = 0
+    nonisolated(unsafe) private static var currentSaid = 0
+    nonisolated(unsafe) private static var currentSaidAt = Date.distantPast
+
+    private static func currentWatch(_ name: Notification.Name, _ text: String) {
+        tokens.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { n in
+            currentChanges += 1
+            let who = (n.object as? GCController)?.vendorName ?? "?"
+            if currentChanges <= 6 {
+                NSLog("[focus] %@ (%@)", text, who)
+                currentSaidAt = Date()
+                currentSaid = currentChanges
+            } else if Date().timeIntervalSince(currentSaidAt) >= 10 {
+                NSLog("[focus] current controller changed %d times in the last %.0f s (last: %@, %@)",
+                      currentChanges - currentSaid, Date().timeIntervalSince(currentSaidAt), text, who)
+                currentSaidAt = Date()
+                currentSaid = currentChanges
+            }
+        })
+    }
+
     static func start() {
         guard !started else { return }
         started = true
@@ -3066,7 +3087,13 @@ enum KLControllerFocus {
         })
         watch(UIScene.willDeactivateNotification, "scene deactivates", scene: true)
         watch(UIScene.didActivateNotification, "scene active", scene: true)
-        watch(.GCControllerDidBecomeCurrent, "controller current")
-        watch(.GCControllerDidStopBeingCurrent, "controller no longer current")
+        // Which controller GameController calls current. With two Sense
+        // controllers it flips with every input report: 260 flips a second in
+        // a Portal 2 headset log (2026-11-10), four NSLog lines each, 67 MB of
+        // log in 13 minutes, all on the main queue. So: the first six changes
+        // as they come (what a focus loss looks like), then a count every ten
+        // seconds.
+        currentWatch(.GCControllerDidBecomeCurrent, "controller current")
+        currentWatch(.GCControllerDidStopBeingCurrent, "controller no longer current")
     }
 }
