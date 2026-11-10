@@ -7044,6 +7044,73 @@ static int klfb_upload_budget(void) {
 }
 static unsigned g_uploads;
 
+
+// KL_GLFB_LM_DARKFILL (on for the SourceVR targets): Source's 8-bit lightmap
+// pages, their darkest step. The engine turns each linear lightmap value into
+// a page byte through a table indexed by the linear value, so the dark end is
+// coarse and PER CHANNEL: everything below the first step is 0, then 5, 7, 9
+// (13-15 in the three bump blocks, which are rescaled). A texel of a shadowed
+// room whose true colour is a dim warm grey - linear (0.0020, 0.0017, 0.0008)
+// - goes up as (14, 0, 0); its neighbour as (14, 14, 0) or (0, 15, 12). After
+// the page's sRGB decode, the lightmap scale and the encode that is about
+// 16/255 of pure red, yellow or cyan next to black: invisible on a 2004
+// monitor, plain to see on the Vision Pro's OLED in a dark room (Half-Life 2's
+// storage room behind the station fence, 2026-11-10 - what was left once the
+// double sRGB encode was gone). The lost value cannot be recovered, but its
+// range is known: a zero beside a small non-zero channel was below the first
+// step, not absent. Such a zero is put at about the middle of that range
+// (0.7 of the texel's smallest non-zero channel, at most 9), which turns the
+// coloured blotch into a dark near-grey one. Only dark texels (largest channel
+// at most 48) with at least one channel present are touched; black stays
+// black. Lightmap pages are recognised as 512x256 SRGB8_ALPHA8 textures fed
+// RGBA bytes at level 0 - the material system's fixed page size.
+static const void *klfb_lm_darkfill(uint32_t target, int32_t level, int32_t w, int32_t h,
+                                    uint32_t format, uint32_t type, const void *pixels) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_GLFB_LM_DARKFILL", t && strncmp(t, "sourcevr-", 9) == 0);
+    }
+    if (!on || !pixels || target != 0x0DE1 || level != 0 || format != 0x1908 || type != 0x1401 ||
+        w <= 0 || h <= 0 || !a_glGetIntegerv)
+        return NULL;
+    int32_t bound = 0, pbo = 0, rowlen = 0; uint32_t tf = 0; int32_t tw = 0, th = 0;
+    a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &bound);
+    if (bound <= 0 || !klfb_tex_info((uint32_t)bound, &tf, &tw, &th) || tf != GL_SRGB8_ALPHA8 ||
+        tw != 512 || th != 256)
+        return NULL;
+    a_glGetIntegerv(0x88EF /* PIXEL_UNPACK_BUFFER_BINDING */, &pbo);
+    a_glGetIntegerv(0x0CF2 /* UNPACK_ROW_LENGTH */, &rowlen);
+    if (pbo || (rowlen && rowlen != w)) return NULL;
+    static __thread uint8_t *buf; static __thread size_t cap;
+    size_t n = (size_t)w * (size_t)h;
+    if (cap < n * 4) {
+        free(buf); buf = malloc(n * 4); cap = buf ? n * 4 : 0;
+        if (!buf) return NULL;
+    }
+    memcpy(buf, pixels, n * 4);
+    size_t changed = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t *q = buf + i * 4;
+        uint8_t mx = q[0] > q[1] ? q[0] : q[1];
+        if (q[2] > mx) mx = q[2];
+        if (!mx || mx > 48 || (q[0] && q[1] && q[2])) continue;
+        uint8_t mn = 255;
+        for (int c = 0; c < 3; c++) if (q[c] && q[c] < mn) mn = q[c];
+        uint8_t z = (uint8_t)((mn * 7 + 5) / 10);
+        if (z > 9) z = 9;
+        if (z < 1) z = 1;
+        for (int c = 0; c < 3; c++) if (!q[c]) q[c] = z;
+        changed++;
+    }
+    static int said;
+    if (changed && said++ < 3)
+        fprintf(stderr, "  [glfb] lightmap page tex %d: %zu of %zu dark texels had a colour channel rounded "
+                        "to zero; filled to mid-step (KL_GLFB_LM_DARKFILL=0 leaves them)\n", bound, changed, n);
+    return changed ? buf : NULL;
+}
+
 static void klfb_TexSubImage2D(uint32_t target, int32_t level, int32_t xoff,
                                int32_t yoff, int32_t w, int32_t h, uint32_t format,
                                uint32_t type, const void *pixels) {
@@ -7091,6 +7158,10 @@ static void klfb_TexSubImage2D(uint32_t target, int32_t level, int32_t xoff,
                 if (o) { fwrite(pixels, 1, (size_t)w * (size_t)h * 4, o); fclose(o); }
             }
         }
+    }
+    {
+        const void *filled = klfb_lm_darkfill(target, level, w, h, format, type, pixels);
+        if (filled) pixels = filled;
     }
     if (g_real_TexSubImage2D)
         g_real_TexSubImage2D(target, level, xoff, yoff, w, h, format, type, pixels);
