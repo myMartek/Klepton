@@ -594,6 +594,44 @@ static void kl_sourcevr_portal_defaults(const char *game, int backdrop, FILE *ou
     }
 }
 
+// The weapon angle. `hlvr_controller_pointer_angle_offset` ("Weapon angle" in
+// the game's VR settings) is 20 by default under Klepton, not the port's 5: the
+// guest patch sourcevr-hl2-weapon-angle-20 (kl_guestpatch.c) moves the ConVar's
+// default and the middle of its slider. A config written before that still
+// archives the old default, and would now read as the slider's +15 end; it is
+// moved to 20 once (marker), so a player who sets 5 afterwards keeps it. Tied
+// to the patch: KL_GUEST_PATCH=0 or its name in KL_GUEST_PATCH_OFF leaves the
+// config alone as well.
+static void kl_sourcevr_weapon_angle(const char *game, FILE *out) {
+    static const char name[] = "hlvr_controller_pointer_angle_offset";
+    if (!kl_env_on("KL_GUEST_PATCH", 1)) return;
+    const char *off = getenv("KL_GUEST_PATCH_OFF");
+    if (off && strstr(off, "sourcevr-hl2-weapon-angle-20")) return;
+    char cfg[1500], marker[1500];
+    snprintf(cfg, sizeof cfg, "%s/cfg/config.cfg", game);
+    snprintf(marker, sizeof marker, "%s/cfg/.avpplay-weapon-angle", game);
+    FILE *f = fopen(cfg, "rb");
+    if (!f) return;               // no config yet: the ConVar's own default applies
+    static char text[65536];
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    if (n >= sizeof text - 1) return;
+    text[n] = 0;
+    char *hit = strstr(text, name);
+    if (!hit) return;
+    char *q1 = strchr(hit, '"'), *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+    if (!q1 || !q2 || q1 - hit > (long)sizeof name + 2) return;
+    if (strtod(q1 + 1, NULL) != 5.0) return;          // not the old default: somebody chose it
+    if (!kl_once(marker)) return;
+    if ((f = fopen(cfg, "wb")) != NULL) {
+        fwrite(text, 1, (size_t)(q1 + 1 - text), f);
+        fputs("20", f);
+        fputs(q2, f);
+        fclose(f);
+        if (out) { fprintf(out, "  [env] SourceVR: weapon angle 5 -> 20 in the config (once; the old default)\n"); fflush(out); }
+    }
+}
+
 void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
     const char *files = kl_jni_files_dir();
     if (!files) files = "";
@@ -803,6 +841,7 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
         // 2026-11-10 shows each portal view drawn into its own 3840x3081
         // target and the game GPU-bound at 17-37 ms a frame with the wizard's
         // depth of 2.
+        if (strcmp(gamedir, "hl2") == 0) kl_sourcevr_weapon_angle(wr, out);
         if (strcmp(gamedir, "portal") == 0)  kl_sourcevr_portal_defaults(wr, 1, out);
         if (strcmp(gamedir, "portal2") == 0) kl_sourcevr_portal_defaults(wr, 0, out);
         // The picture size. The engine writes vr_eye_resolution "2064x2208" — a

@@ -953,7 +953,39 @@ static const kl_gp_word k_sourcevr_p2_nodegraph_print[] = {
     { 0x9a0f8, 0x6f4e006b, 0x6f00006b, "\"Node Graph out of Date. Rebuilding...\" -> \"\"" },
 };
 
+// ---------------------------------------------------------------------------
+// Half-Life 2 through SourceVR (libclient.so of SourceVRCore 0.1.28, profile
+// hl2): the "Weapon angle" slider is centred on 20, not 5.
+//
+// `hlvr_controller_pointer_angle_offset` tilts every weapon in the hand. Its
+// default is 5 and the settings page shows it as a slider of -15..+15 that is
+// `5 - value`: the getter and the setter both carry the 5 as an immediate
+// (fmov #5.0 / fsub), and so the setting can only reach -10..20. 5 is a Quest
+// Touch controller's grip; on the PS VR2 Sense controllers the guns point too
+// high, Marcel had the slider at its -15 stop (value 20) and asked for that to
+// be the middle with the same room either side (2026-11-10: "mein 20 quasi als
+// default ... so dass ich auf 35 oder 5 kommen kann"). So:
+//   - the three immediates become 20.0 (same instruction, imm8 0x14 -> 0x34):
+//     the slider reads 0 at 20 and reaches 5..35;
+//   - the ConVar's default string. Its constructor is handed x23, a "5" it
+//     shares with another ConVar; `mov x2, x23` becomes `adr x2, 0x11b259`,
+//     where the image's read-only data happens to hold the bytes "20\0" (the
+//     only such tail within adr's reach; the word guard below covers the code,
+//     and a different build fails it). "Reset" in the game then gives 20 too.
+// A config that already archived the old 5 is moved once by kl_native.c
+// (kl_sourcevr_weapon_angle). Disassembled with llvm-objdump before and after.
+static const kl_gp_word k_sourcevr_hl2_weapon_angle[] = {
+    { 0x1e3e90, 0x1e229001, 0x1e269001, "slider -> value: fmov s1, #5.0 -> #20.0" },
+    { 0x1e4664, 0x1e229000, 0x1e269000, "value -> slider: fmov s0, #5.0 -> #20.0" },
+    { 0x1e4668, 0x1e229001, 0x1e269001, "value -> slider, no ConVar: fmov s1, #5.0 -> #20.0" },
+    { 0x204dac, 0xaa1703e2, 0x308b2562, "ConVar default: mov x2, x23 (\"5\") -> adr x2, 0x11b259 (\"20\")" },
+};
+
 static const kl_gp_patch k_patches[] = {
+    { "sourcevr-hl2-weapon-angle-20", "libclient.so",
+      "the weapon angle's default and the middle of its slider are 20 (PS VR2 Sense grip), range 5..35",
+      k_sourcevr_hl2_weapon_angle,
+      sizeof k_sourcevr_hl2_weapon_angle / sizeof *k_sourcevr_hl2_weapon_angle },
     { "sourcevr-portal2-nodegraph-print", "libserver.so",
       "the node graph is still built at a level's first visit, without the line in the view",
       k_sourcevr_p2_nodegraph_print,
