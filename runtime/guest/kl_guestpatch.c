@@ -953,7 +953,60 @@ static const kl_gp_word k_sourcevr_p2_nodegraph_print[] = {
     { 0x9a0f8, 0x6f4e006b, 0x6f00006b, "\"Node Graph out of Date. Rebuilding...\" -> \"\"" },
 };
 
+// ---------------------------------------------------------------------------
+// Half-Life 2 through SourceVR (SourceVRCore 0.1.28, profile hl2): three of the
+// port's defaults, as Marcel plays it on the PS VR2 Sense controllers
+// (2026-11-10). All three are ConVar defaults, and a ConVar's default is a
+// string its constructor is handed in x2 — here always `mov x2, xN` from a
+// register that holds a "0" or "5" shared with other ConVars. The move becomes
+// `adr x2, <address>` of a string with the wanted text that the image's
+// read-only data already holds within adr's reach (a NUL-terminated tail is
+// enough). The word guards cover the code; a different build fails them and is
+// left alone. New installs and the game's own "reset" then give these values;
+// a config that archived the old default is moved once by kl_native.c
+// (kl_sourcevr_default_once). Each word disassembled with llvm-objdump before
+// and after.
+//
+// (1) The weapon angle, `hlvr_controller_pointer_angle_offset` ("tilts every
+// weapon in your hand"): 27, not 5. 5 is a Quest Touch controller's grip; on
+// the Sense controllers the guns point too high. The settings page shows the
+// value as a slider of -15..+15 that is `5 - value` — the getter and the setter
+// carry the 5 as an immediate (fmov #5.0 / fsub) — so it only reaches -10..20.
+// He first had it at the -15 stop (20), asked for that to be the middle with
+// the same room either side ("so dass ich auf 35 oder 5 kommen kann"), and
+// with that room settled on 27 ("Das ist nun am besten"). So the three
+// immediates become 27.0 (imm8 0x14 -> 0x3b; the slider reads 0 at 27 and
+// reaches 12..42) and the default string is the "27\0" at 0x12e18d.
+static const kl_gp_word k_sourcevr_hl2_weapon_angle[] = {
+    { 0x1e3e90, 0x1e229001, 0x1e277001, "slider -> value: fmov s1, #5.0 -> #27.0" },
+    { 0x1e4664, 0x1e229000, 0x1e277000, "value -> slider: fmov s0, #5.0 -> #27.0" },
+    { 0x1e4668, 0x1e229001, 0x1e277001, "value -> slider, no ConVar: fmov s1, #5.0 -> #27.0" },
+    { 0x204dac, 0xaa1703e2, 0x30949f02, "ConVar default: mov x2, x23 (\"5\") -> adr x2, 0x12e18d (\"27\")" },
+};
+// (2) `hlvr_highlight_grabbables` (the outline on what can be picked up): on.
+// libclient.so; the default "0" in x20 becomes the "1" at 0x1ab39e.
+static const kl_gp_word k_sourcevr_hl2_highlight[] = {
+    { 0x1fb1e0, 0xaa1403e2, 0x50d80de2, "ConVar default: mov x2, x20 (\"0\") -> adr x2, 0x1ab39e (\"1\")" },
+};
+// (3) `hlvr_gravity_gloves` (pull things to the hand from a distance): on. This
+// ConVar is the server's — libserver.so; the default "0" in x20 becomes the
+// "1" at 0x215e49.
+static const kl_gp_word k_sourcevr_hl2_gravity_gloves[] = {
+    { 0x2c1418, 0xaa1403e2, 0x30aa5182, "ConVar default: mov x2, x20 (\"0\") -> adr x2, 0x215e49 (\"1\")" },
+};
+
 static const kl_gp_patch k_patches[] = {
+    { "sourcevr-hl2-weapon-angle", "libclient.so",
+      "the weapon angle's default and the middle of its slider are 27 (PS VR2 Sense grip), range 12..42",
+      k_sourcevr_hl2_weapon_angle,
+      sizeof k_sourcevr_hl2_weapon_angle / sizeof *k_sourcevr_hl2_weapon_angle },
+    { "sourcevr-hl2-highlight-on", "libclient.so",
+      "the outline on things that can be picked up is on by default",
+      k_sourcevr_hl2_highlight, sizeof k_sourcevr_hl2_highlight / sizeof *k_sourcevr_hl2_highlight },
+    { "sourcevr-hl2-gravity-gloves-on", "libserver.so",
+      "gravity gloves are on by default",
+      k_sourcevr_hl2_gravity_gloves,
+      sizeof k_sourcevr_hl2_gravity_gloves / sizeof *k_sourcevr_hl2_gravity_gloves },
     { "sourcevr-portal2-nodegraph-print", "libserver.so",
       "the node graph is still built at a level's first visit, without the line in the view",
       k_sourcevr_p2_nodegraph_print,
