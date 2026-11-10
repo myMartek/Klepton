@@ -594,22 +594,24 @@ static void kl_sourcevr_portal_defaults(const char *game, int backdrop, FILE *ou
     }
 }
 
-// The weapon angle. `hlvr_controller_pointer_angle_offset` ("Weapon angle" in
-// the game's VR settings) is 20 by default under Klepton, not the port's 5: the
-// guest patch sourcevr-hl2-weapon-angle-20 (kl_guestpatch.c) moves the ConVar's
-// default and the middle of its slider. A config written before that still
-// archives the old default, and would now read as the slider's +15 end; it is
-// moved to 20 once (marker), so a player who sets 5 afterwards keeps it. Tied
-// to the patch: KL_GUEST_PATCH=0 or its name in KL_GUEST_PATCH_OFF leaves the
-// config alone as well.
-static void kl_sourcevr_weapon_angle(const char *game, FILE *out) {
-    static const char name[] = "hlvr_controller_pointer_angle_offset";
+// Three of Half-Life 2's defaults are different under Klepton (the guest
+// patches sourcevr-hl2-weapon-angle, -highlight-on and -gravity-gloves-on in
+// kl_guestpatch.c move the ConVars' defaults): the weapon angle is 27, the
+// outline on things that can be picked up and the gravity gloves are on. A
+// config written before that still archives the port's old default, and the
+// engine reads the config after the ConVar is made. So such a value is moved
+// to the new default — once per setting (marker), and only where it still IS
+// the old default, so a player who chooses the old value afterwards keeps it.
+// Tied to the patch: KL_GUEST_PATCH=0, or the patch's name in
+// KL_GUEST_PATCH_OFF, leaves the config alone as well.
+static void kl_sourcevr_default_once(const char *game, const char *name, double was, const char *now,
+                                     const char *marker_name, const char *patch, FILE *out) {
     if (!kl_env_on("KL_GUEST_PATCH", 1)) return;
     const char *off = getenv("KL_GUEST_PATCH_OFF");
-    if (off && strstr(off, "sourcevr-hl2-weapon-angle-20")) return;
+    if (off && strstr(off, patch)) return;
     char cfg[1500], marker[1500];
     snprintf(cfg, sizeof cfg, "%s/cfg/config.cfg", game);
-    snprintf(marker, sizeof marker, "%s/cfg/.avpplay-weapon-angle", game);
+    snprintf(marker, sizeof marker, "%s/cfg/%s", game, marker_name);
     FILE *f = fopen(cfg, "rb");
     if (!f) return;               // no config yet: the ConVar's own default applies
     static char text[65536];
@@ -617,18 +619,27 @@ static void kl_sourcevr_weapon_angle(const char *game, FILE *out) {
     fclose(f);
     if (n >= sizeof text - 1) return;
     text[n] = 0;
-    char *hit = strstr(text, name);
-    if (!hit) return;
-    char *q1 = strchr(hit, '"'), *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
-    if (!q1 || !q2 || q1 - hit > (long)sizeof name + 2) return;
-    if (strtod(q1 + 1, NULL) != 5.0) return;          // not the old default: somebody chose it
+    // The setting's own line: the name at the start of a line, then a blank and the quoted value.
+    size_t nl = strlen(name);
+    char *hit = text;
+    for (;;) {
+        hit = strstr(hit, name);
+        if (!hit) return;
+        if ((hit == text || hit[-1] == '\n') && hit[nl] == ' ' && hit[nl + 1] == '"') break;
+        hit += nl;
+    }
+    char *q1 = hit + nl + 1, *q2 = strchr(q1 + 1, '"');
+    if (!q2) return;
+    char *end = NULL;
+    double have = strtod(q1 + 1, &end);
+    if (end == q1 + 1 || have != was) return;         // not the old default: somebody chose it
     if (!kl_once(marker)) return;
     if ((f = fopen(cfg, "wb")) != NULL) {
         fwrite(text, 1, (size_t)(q1 + 1 - text), f);
-        fputs("20", f);
+        fputs(now, f);
         fputs(q2, f);
         fclose(f);
-        if (out) { fprintf(out, "  [env] SourceVR: weapon angle 5 -> 20 in the config (once; the old default)\n"); fflush(out); }
+        if (out) { fprintf(out, "  [env] SourceVR: %s %g -> %s in the config (once; the port's old default)\n", name, was, now); fflush(out); }
     }
 }
 
@@ -841,7 +852,14 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
         // 2026-11-10 shows each portal view drawn into its own 3840x3081
         // target and the game GPU-bound at 17-37 ms a frame with the wizard's
         // depth of 2.
-        if (strcmp(gamedir, "hl2") == 0) kl_sourcevr_weapon_angle(wr, out);
+        if (strcmp(gamedir, "hl2") == 0) {
+            kl_sourcevr_default_once(wr, "hlvr_controller_pointer_angle_offset", 5, "27",
+                                     ".avpplay-weapon-angle", "sourcevr-hl2-weapon-angle", out);
+            kl_sourcevr_default_once(wr, "hlvr_highlight_grabbables", 0, "1",
+                                     ".avpplay-highlight", "sourcevr-hl2-highlight-on", out);
+            kl_sourcevr_default_once(wr, "hlvr_gravity_gloves", 0, "1",
+                                     ".avpplay-gravity-gloves", "sourcevr-hl2-gravity-gloves-on", out);
+        }
         if (strcmp(gamedir, "portal") == 0)  kl_sourcevr_portal_defaults(wr, 1, out);
         if (strcmp(gamedir, "portal2") == 0) kl_sourcevr_portal_defaults(wr, 0, out);
         // The picture size. The engine writes vr_eye_resolution "2064x2208" — a
