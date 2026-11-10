@@ -555,13 +555,13 @@ static void kl_sourcevr_language(const char *game, FILE *out) {
     if (out) { fprintf(out, "  [env] SourceVR: vr_language \"%s\" (start window: %s)\n", want, tag ? tag : "(unset)"); fflush(out); }
 }
 
-static void kl_sourcevr_portal_defaults(const char *game, FILE *out) {
+static void kl_sourcevr_portal_defaults(const char *game, int backdrop, FILE *out) {
     char path[1500], marker[1500];
-    // The menu backdrop.
+    // The menu backdrop (Portal only: background2 is a Portal map).
     snprintf(marker, sizeof marker, "%s/scripts/.avpplay-chapterbackgrounds", game);
     snprintf(path, sizeof path, "%s/scripts", game);
     kl_mkdir_p(path);
-    if (kl_once(marker)) {
+    if (backdrop && kl_once(marker)) {
         snprintf(path, sizeof path, "%s/scripts/chapterbackgrounds.txt", game);
         FILE *f = fopen(path, "wb");
         if (f) {
@@ -799,7 +799,12 @@ void kl_engine_setenv(const char *libdir, const char *entry_lib, FILE *out) {
             kl_sourcevr_hud_flash_off(root, gamedir, wr, out);
             kl_sourcevr_language(wr, out);
         }
-        if (strcmp(gamedir, "portal") == 0) kl_sourcevr_portal_defaults(wr, out);
+        // Portal 2 takes the recursion default too: its headset log of
+        // 2026-11-10 shows each portal view drawn into its own 3840x3081
+        // target and the game GPU-bound at 17-37 ms a frame with the wizard's
+        // depth of 2.
+        if (strcmp(gamedir, "portal") == 0)  kl_sourcevr_portal_defaults(wr, 1, out);
+        if (strcmp(gamedir, "portal2") == 0) kl_sourcevr_portal_defaults(wr, 0, out);
         // The picture size. The engine writes vr_eye_resolution "2064x2208" — a
         // Quest 3's own panel — into its config at its first exit and from then
         // on starts at that size whatever this headset recommends (the first
