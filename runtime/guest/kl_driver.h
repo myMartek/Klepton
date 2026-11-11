@@ -72,6 +72,11 @@ int kl_driver_boot(FILE *out);
 const char *kl_driver_target_name(void);
 // Moss or Moss: Book II — the targets that share Moss's tuning (kl_driver.c).
 int kl_driver_target_is_moss(void);
+// DeoVR Classic (x2382576078453818), and the AVPro Video host player that
+// only it gets (runtime/media/kl_avpro.m): on for DeoVR unless KL_AVPRO_HOST=0,
+// off for every other target whatever the variable says.
+int kl_driver_target_is_deovr(void);
+int kl_driver_deovr_avpro(void);
 // The profile for untested games (kl_driver.c): 1 for a store title (x<app id>)
 // that is not in kl_tuned.h, unless KL_UNTESTED says otherwise.
 int kl_untested_profile(void);

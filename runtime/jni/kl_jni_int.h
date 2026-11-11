@@ -209,6 +209,11 @@ const klj_binding *klj_firebase_binding(const char *cls, const char *name, const
 const klj_binding *klj_vivox_binding(const char *cls, const char *name, const char *sig);
 const klj_binding *klj_vertigo_binding(const char *cls, const char *name, const char *sig);
 const klj_binding *klj_ghosttown_binding(const char *cls, const char *name, const char *sig);
+// One title's own TABLE, walked after the shared ones with the same exact /
+// loose / widened rules: NULL for every target but DeoVR Classic, whose AVPro
+// Video Manager methods are answered by the host player (runtime/media/
+// kl_avpro.m). VRChat and others ship the same plugin; they keep the old path.
+const klj_binding *klj_avpro_table(void);
 // The UnityPlayer if a lifecycle call has made it, NULL before — for a caller on
 // another thread, which must not be the one to make it (kl_jni_softinput.c).
 void *klj_unity_player_made(void);

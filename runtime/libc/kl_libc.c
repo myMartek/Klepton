@@ -1903,6 +1903,32 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
             break;
         }
     }
+    // DeoVR Classic (community fix 100) makes an "Interactive" folder at its
+    // data container's root (/…/Containers/Data/Application/<UUID>/Interactive),
+    // which is not writable on visionOS, and also names it relative. Both are
+    // served from the container's Documents. Any other title keeps its paths.
+    {
+        extern int kl_driver_target_is_deovr(void);
+        if (kl_driver_target_is_deovr()) {
+            const char *inter = strstr(path, "/Interactive");
+            if (inter && (inter[12] == '\0' || inter[12] == '/') &&
+                strstr(path, "/Containers/Data/Application/") && !strstr(path, "/Documents/")) {
+                snprintf(buf, cap, "%.*s/Documents%s", (int)(inter - path), path, inter);
+                return buf;
+            }
+            if ((strcmp(path, "Interactive") == 0 || strncmp(path, "Interactive/", 12) == 0) &&
+                g_ext_target[0]) {
+                char dir[1024];
+                snprintf(dir, sizeof dir, "%s", g_ext_target);
+                char *slash = strrchr(dir, '/');
+                if (slash) {
+                    *slash = '\0';
+                    snprintf(buf, cap, "%s/%s", dir, path);
+                    return buf;
+                }
+            }
+        }
+    }
     if (path[0] != '/') return KL_GP_PASS();
     size_t alen = strlen(g_apk_prefix);
     if (alen && strncmp(path, g_apk_prefix, alen) == 0 && path[alen] == '/') {

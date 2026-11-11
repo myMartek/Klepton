@@ -27,6 +27,8 @@
 #include "kl_openxr.h"   // the XR surface-swapchain seam, for ANativeWindow_fromSurface
 #include "kl_ovrp.h"
 #include "kl_extension.h"
+#include "kl_driver.h"    // DeoVR's own NDK answers (g_ndk_deovr)
+#include "kl_mediandk.h"  // AHardwareBuffer_describe
 
 // ================================================================== ALooper
 enum {
@@ -326,10 +328,47 @@ void *kl_ndk_window_new(int32_t w, int32_t h, int32_t format, void *owner) {
     return nw;
 }
 
+// The windows ANativeWindow_toSurface has wrapped in a Java Surface (DeoVR's
+// AVPro Video, community fix 100). kl_jni_surface_window asks this list before
+// it reads a Surface's data as a SurfaceTexture; a list rather than a magic in
+// the window, so that no other Surface's data is ever dereferenced to find out.
+#define KL_SURFACE_WINDOWS 32
+static const void *g_surface_windows[KL_SURFACE_WINDOWS];
+static int g_nsurface_windows;
+static pthread_mutex_t g_surface_windows_mu = PTHREAD_MUTEX_INITIALIZER;
+
+int kl_ndk_surface_window(const void *win) {
+    if (!win || !__atomic_load_n(&g_nsurface_windows, __ATOMIC_ACQUIRE)) return 0;
+    int found = 0;
+    pthread_mutex_lock(&g_surface_windows_mu);
+    for (int i = 0; i < KL_SURFACE_WINDOWS; i++)
+        if (g_surface_windows[i] == win) { found = 1; break; }
+    pthread_mutex_unlock(&g_surface_windows_mu);
+    return found;
+}
+static void kl_surface_window_list(const void *win, int add) {
+    pthread_mutex_lock(&g_surface_windows_mu);
+    int at = -1;
+    for (int i = 0; i < KL_SURFACE_WINDOWS; i++) {
+        if (g_surface_windows[i] == win) { at = i; break; }
+        if (add && at < 0 && !g_surface_windows[i]) at = i;
+    }
+    if (add && at >= 0 && g_surface_windows[at] != win) {
+        g_surface_windows[at] = win;
+        __atomic_add_fetch(&g_nsurface_windows, 1, __ATOMIC_RELEASE);
+    } else if (!add && at >= 0 && g_surface_windows[at] == win) {
+        g_surface_windows[at] = NULL;
+        __atomic_sub_fetch(&g_nsurface_windows, 1, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&g_surface_windows_mu);
+}
+
 void kl_ndk_window_free(void *win) {
     // g_window is static storage and is the activity's for the life of the
     // process; freeing it would be a wild free, and a guest that releases a
     // surface it did not create is not doing anything unusual.
+    if (win && __atomic_load_n(&g_nsurface_windows, __ATOMIC_ACQUIRE))
+        kl_surface_window_list(win, 0);
     if (win && win != (void *)&g_window) free(win);
 }
 
@@ -372,6 +411,19 @@ static void *kl_ANativeWindow_fromSurface(void *env, void *surface) {
     }
     kl_ANativeWindow_acquire(&g_window);
     return &g_window;
+}
+
+// ANativeWindow_toSurface — a Java Surface whose data is the window. DeoVR's
+// AVPro Video makes an AImageReader, takes its window, and hands the plugin's
+// Java side a Surface of it; ANativeWindow_fromSurface and the host player
+// (kl_avpro.m) find the window again through kl_jni_surface_window. Served to
+// DeoVR only (g_ndk_deovr).
+extern void *klj_new_object_data(const char *class_name, void *data);
+static void *kl_ANativeWindow_toSurface(void *env, void *window) {
+    (void)env;
+    if (!window) return NULL;
+    kl_surface_window_list(window, 1);
+    return klj_new_object_data("android/view/Surface", window);
 }
 
 // Android treats 0 for any parameter as "keep the default". Honour that:
@@ -1096,9 +1148,19 @@ static const struct { const char *name; void *fn; } g_ndk[] = {
 #undef N
 };
 
+// DeoVR Classic's AVPro Video only (community fix 100); every other guest
+// still finds these names unresolved.
+static const struct { const char *name; void *fn; } g_ndk_deovr[] = {
+    {"ANativeWindow_toSurface",  (void *)kl_ANativeWindow_toSurface},
+    {"AHardwareBuffer_describe", (void *)kl_mediandk_buffer_describe},
+};
+
 void *kl_ndk_lookup(const char *name) {
     for (size_t i = 0; i < sizeof g_ndk / sizeof g_ndk[0]; i++)
         if (strcmp(g_ndk[i].name, name) == 0) return g_ndk[i].fn;
+    if (kl_driver_deovr_avpro())
+        for (size_t i = 0; i < sizeof g_ndk_deovr / sizeof g_ndk_deovr[0]; i++)
+            if (strcmp(g_ndk_deovr[i].name, name) == 0) return g_ndk_deovr[i].fn;
     return NULL;
 }
 

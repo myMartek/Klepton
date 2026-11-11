@@ -70,4 +70,16 @@ void kl_mediandk_texture_delete(void *reader);
 int kl_mediandk_texture_selftest(FILE *f);
 void kl_mediandk_report(FILE *f);
 
+// DeoVR Classic's AVPro Video host player (runtime/media/kl_avpro.m) feeds an
+// AImageReader the guest made from the outside: publish one AVFoundation frame
+// (a CVPixelBufferRef) to it, drop what it holds after a seek, and delete it
+// with the player. The reader must be one of ours; anything else is ignored.
+// Nothing else calls these, and the reader rules they bring (see
+// klm_deovr_reader) apply to DeoVR only.
+void kl_mediandk_reader_publish(void *reader, void *pixel_buffer, long long pts_us);
+void kl_mediandk_reader_flush(void *reader);
+void kl_mediandk_reader_delete(void *reader);
+// AHardwareBuffer_describe for a buffer of ours; served to DeoVR only.
+void kl_mediandk_buffer_describe(const void *ahardwarebuffer, void *out_desc);
+
 #endif

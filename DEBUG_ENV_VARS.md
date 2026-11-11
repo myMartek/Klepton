@@ -1262,6 +1262,21 @@ result is gated against the BGRA path by `make vidtex`.
   (2026-10-15), and 0 — the old immediate destroy — for everyone else until
   another title is seen with it. The reader heartbeat also counts latches
   whose pts `went back`.
+- `KL_AVPRO_HOST=0` — (`kl_driver.c` `kl_driver_deovr_avpro`, read by
+  `runtime/media/kl_avpro.m`, `kl_dl.c`, `kl_mediandk.c`, `kl_ndk.c`) DeoVR
+  Classic (x2382576078453818) only: turn off its AVPro Video host player
+  (community fix 100). On by default for DeoVR: the Java half of AVPro Video's
+  `Manager` (MakePlayer, Player_OpenURL, Player_Update, Player_GetState,
+  Player_Seek, …) is answered with an AVPlayer whose new frames go into the
+  reader behind the plugin's own Surface; the plugin's native half is wrapped
+  (renderer told GLES 3.0, its renderer made when missing; offsets of DeoVR's
+  build, checked against `IPlayerRenderer::_instance`); readers keep at most 2
+  (SurfaceTexture) or max_images frames, an empty `acquireLatestImage` says
+  NO_BUFFER_AVAILABLE, a second delete of a reader is ignored, and
+  `ANativeWindow_toSurface`, `AHardwareBuffer_describe` and
+  `AImage_getCropRect` are served. With 0, DeoVR's AVPro Video calls go where
+  they went before (no video). Every other title — VRChat ships the same plugin
+  — never takes this path, whatever the value.
 - `KL_UE4_MEDIA_FRAME_LOCK=0|1` — (`kl_jni_ue4.c`,
   `klj_MP14_getVideoLastFrame`) hold `kl_avdec_frame_lock` while the UE4
   MediaPlayer14 path uploads the decoder's frame into the guest's texture, so

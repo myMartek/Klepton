@@ -568,6 +568,14 @@ void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) 
         kl_egl_set_gles_version(3, 0);
         fprintf(stderr, "  [gl] PutterVR: GLES 3.0 capability profile (ANGLE backend)\n");
     }
+    if (t && !strcmp(t->name, "x2382576078453818")) {
+        // DeoVR Classic: told 3.2, Unity picks its compute-shader paths
+        // (Compute.Shaders.Broadcast.gen.compute, randomWrite/UAV), which the
+        // ANGLE backend does not have, and the picture breaks. Told 3.0, it
+        // stays on the pixel pipelines (community fix 100).
+        kl_egl_set_gles_version(3, 0);
+        fprintf(stderr, "  [gl] DeoVR: GLES 3.0 capability profile (ANGLE backend)\n");
+    }
     // KL_GLES_VERSION=<major>.<minor> — the GLES level described to any guest,
     // for trying a title on the 3.0 profile above without a build.
     {
@@ -593,6 +601,22 @@ const char      *kl_driver_target_name(void) { return g_target ? g_target->name 
 int kl_driver_target_is_moss(void) {
     const char *t = g_target ? g_target->name : NULL;
     return t && (!strcmp(t, "moss") || !strcmp(t, "x4395292760584049"));
+}
+
+int kl_driver_target_is_deovr(void) {
+    const char *t = g_target ? g_target->name : NULL;
+    return t && !strcmp(t, "x2382576078453818");
+}
+
+// Read once the target is known; before that (and for every other title) the
+// answer is no. The variable is an off switch for DeoVR only, so an A/B needs
+// no build, and it can never hand another game's AVPro Video to this path.
+int kl_driver_deovr_avpro(void) {
+    static int on = -1;
+    if (on >= 0) return on;
+    if (!g_target) return 0;
+    on = kl_driver_target_is_deovr() && kl_env_on("KL_AVPRO_HOST", 1);
+    return on;
 }
 
 // ---- The profile for untested games --------------------------------------

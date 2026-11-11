@@ -900,7 +900,11 @@ static klj_val surface_init(void *env, void *cls, const klj_val *a, int n) {
 }
 void *kl_jni_surface_window(void *surface) {
     klj_object *o = klj_as_object(surface);
-    klj_surface_texture *st = o && !strcmp(o->cls, "android/view/Surface") ? surface_texture(o->data) : NULL;
+    if (!o || strcmp(o->cls, "android/view/Surface") != 0) return NULL;
+    // A Surface ANativeWindow_toSurface made of a native window (DeoVR's AVPro
+    // Video only; a pointer compare, so no other Surface's data is read).
+    if (kl_ndk_surface_window(o->data)) return o->data;
+    klj_surface_texture *st = surface_texture(o->data);
     return st && st->reader ? kl_mediandk_texture_window(st->reader) : NULL;
 }
 static klj_val surface_listener(void *env, void *self, const klj_val *a, int n) {

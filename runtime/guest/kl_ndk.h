@@ -47,6 +47,11 @@ void kl_ndk_set_assets_dir(const char *dir);
 void *kl_ndk_window_new(int32_t w, int32_t h, int32_t format, void *owner);
 void  kl_ndk_window_free(void *win);
 void *kl_ndk_window_owner(const void *win);   // NULL for the activity's window
+// 1 if `win` is a window ANativeWindow_toSurface has handed to Java as a
+// Surface and that has not been freed since. Compares pointers only, so it is
+// safe on any Surface's data. ANativeWindow_toSurface is served to DeoVR
+// Classic only, so for every other guest the answer is always 0.
+int   kl_ndk_surface_window(const void *win);
 
 // A producer surface's size is the PRODUCER's, and it is not known until the
 // first frame arrives — AImageReader is created 1x1 and corrected here.
