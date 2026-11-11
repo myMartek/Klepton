@@ -417,6 +417,9 @@ extern const char *kl_driver_target_name(void);
 // Spatial Zombies (x24151641901194680, Unity 6000.6 + OpenXR, SinglePassInstanced):
 // told none of the three names, Unity asked for STEREO_INSTANCING_ON variants its
 // shaders were never built with (~38000 "variant not found" a run) (2026-10-28).
+// Shapelab Max (x25089943080625464) and Shapelab Lite (x27072987655679670), Unity
+// 6000.0.64 + OpenXR with OVRPlugin: a pure black eye picture until told the three
+// names (avp-play issue #115, eye-texture mean 0.00 -> 6.8; with LOCAL_FLOOR 35).
 static int klgl_want_msrtt(void) {
     static int v = -1;
     if (v < 0) {
@@ -430,6 +433,9 @@ static int klgl_want_msrtt(void) {
                                             /* PutterVR: incomplete SinglePassInstanced eye framebuffer. */
                                             strcmp(t, "x24782806838055701") == 0 ||
                                             strcmp(t, "x24151641901194680") == 0 ||
+                                            /* Shapelab Max, Shapelab Lite (issue #115). */
+                                            strcmp(t, "x25089943080625464") == 0 ||
+                                            strcmp(t, "x27072987655679670") == 0 ||
                                             strcmp(t, "x3967680489996895") == 0)));
     }
     return v;

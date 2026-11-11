@@ -245,7 +245,10 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   whose eye framebuffers were incomplete on every frame (a plain pink screen).
   On by default for Spatial Zombies (`x24151641901194680`, Unity 6000.6 +
   OpenXR, SinglePassInstanced) as well: without the names Unity looked for
-  `STEREO_INSTANCING_ON` shader variants the game does not ship.
+  `STEREO_INSTANCING_ON` shader variants the game does not ship. On by
+  default for Shapelab Max (`x25089943080625464`) and Shapelab Lite
+  (`x27072987655679670`), Unity 6000.0 + OpenXR with OVRPlugin: a pure black
+  eye picture without the names (avp-play issue #115).
 - `KL_NET_NO_META=0|1` — (`runtime/libc/kl_shim.c`) names under oculus.com,
   oculuscdn.com, facebook.com, facebook.net, fbcdn.net and meta.com do not
   resolve (`EAI_NONAME`, as on a headset without a network); every other host
@@ -3465,7 +3468,9 @@ front door is a knob, not a build. `build_run_host.sh`'s flags map onto these:
   space (core in OpenXR 1.1; here the pose STAGE has) to an instance created
   with apiVersion >= 1.1. Default 1 for DreamSpace (`x9449316705178989`),
   Fluid (`x6946182742093178`) and Spatial Zombies (`x24151641901194680`), which
-  never began their sessions without it, else 0.
+  never began their sessions without it, and for Shapelab Max/Lite
+  (`x25089943080625464`, `x27072987655679670`; issue #115: refused once, its
+  picture needed it beside `KL_GL_MSRTT`), else 0.
 
   **A pitch alone rotates where the controller points and not where it PIVOTS.**
   The frame turns about the origin the platform gave us, so the point that

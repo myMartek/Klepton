@@ -2967,7 +2967,8 @@ enum { KLXR_REF_SPACE_ANCHOR = 0x6b6c5000, KLXR_ANCHOR_MAX = 64 };
 // OpenXR, api 1.1.54) again: ~2400 refusals, no xrBeginSession, a black picture
 // with its music looping (2026-10-28).
 //   KL_XR_LOCAL_FLOOR=0|1 — default 1 for DreamSpace (x9449316705178989),
-//       Fluid (x6946182742093178) and Spatial Zombies (x24151641901194680),
+//       Fluid (x6946182742093178), Spatial Zombies (x24151641901194680) and
+//       Shapelab Max/Lite (x25089943080625464, x27072987655679670; issue #115),
 //       else 0: a guest that runs today keeps the reference spaces it was given.
 static int klxr_local_floor_on(void) {
     static int on = -1;
@@ -2977,7 +2978,10 @@ static int klxr_local_floor_on(void) {
         on = kl_env_on("KL_XR_LOCAL_FLOOR", t && (!strcmp(t, "x3635172946605196") || !strcmp(t, "x9449316705178989") ||
                                                   !strcmp(t, "x6946182742093178") ||
                                                   !strcmp(t, "x24782806838055701") || /* PutterVR */
-                                                  !strcmp(t, "x24151641901194680")));
+                                                  !strcmp(t, "x24151641901194680") ||
+                                                  /* Shapelab Max, Shapelab Lite (issue #115). */
+                                                  !strcmp(t, "x25089943080625464") ||
+                                                  !strcmp(t, "x27072987655679670")));
     }
     // Core from 1.1 on; before that it is an extension we do not advertise.
     uint64_t v = (uint64_t)g_instance.api_version;
