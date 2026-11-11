@@ -934,6 +934,7 @@ void *klb_dlopen(const char *path, int flags) {
 }
 
 static void *kl_dl_interpose(const char *name, void *real);
+static void *kl_avpro_interpose(const char *name, void *real);
 
 // android_dlopen_ext(path, flags, android_dlextinfo *). With no extension asked
 // for it is dlopen, and that is the only form served. The struct begins with a
@@ -1015,7 +1016,12 @@ void *klb_dlsym(void *handle, const char *name) {
         if (s) return s;
         for (int i = 0; i < g_nimgs; i++) {
             void *v = kl_sym(g_imgs[i].img, name);
-            if (v) return v;
+            if (!v) continue;
+            // DeoVR Classic's AVPro Video host player looks the plugin's own
+            // exports up this way, and must get the same wrappers the handle
+            // path hands out (kl_avpro_interpose). No other title does.
+            if (kl_driver_deovr_avpro()) { void *w = kl_avpro_interpose(name, v); if (w) return w; }
+            return v;
         }
         s = kl_extension_symbol(name);
         if (s) return s;
@@ -1149,6 +1155,205 @@ static void kl_dl_trace_shims(void) {
     kl_shim_override = kl_dl_shim_override;
 }
 
+// ---------------------------------------------------------------------------
+// DeoVR Classic's AVPro Video (community fix 100). DeoVR only, and only while
+// its host player is on (kl_driver_deovr_avpro, KL_AVPRO_HOST): other games
+// ship other builds of libAVProVideo2Native.so (VRChat), and the offsets below
+// are this one build's.
+//
+// The host player (runtime/media/kl_avpro.m) answers the plugin's Java half;
+// these wrappers keep its native half drawing:
+//   - UnityPluginLoad: the plugin is told the renderer is GLES 3.0 (11), so it
+//     makes its OpenGL ES player renderer rather than the null one.
+//   - CreateSurface, AVPPlayerUpdate, AVPPlayerGetTexture: before each, the
+//     plugin's renderer pointer and the class instance are made to agree, and
+//     the renderer is created if there is none (or it is the null renderer).
+//   - AVPPluginGetRenderEventFunction: wrapped so a render event is noticed;
+//     until one has been seen, AVPPlayerUpdate calls the renderer's
+//     UpdatePlayer itself.
+//   - AVPPlayerGetTexture reports the host player's frame size.
+// The sender's DestroySurface wrapper was a pass-through and is not taken.
+#define KL_AVPRO_SO          "libAVProVideo2Native.so"
+#define KL_AVPRO_PLAYER_RENDERER 0xb5f90   // _ZL14playerRenderer (2 words)
+#define KL_AVPRO_UNITY_GRAPHICS  0xb5fa8   // _ZL13unityGraphics
+#define KL_AVPRO_INSTANCE        0xb5fb0   // _ZN15IPlayerRenderer9_instanceE (2 words)
+#define KL_AVPRO_NULL_VTABLE     0xab4b8   // NullPlayerRenderer's vtable
+#define KL_AVPRO_CREATE_INSTANCE 0x42824   // IPlayerRenderer instance factory
+
+int kl_avpro_get_dimensions(int player_id, int *w, int *h);   // kl_avpro.m
+
+// The plugin's base, or NULL when it is not loaded, `real` is not inside it,
+// or it is not the build these offsets were read from.
+static unsigned char *kl_avpro_base(const void *real) {
+    kl_image *img = kl_find_image(KL_AVPRO_SO);
+    if (!img) return NULL;
+    unsigned char *b = (unsigned char *)kl_base(img);
+    size_t span = kl_span(img);
+    if (span < KL_AVPRO_INSTANCE + 2 * sizeof(void *)) return NULL;
+    if (real && ((const unsigned char *)real < b || (const unsigned char *)real >= b + span))
+        return NULL;
+    static int checked, ok;
+    if (!checked) {
+        checked = 1;
+        void *inst = kl_sym(img, "_ZN15IPlayerRenderer9_instanceE");
+        ok = !inst || inst == (void *)(b + KL_AVPRO_INSTANCE);
+        fprintf(stderr, "  [avpro] %s at %p: %s\n", KL_AVPRO_SO, (void *)b,
+                ok ? "offsets of the DeoVR build in use"
+                   : "NOT the DeoVR build (IPlayerRenderer::_instance elsewhere); wrappers off");
+    }
+    return ok ? b : NULL;
+}
+
+static void *kl_avpro_sync_renderer(void) {
+    unsigned char *b = kl_avpro_base(NULL);
+    if (!b) return NULL;
+    void **p_pr = (void **)(b + KL_AVPRO_PLAYER_RENDERER);
+    void **p_inst = (void **)(b + KL_AVPRO_INSTANCE);
+    void *null_vt = (void *)(b + KL_AVPRO_NULL_VTABLE);
+    void *renderer = *p_pr ? *p_pr : *p_inst;
+    if (renderer && *(void **)renderer == null_vt) renderer = NULL;
+    if (!renderer) {
+        void *created[2] = {0, 0};
+        ((void (*)(void *))(b + KL_AVPRO_CREATE_INSTANCE))(created);
+        renderer = created[0];
+        if (renderer) {
+            void **vt = *(void ***)renderer;
+            int (*setup)(void *) = (int (*)(void *))vt[0];
+            int res = setup ? setup(renderer) : -1;
+            fprintf(stderr, "  [avpro] OpenGL ES player renderer made (%p), setup -> %d\n",
+                    renderer, res);
+            p_pr[0] = p_inst[0] = created[0];
+            p_pr[1] = p_inst[1] = created[1];
+        }
+    } else if (!*p_pr && *p_inst) {
+        p_pr[0] = p_inst[0]; p_pr[1] = p_inst[1];
+    } else if (!*p_inst && *p_pr) {
+        p_inst[0] = p_pr[0]; p_inst[1] = p_pr[1];
+    }
+    return renderer;
+}
+
+static void *(*g_avpro_CreateSurface)(void *, void *, int, int, int, int);
+static void *kl_avpro_CreateSurface(void *env, void *clazz, int player, int w, int h, int fmt) {
+    kl_avpro_sync_renderer();
+    void *surface = g_avpro_CreateSurface ? g_avpro_CreateSurface(env, clazz, player, w, h, fmt) : NULL;
+    fprintf(stderr, "  [avpro] CreateSurface(player %d, %dx%d, format %d) -> %p\n",
+            player, w, h, fmt, surface);
+    return surface;
+}
+
+static void (*g_avpro_OnRenderEvent)(int, void *);
+static volatile int g_avpro_render_events;
+static void kl_avpro_OnRenderEvent(int event_id, void *data) {
+    if (!g_avpro_render_events++)
+        fprintf(stderr, "  [avpro] first render event (0x%x)\n", event_id);
+    if (g_avpro_OnRenderEvent) g_avpro_OnRenderEvent(event_id, data);
+}
+
+static void *(*g_avpro_GetRenderEventFunction)(void);
+static void *kl_avpro_GetRenderEventFunction(void) {
+    if (!g_avpro_OnRenderEvent && g_avpro_GetRenderEventFunction)
+        g_avpro_OnRenderEvent = (void (*)(int, void *))g_avpro_GetRenderEventFunction();
+    return (void *)kl_avpro_OnRenderEvent;
+}
+
+static void (*g_avpro_PlayerUpdate)(int);
+static void kl_avpro_PlayerUpdate(int player) {
+    void *renderer = kl_avpro_sync_renderer();
+    if (g_avpro_PlayerUpdate) g_avpro_PlayerUpdate(player);
+    if (renderer && !g_avpro_render_events) {
+        // The renderer's UpdatePlayer(uint32 player), vtable slot 5.
+        void (*update)(void *, uint32_t) = (void (*)(void *, uint32_t))(*(void ***)renderer)[5];
+        if (update) update(renderer, (uint32_t)player);
+    }
+}
+
+static void (*g_avpro_PlayerGetTexture)(int, void *);
+static void kl_avpro_PlayerGetTexture(int player, void *out) {
+    kl_avpro_sync_renderer();
+    if (g_avpro_PlayerGetTexture) g_avpro_PlayerGetTexture(player, out);
+    int w = 0, h = 0;
+    if (out && kl_avpro_get_dimensions(player, &w, &h) && w > 0 && h > 0) {
+        uint32_t *u = out;          // the texture description's width, height
+        u[2] = (uint32_t)w;
+        u[3] = (uint32_t)h;
+    }
+}
+
+// IUnityInterfaces / IUnityGraphics as the plugin sees them: GetRenderer is
+// answered 11 (kUnityGfxRendererOpenGLES30), everything else is Unity's.
+static void (*g_avpro_UnityPluginLoad)(void *);
+static void *(*g_unity_GetInterface)(void *);
+static void *g_avpro_graphics[4];
+static void *g_avpro_interfaces[4];
+
+static int kl_avpro_GetRenderer(void) { return 11; }
+
+static void *kl_avpro_GetInterface(void *guid) {
+    void *real = g_unity_GetInterface ? g_unity_GetInterface(guid) : NULL;
+    static const uint8_t k_graphics[16] = {   // IUnityGraphics
+        0x44, 0xb5, 0xdd, 0xa4, 0x9c, 0x0a, 0xba, 0x7c,
+        0x11, 0x7b, 0xb1, 0x6e, 0x92, 0xd4, 0x5a, 0x8c
+    };
+    if (guid && memcmp(guid, k_graphics, 16) == 0) {
+        if (real) memcpy(g_avpro_graphics, real, sizeof g_avpro_graphics);
+        g_avpro_graphics[0] = (void *)kl_avpro_GetRenderer;
+        return g_avpro_graphics;
+    }
+    return real;
+}
+
+static void kl_avpro_UnityPluginLoad(void *interfaces) {
+    void *passed = interfaces;
+    if (interfaces) {
+        if (!g_unity_GetInterface) {
+            g_unity_GetInterface = (void *(*)(void *))((void **)interfaces)[0];
+            memcpy(g_avpro_interfaces, interfaces, sizeof g_avpro_interfaces);
+            g_avpro_interfaces[0] = (void *)kl_avpro_GetInterface;
+        }
+        passed = g_avpro_interfaces;
+    }
+    if (g_avpro_UnityPluginLoad) g_avpro_UnityPluginLoad(passed);
+    unsigned char *b = kl_avpro_base(NULL);
+    if (!b) return;
+    void **p_ug = (void **)(b + KL_AVPRO_UNITY_GRAPHICS);
+    if (*p_ug && *p_ug != (void *)g_avpro_graphics) {
+        memcpy(g_avpro_graphics, *p_ug, sizeof g_avpro_graphics);
+        g_avpro_graphics[0] = (void *)kl_avpro_GetRenderer;
+        *p_ug = g_avpro_graphics;
+    }
+    fprintf(stderr, "  [avpro] UnityPluginLoad: renderer told GLES 3.0\n");
+}
+
+static void *kl_avpro_interpose(const char *name, void *real) {
+    if (!real || !kl_driver_deovr_avpro()) return NULL;
+    if (strncmp(name, "AVP", 3) != 0 && strcmp(name, "UnityPluginLoad") != 0 &&
+        strncmp(name, "Java_com_renderheads_AVPro_Video_Manager_", 41) != 0)
+        return NULL;
+    if (!kl_avpro_base(real)) return NULL;          // not this plugin, or not this build
+    if (!strcmp(name, "UnityPluginLoad")) {
+        g_avpro_UnityPluginLoad = (void (*)(void *))real;
+        return (void *)kl_avpro_UnityPluginLoad;
+    }
+    if (!strcmp(name, "AVPPlayerUpdate")) {
+        g_avpro_PlayerUpdate = (void (*)(int))real;
+        return (void *)kl_avpro_PlayerUpdate;
+    }
+    if (!strcmp(name, "AVPPlayerGetTexture")) {
+        g_avpro_PlayerGetTexture = (void (*)(int, void *))real;
+        return (void *)kl_avpro_PlayerGetTexture;
+    }
+    if (!strcmp(name, "AVPPluginGetRenderEventFunction")) {
+        g_avpro_GetRenderEventFunction = (void *(*)(void))real;
+        return (void *)kl_avpro_GetRenderEventFunction;
+    }
+    if (!strcmp(name, "Java_com_renderheads_AVPro_Video_Manager_CreateSurface")) {
+        g_avpro_CreateSurface = (void *(*)(void *, void *, int, int, int, int))real;
+        return (void *)kl_avpro_CreateSurface;
+    }
+    return NULL;
+}
+
 static void *kl_dl_interpose(const char *name, void *real) {
     if(real && !strcmp(name,"NativeConfig_SetDepthSubmissionMode")) {
         if(real!=(void *)kl_brink_set_depth) g_brink_set_depth=(void (*)(int))real;
@@ -1159,7 +1364,7 @@ static void *kl_dl_interpose(const char *name, void *real) {
                                             void *, void *))real;
         return (void *)kl_trace_iplHRTFCreate;
     }
-    return NULL;
+    return kl_avpro_interpose(name, real);   // NULL unless DeoVR
 }
 
 int klb_dlclose(void *handle) { (void)handle; return 0; }   // images are never unloaded

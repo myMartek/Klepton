@@ -680,6 +680,36 @@ static void klm_AHardwareBuffer_acquire(void *buf) {
 }
 static void klm_AHardwareBuffer_release(void *buf) { klm_hwbuf_release(buf); }
 
+// AHardwareBuffer_describe — the NDK's AHardwareBuffer_Desc, filled from the
+// pixel buffer behind one of ours. DeoVR's AVPro Video asks before it makes
+// the EGL image of a frame (community fix 100). Served to DeoVR only (see
+// g_media_deovr): every other guest still finds the name unresolved.
+typedef struct {
+    uint32_t width, height, layers, format;
+    uint64_t usage;
+    uint32_t stride, rfu0;
+    uint64_t rfu1;
+} klm_hwbuf_desc;
+
+void kl_mediandk_buffer_describe(const void *buf, void *out_desc) {
+    const klm_hwbuf *h = buf;
+    if (!h || h->magic != KLM_HWBUF_MAGIC || !out_desc) return;
+    CVPixelBufferRef pb = (CVPixelBufferRef)h->pixels;
+    if (!pb) return;
+    klm_hwbuf_desc *d = out_desc;
+    memset(d, 0, sizeof *d);
+    d->width = (uint32_t)CVPixelBufferGetWidth(pb);
+    d->height = (uint32_t)CVPixelBufferGetHeight(pb);
+    d->layers = 1;
+    OSType fmt = CVPixelBufferGetPixelFormatType(pb);
+    d->format = (fmt == kCVPixelFormatType_32BGRA || fmt == kCVPixelFormatType_32RGBA)
+                    ? 1      /* AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM */
+                    : 0x23;  /* AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420 */
+    d->usage = 0x100;        /* AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE */
+    size_t bpr = CVPixelBufferGetBytesPerRow(pb);
+    d->stride = (uint32_t)(bpr >= (size_t)d->width * 4 ? bpr / 4 : d->width);
+}
+
 // ---------------------------------------------------------------------------
 // AImage — one frame, taken off the reader's queue.
 
@@ -725,6 +755,17 @@ static int klm_AImage_getHeight(void *image, int32_t *out) {
     klm_image *im = image;
     if (!im || im->magic != KLM_IMAGE_MAGIC || !out) return AMEDIA_ERROR_INVALID_PARAMETER;
     *out = (int32_t)CVPixelBufferGetHeight((CVPixelBufferRef)im->pixels);
+    return AMEDIA_OK;
+}
+// AImage_getCropRect: the whole frame. DeoVR only (g_media_deovr).
+static int klm_AImage_getCropRect(void *image, void *out_rect) {
+    klm_image *im = image;
+    if (!im || im->magic != KLM_IMAGE_MAGIC || !out_rect) return AMEDIA_ERROR_INVALID_PARAMETER;
+    int32_t *rect = out_rect;   // AImageCropRect: left, top, right, bottom
+    rect[0] = 0;
+    rect[1] = 0;
+    rect[2] = (int32_t)CVPixelBufferGetWidth((CVPixelBufferRef)im->pixels);
+    rect[3] = (int32_t)CVPixelBufferGetHeight((CVPixelBufferRef)im->pixels);
     return AMEDIA_OK;
 }
 // NANOseconds here, microseconds everywhere else in this file. AImage's
@@ -859,6 +900,38 @@ static void *reader_dispatch(void *arg) {
     return NULL;
 }
 
+// DeoVR Classic's AVPro Video host player (community fix 100) brings three
+// reader rules, for DeoVR only — every other guest keeps the old ones:
+//   - a publish keeps at most two frames queued for a SurfaceTexture and at
+//     most the guest's max_images for an AImageReader, instead of 32. 8K
+//     frames are ~134 MB each; 32 of them were about 4 GB.
+//   - acquireLatestImage on an empty queue answers
+//     AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE, as Android does, not UNKNOWN.
+//   - a reader is deleted once: the player and the plugin's own DestroySurface
+//     both delete it, so readers are kept in a list and a second delete of one
+//     that is not listed is ignored.
+static int klm_deovr_reader(void) { return kl_driver_deovr_avpro(); }
+
+#define AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE (-30001)
+#define KLM_LIVE_READERS 64
+static klm_reader *g_live_readers[KLM_LIVE_READERS];
+static pthread_mutex_t g_live_readers_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void klm_reader_listed(klm_reader *r) {
+    pthread_mutex_lock(&g_live_readers_mu);
+    for (int i = 0; i < KLM_LIVE_READERS; i++)
+        if (!g_live_readers[i]) { g_live_readers[i] = r; break; }
+    pthread_mutex_unlock(&g_live_readers_mu);
+}
+static int klm_reader_unlisted(klm_reader *r) {
+    int found = 0;
+    pthread_mutex_lock(&g_live_readers_mu);
+    for (int i = 0; i < KLM_LIVE_READERS; i++)
+        if (g_live_readers[i] == r) { g_live_readers[i] = NULL; found = 1; break; }
+    pthread_mutex_unlock(&g_live_readers_mu);
+    return found;
+}
+
 static int klm_AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format,
                                          uint64_t usage, int32_t max_images,
                                          void **out) {
@@ -884,6 +957,7 @@ static int klm_AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format,
         fprintf(stderr, "  [media] AImageReader: could not start the dispatch "
                         "thread; onImageAvailable will never fire\n");
     }
+    if (klm_deovr_reader()) klm_reader_listed(r);
     *out = r;
     g_reader = r;
     static int serial;
@@ -925,7 +999,10 @@ static int klm_AImageReader_acquireLatestImage(void *reader, void **out) {
     klm_reader *r = reader;
     if (!r || r->magic != KLM_READER_MAGIC || !out) return AMEDIA_ERROR_INVALID_PARAMETER;
     pthread_mutex_lock(&r->lock);
-    if (!r->count) { pthread_mutex_unlock(&r->lock); return AMEDIA_ERROR_UNKNOWN; }
+    if (!r->count) {
+        pthread_mutex_unlock(&r->lock);
+        return klm_deovr_reader() ? AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE : AMEDIA_ERROR_UNKNOWN;
+    }
     while (r->count > 1) {
         CVPixelBufferRelease((CVPixelBufferRef)r->q[r->head].pb);
         r->head = (r->head + 1) % KLM_READER_MAX;
@@ -949,7 +1026,9 @@ static int klm_AImageReader_acquireLatestImage(void *reader, void **out) {
 
 static void klm_AImageReader_delete(void *reader) {
     klm_reader *r = reader;
-    if (!r || r->magic != KLM_READER_MAGIC) return;
+    if (!r) return;
+    if (klm_deovr_reader() && !klm_reader_unlisted(r)) return;   // deleted already
+    if (r->magic != KLM_READER_MAGIC) return;
     pthread_mutex_lock(&r->lock);
     r->running = 0;
     pthread_cond_broadcast(&r->cv);
@@ -978,8 +1057,11 @@ static void klm_AImageReader_delete(void *reader) {
 // Called by the codec when a frame is released with render=true.
 static void klm_reader_publish(klm_reader *r, CVPixelBufferRef pb, int64_t pts_us) {
     if (!r || r->magic != KLM_READER_MAGIC) return;
+    int cap = KLM_READER_MAX;
+    if (klm_deovr_reader())
+        cap = r->is_surface_texture ? 2 : (r->max_images > 0 ? r->max_images : KLM_READER_MAX);
     pthread_mutex_lock(&r->lock);
-    if (r->count == KLM_READER_MAX) {
+    while (r->count >= cap) {
         CVPixelBufferRelease((CVPixelBufferRef)r->q[r->head].pb);
         r->head = (r->head + 1) % KLM_READER_MAX;
         r->count--;
@@ -1009,6 +1091,22 @@ static void klm_reader_publish(klm_reader *r, CVPixelBufferRef pb, int64_t pts_u
     pthread_cond_signal(&r->cv);
     pthread_mutex_unlock(&r->lock);
 }
+
+void kl_mediandk_reader_publish(void *reader, void *pixel_buffer, long long pts_us) {
+    if (pixel_buffer) klm_reader_publish(reader, (CVPixelBufferRef)pixel_buffer, (int64_t)pts_us);
+}
+void kl_mediandk_reader_flush(void *reader) {
+    klm_reader *r = reader;
+    if (!r || r->magic != KLM_READER_MAGIC) return;
+    pthread_mutex_lock(&r->lock);
+    while (r->count) {
+        CVPixelBufferRelease((CVPixelBufferRef)r->q[r->head].pb);
+        r->head = (r->head + 1) % KLM_READER_MAX;
+        r->count--;
+    }
+    pthread_mutex_unlock(&r->lock);
+}
+void kl_mediandk_reader_delete(void *reader) { klm_AImageReader_delete(reader); }
 
 // A frame taken off the texture is not destroyed at once. Destroying it gives
 // its pixel buffer back to the decoder's pool, and VideoToolbox writes a LATER
@@ -1369,8 +1467,12 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     // LES MILLS BODYCOMBAT's VideoPlayer is the same case: with no backpressure it
     // queued a whole clip at once (in=472) into a 16-frame decoder ring and got
     // two frames out — the first stayed on screen (on device, 2026-10-15).
+    // Gloomy Eyes (x2933720383334150) too: its episode credits queued in=249
+    // and in=1467 and got two to six frames out — black, a flash of the Unity
+    // logo, and none of the credits (on device, 2026-11-10).
     c->playback_backpressure=target && (!strcmp(target,"x2249318828413747") ||
-                                        !strcmp(target,"x4015163475201433"));
+                                        !strcmp(target,"x4015163475201433") ||
+                                        !strcmp(target,"x2933720383334150"));
     snprintf(c->mime, sizeof c->mime, "%s", mime ? mime : "");
     pthread_mutex_init(&c->lock, NULL);
     if (mime && !strcmp(mime, "audio/raw")) {
@@ -2078,10 +2180,20 @@ static const struct { const char *name; void *fn; } g_media[] = {
     M("ATrace_endSection",   klm_ATrace_endSection),
 };
 
+// Served to DeoVR Classic's AVPro Video host player only (community fix 100);
+// for every other guest these names stay unresolved, as before.
+static const struct { const char *name; void *fn; } g_media_deovr[] = {
+    M("AImage_getCropRect",       klm_AImage_getCropRect),
+    M("AHardwareBuffer_describe", kl_mediandk_buffer_describe),
+};
+
 void *kl_mediandk_lookup(const char *name) {
     if (!name) return NULL;
     for (size_t i = 0; i < sizeof g_media / sizeof g_media[0]; i++)
         if (!strcmp(g_media[i].name, name)) return g_media[i].fn;
+    if (klm_deovr_reader())
+        for (size_t i = 0; i < sizeof g_media_deovr / sizeof g_media_deovr[0]; i++)
+            if (!strcmp(g_media_deovr[i].name, name)) return g_media_deovr[i].fn;
     return NULL;                // must be able to say no — see the header
 }
 

@@ -245,7 +245,10 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   whose eye framebuffers were incomplete on every frame (a plain pink screen).
   On by default for Spatial Zombies (`x24151641901194680`, Unity 6000.6 +
   OpenXR, SinglePassInstanced) as well: without the names Unity looked for
-  `STEREO_INSTANCING_ON` shader variants the game does not ship.
+  `STEREO_INSTANCING_ON` shader variants the game does not ship. On by
+  default for Shapelab Max (`x25089943080625464`) and Shapelab Lite
+  (`x27072987655679670`), Unity 6000.0 + OpenXR with OVRPlugin: a pure black
+  eye picture without the names (avp-play issue #115).
 - `KL_NET_NO_META=0|1` — (`runtime/libc/kl_shim.c`) names under oculus.com,
   oculuscdn.com, facebook.com, facebook.net, fbcdn.net and meta.com do not
   resolve (`EAI_NONAME`, as on a headset without a network); every other host
@@ -290,11 +293,20 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   them through `KL_GLFB_SSBO_TEX`: without them much of its world was drawn
   with Unity's magenta error shader, and with them alone its shaders use
   read-only storage buffers the ES 3.0 backend cannot compile.
+- `KL_GLFB_INVARIANT=0|1` — (`runtime/gfx/kl_glfb.c`) declare
+  `invariant gl_Position;` in every ES 3 vertex shader, so ANGLE compiles it
+  for Metal with position invariance instead of fast-math and two programs
+  drawing the same surface agree on its depth to the last bit. Without it,
+  passes that must match (a depth fill, then the lit pass under EQUAL/LEQUAL)
+  disagree in places and whole faces flash black. Default 1 for `doom3quest`
+  and `x2933720383334150` (Gloomy Eyes: ground and objects flickering black),
+  else 0.
 - `KL_GLFB_SSBO_TEX=0|1` — (`runtime/gfx/kl_glfb.c`, `kl_glfb_ssbo_tex`) read a
   shader's read-only storage buffers through textures, so shaders built for
   ES 3.1 compile on the ES 3.0 backend; also answers the ES 3.1 storage limits.
-  Default 1 for `x3684804704932159` (Garden of the Sea) and
-  `x2190353671014400` (Arizona Sunshine), else 0.
+  Default 1 for `x3684804704932159` (Garden of the Sea),
+  `x2190353671014400` (Arizona Sunshine), `x8016534201745429` (Space Atlas
+  VR) and `x2933720383334150` (Gloomy Eyes), else 0.
 - `KL_FUTEX_SPURIOUS_MS=<ms>` — (`runtime/libc/kl_libc.c`, the default futex)
   no futex wait sleeps longer than this before coming back as woken, which the
   futex contract allows; a wake that went missing becomes a pause of that
@@ -960,8 +972,9 @@ The guest's own memory management, and the three seams that used to disable it.
 - `KL_FS_SDCARD_OBB=0|1` — serve `/sdcard/Android/obb/<package>/…` (or
   another spelling of external storage) from the directory `getObbDirs()`
   answers, as on a device where they are one directory. Arizona Sunshine opens
-  its OBB a second time by that literal path. Default 1 for
-  `x2190353671014400`, else 0.
+  its OBB a second time by that literal path; Gloomy Eyes loads its episodes
+  from it. Default 1 for `x2190353671014400` (Arizona Sunshine) and
+  `x2933720383334150` (Gloomy Eyes), else 0.
 - `KL_OVRP_GL_ARRAY=0|1` on the legacy path — (`runtime/xr/kl_ovrp.c`,
   `klovrp_setup_eye_array`) also on for Arizona Sunshine (`x2190353671014400`):
   Unity's old Oculus VRDevice is told multiview and texture arrays are
@@ -1013,7 +1026,8 @@ The guest's own memory management, and the three seams that used to disable it.
   shapes), else 0.
 - `KL_GLES_VERSION=<major>.<minor>` — (`runtime/guest/kl_driver.c`) the GLES
   level described to the guest, over the per-title choice (3.2 by default; 3.0
-  for Space Channel, DreamSpace, Catan VR and Gods of Gravity). For trying a
+  for Space Channel, DreamSpace, Catan VR, Gods of Gravity, Space Atlas VR
+  and Gloomy Eyes). For trying a
   title on the 3.0 profile without a build: told 3.0, Unity stays off the ES
   3.1/3.2 paths this backend only translates (compute kernels, the separate
   vertex-format calls, base-vertex draws). Gods of Gravity: under 3.2 its wand
@@ -1248,6 +1262,21 @@ result is gated against the BGRA path by `make vidtex`.
   (2026-10-15), and 0 — the old immediate destroy — for everyone else until
   another title is seen with it. The reader heartbeat also counts latches
   whose pts `went back`.
+- `KL_AVPRO_HOST=0` — (`kl_driver.c` `kl_driver_deovr_avpro`, read by
+  `runtime/media/kl_avpro.m`, `kl_dl.c`, `kl_mediandk.c`, `kl_ndk.c`) DeoVR
+  Classic (x2382576078453818) only: turn off its AVPro Video host player
+  (community fix 100). On by default for DeoVR: the Java half of AVPro Video's
+  `Manager` (MakePlayer, Player_OpenURL, Player_Update, Player_GetState,
+  Player_Seek, …) is answered with an AVPlayer whose new frames go into the
+  reader behind the plugin's own Surface; the plugin's native half is wrapped
+  (renderer told GLES 3.0, its renderer made when missing; offsets of DeoVR's
+  build, checked against `IPlayerRenderer::_instance`); readers keep at most 2
+  (SurfaceTexture) or max_images frames, an empty `acquireLatestImage` says
+  NO_BUFFER_AVAILABLE, a second delete of a reader is ignored, and
+  `ANativeWindow_toSurface`, `AHardwareBuffer_describe` and
+  `AImage_getCropRect` are served. With 0, DeoVR's AVPro Video calls go where
+  they went before (no video). Every other title — VRChat ships the same plugin
+  — never takes this path, whatever the value.
 - `KL_UE4_MEDIA_FRAME_LOCK=0|1` — (`kl_jni_ue4.c`,
   `klj_MP14_getVideoLastFrame`) hold `kl_avdec_frame_lock` while the UE4
   MediaPlayer14 path uploads the decoder's frame into the guest's texture, so
@@ -1260,7 +1289,9 @@ result is gated against the BGRA path by `make vidtex`.
   a local reference the guest drops once its Handler is built; unpinned, its
   slot was recycled and later messages went to the main queue instead of the
   HandlerThread. Default 1 for LES MILLS BODYCOMBAT (x4015163475201433), whose
-  level-start clip showed nothing that way (2026-10-15), else 0.
+  level-start clip showed nothing that way (2026-10-15), and Gloomy Eyes
+  (x2933720383334150), whose episode credits stopped after two or three
+  frames (2026-11-10), else 0.
 - `KL_VTDEC_BGRA=1` — request `kCVPixelFormatType_32BGRA` from VideoToolbox
   and take the IOSurface-pbuffer route into ANGLE instead. The A/B for the
   native path, and the escape hatch should VideoToolbox ever hand back a
@@ -3465,7 +3496,9 @@ front door is a knob, not a build. `build_run_host.sh`'s flags map onto these:
   space (core in OpenXR 1.1; here the pose STAGE has) to an instance created
   with apiVersion >= 1.1. Default 1 for DreamSpace (`x9449316705178989`),
   Fluid (`x6946182742093178`) and Spatial Zombies (`x24151641901194680`), which
-  never began their sessions without it, else 0.
+  never began their sessions without it, and for Shapelab Max/Lite
+  (`x25089943080625464`, `x27072987655679670`; issue #115: refused once, its
+  picture needed it beside `KL_GL_MSRTT`), else 0.
 
   **A pitch alone rotates where the controller points and not where it PIVOTS.**
   The frame turns about the origin the platform gave us, so the point that
@@ -3949,7 +3982,9 @@ except its own control vars (next section).
   is closed by hand. Default 1 for `x2582932495064035` (Real VR Fishing) and
   `x2436558143118760` (Synth Riders) and
   `x157074645514372` (MADiSON VR) and
-  `x2285803881494677` (Gun Club VR, with `KL_UNITY_QUIT_TEARDOWN`), else 0: no
+  `x2285803881494677` (Gun Club VR, with `KL_UNITY_QUIT_TEARDOWN`) and
+  `x2933720383334150` (Gloomy Eyes, with `KL_UNITY_QUIT_TEARDOWN`: its main
+  menu's Exit left a dark picture and the app open), else 0: no
   other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
 - `KL_UNITY_QUIT_TEARDOWN=0|1` — (`runtime/guest/kl_driver.c`) when
   `nativeRender` first answers false, end Unity the way Android does before
@@ -3959,7 +3994,8 @@ except its own control vars (next section).
   `nativeRender` is never called again after it. Default 1 for
   `x2285803881494677` (Gun Club VR build 410: its in-game Exit kept its settings
   across a restart only with the save in front, as its fix was sent in) and
-  `x157074645514372` (MADiSON VR), else 0. Persistence when visionOS force-quits
+  `x157074645514372` (MADiSON VR) and `x2933720383334150` (Gloomy Eyes), else
+  0. Persistence when visionOS force-quits
   the app is not covered.
 - `KL_SYNC_GUEST=1` — drive the guest inline on the compositor thread, i.e.
   P5b's shape before the guest moved to its own thread. The clock P5.4's device numbers were taken

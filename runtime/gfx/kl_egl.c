@@ -124,11 +124,15 @@ static struct { int id, es_bits, samples, depth, stencil; } g_configs[] = {
 #define NCONFIGS ((int)(sizeof g_configs / sizeof g_configs[0]))
 
 typedef struct { int32_t w, h; int pbuffer; void *xr_swapchain; } kl_egl_surface;
-typedef struct { int client_version; int config_id; } kl_egl_context;
+typedef struct { int client_version; int minor_version; int config_id; } kl_egl_context;
 
-static kl_egl_surface g_surfaces[8];
-static kl_egl_context g_contexts[8];
+// Slots are never reused, so these are lifetime counts. Eight of each for every
+// guest, as before; 64 for DeoVR Classic, whose AVPro Video makes a context and
+// surfaces per player and ran out (community fix 100).
+static kl_egl_surface g_surfaces[64];
+static kl_egl_context g_contexts[64];
 static unsigned g_nsurf, g_nctx;
+static unsigned klegl_slots(void) { return kl_driver_target_is_deovr() ? 64u : 8u; }
 // EGL's "current" state is PER THREAD — eglMakeCurrent binds a context to the
 // calling thread, and eglGetCurrentContext/Display/Surface answer for that
 // thread alone. These were process-wide globals, so the last thread to call
@@ -417,6 +421,9 @@ extern const char *kl_driver_target_name(void);
 // Spatial Zombies (x24151641901194680, Unity 6000.6 + OpenXR, SinglePassInstanced):
 // told none of the three names, Unity asked for STEREO_INSTANCING_ON variants its
 // shaders were never built with (~38000 "variant not found" a run) (2026-10-28).
+// Shapelab Max (x25089943080625464) and Shapelab Lite (x27072987655679670), Unity
+// 6000.0.64 + OpenXR with OVRPlugin: a pure black eye picture until told the three
+// names (avp-play issue #115, eye-texture mean 0.00 -> 6.8; with LOCAL_FLOOR 35).
 static int klgl_want_msrtt(void) {
     static int v = -1;
     if (v < 0) {
@@ -430,6 +437,9 @@ static int klgl_want_msrtt(void) {
                                             /* PutterVR: incomplete SinglePassInstanced eye framebuffer. */
                                             strcmp(t, "x24782806838055701") == 0 ||
                                             strcmp(t, "x24151641901194680") == 0 ||
+                                            /* Shapelab Max, Shapelab Lite (issue #115). */
+                                            strcmp(t, "x25089943080625464") == 0 ||
+                                            strcmp(t, "x27072987655679670") == 0 ||
                                             strcmp(t, "x3967680489996895") == 0)));
     }
     return v;
@@ -1892,7 +1902,7 @@ static unsigned klegl_GetConfigAttrib(EGLDisplay dpy, EGLConfig cfg,
 }
 
 static EGLSurface new_surface(int32_t w, int32_t h, int pbuffer) {
-    if (g_nsurf >= sizeof g_surfaces / sizeof g_surfaces[0]) return NULL;
+    if (g_nsurf >= klegl_slots()) return NULL;
     kl_egl_surface *s = &g_surfaces[g_nsurf++];
     s->w = w; s->h = h; s->pbuffer = pbuffer; s->xr_swapchain = NULL;
     return (EGLSurface)s;
@@ -2004,9 +2014,10 @@ static EGLContext klegl_CreateContext(EGLDisplay dpy, EGLConfig cfg,
                                       EGLContext share, const int32_t *attribs) {
     KLEGL_TRACE("eglCreateContext");
     (void)dpy; (void)share;
-    if (g_nctx >= sizeof g_contexts / sizeof g_contexts[0]) return NULL;
+    if (g_nctx >= klegl_slots()) return NULL;
     kl_egl_context *c = &g_contexts[g_nctx++];
     c->client_version = 2;
+    c->minor_version = 0;
     // Remember which config this context was created against so eglQueryContext
     // can answer EGL_CONFIG_ID with an id that round-trips through eglGetConfigs
     // + eglGetConfigAttrib. HL2Q3VR's XR-graphics-binding matches the two to find
@@ -2022,7 +2033,7 @@ static EGLContext klegl_CreateContext(EGLDisplay dpy, EGLConfig cfg,
         if (a[0] == 0x3098 /* EGL_CONTEXT_CLIENT_VERSION / MAJOR_VERSION_KHR */)
             c->client_version = a[1];
         else if (a[0] == 0x30FB /* EGL_CONTEXT_MINOR_VERSION_KHR */)
-            minor = a[1];
+            minor = c->minor_version = a[1];
     }
     fprintf(stderr, "  [egl] context %u = %p, GLES %d.%d (created on t%llu)\n",
             g_nctx - 1, (void *)c, c->client_version, minor, klegl_tid());
@@ -2051,6 +2062,7 @@ static EGLContext klegl_CreateContext(EGLDisplay dpy, EGLConfig cfg,
 #define EGL_CONFIG_ID             0x3028
 #define EGL_CONTEXT_CLIENT_TYPE   0x3097
 #define EGL_CONTEXT_CLIENT_VER    0x3098
+#define EGL_CONTEXT_MINOR_VER     0x30FB
 #define EGL_RENDER_BUFFER         0x3086
 #define EGL_BACK_BUFFER           0x3084
 
@@ -2062,6 +2074,13 @@ static unsigned klegl_QueryContext(EGLDisplay dpy, EGLContext ctx,
     if (!c || !value) { g_error = EGL_BAD_PARAMETER; return EGL_FALSE; }
     switch (attr) {
     case EGL_CONTEXT_CLIENT_VER:  *value = c->client_version; break;
+    // The minor version the context was asked for. DeoVR's AVPro Video asks
+    // (community fix 100); every other guest keeps the unhandled-attribute
+    // answer below until one is seen asking.
+    case EGL_CONTEXT_MINOR_VER:
+        if (!kl_driver_target_is_deovr()) goto unhandled;
+        *value = c->minor_version;
+        break;
     case EGL_CONTEXT_CLIENT_TYPE: *value = EGL_OPENGL_ES_API; break;
     case EGL_RENDER_BUFFER:       *value = EGL_BACK_BUFFER;   break;
     // The config the context was created against (0 for the pre-tracking default,
@@ -2071,6 +2090,7 @@ static unsigned klegl_QueryContext(EGLDisplay dpy, EGLContext ctx,
     case EGL_CONFIG_ID:           *value = c->config_id ? c->config_id
                                                         : g_configs[0].id; break;
     default:
+    unhandled:
         fprintf(stderr, "  [egl] eglQueryContext: unhandled attribute 0x%x\n", attr);
         g_error = 0x3004 /* EGL_BAD_ATTRIBUTE */;
         return EGL_FALSE;
@@ -2102,7 +2122,7 @@ static unsigned klegl_MakeCurrent(EGLDisplay dpy, EGLSurface draw,
     // teardown makes a bogus (EGLContext)0x1 current for an instant; excluding
     // anything outside the array keeps that out of the sticky value.
     if (ctx && (kl_egl_context *)ctx >= g_contexts &&
-        (kl_egl_context *)ctx < g_contexts + (sizeof g_contexts / sizeof g_contexts[0])) {
+        (kl_egl_context *)ctx < g_contexts + klegl_slots()) {
         g_last_real = ctx;
         g_last_real_any = ctx;   // cross-thread sticky for the cinema eye-copy
     }

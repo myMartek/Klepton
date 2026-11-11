@@ -2414,7 +2414,18 @@ static void klovrp_eye_offset(int eye, float *ox, float *oy, float *oz) {
     if (flat < 0) flat = kl_env_on("KL_OVRP_EYE_FLAT", 1);
     if (flat) { *oy = 0.0f; *oz = 0.0f; }
 }
+// What DeoVR Classic's own IPD and eye-height controls set (ovrp_SetUserIPD2,
+// ovrp_SetUserEyeHeight2; community fix 100). The setters are answered for
+// DeoVR only (kl_ovrp_gated_out), so for every other title these stay -1 and
+// change nothing.
+static float s_user_ipd = -1.0f;
+static float s_user_eye_height = -1.0f;
+
 static void klovrp_eye_offset_raw(int eye, float *ox, float *oy, float *oz) {
+    if (s_user_ipd > 0.0f) {
+        *ox = (eye == 1 ? 0.5f : -0.5f) * s_user_ipd; *oy = 0.0f; *oz = 0.0f;
+        return;
+    }
     static float forced = -1.0f;
     if (forced < 0.0f) {
         float v = kl_env_float("KL_OVRP_IPD", 0.0f);
@@ -2478,6 +2489,19 @@ static float klovrp_GetUserIPD(void) {
     return ipd;
 }
 
+// ovrp_SetUserIPD2(float ipd) / ovrp_SetUserIPD(float) — DeoVR Classic's IPD
+// control. The eyes are then this far apart, symmetric, and GetUserIPD2
+// answers it (it derives from the same offsets). A value outside 10..200 mm is
+// ignored. Every other title resolves these names as before (the "ok" stub for
+// the 2-form, the named stub for the other).
+static uint64_t klovrp_SetUserIPD2(float ipd) {
+    ovrp_hit("ovrp_SetUserIPD2");
+    fprintf(stderr, "  [ovrp] SetUserIPD2: %.4f m\n", (double)ipd);
+    if (ipd > 0.01f && ipd < 0.2f) s_user_ipd = ipd;
+    return OVRP_SUCCESS;
+}
+static uint64_t klovrp_SetUserIPD(float ipd) { return klovrp_SetUserIPD2(ipd); }
+
 // ovrp_GetUserEyeHeight2(float* height) — the standing eye height, metres. Unlike
 // the neck-eye distance (which is safely 0), a zero here is NOT survivable under a
 // FloorLevel tracking origin: the guest adds it to y=0 to place the camera, so 0
@@ -2489,9 +2513,19 @@ static float klovrp_GetUserIPD(void) {
 static uint64_t klovrp_GetUserEyeHeight2(float *out) {
     ovrp_hit("ovrp_GetUserEyeHeight2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
+    if (s_user_eye_height > 0.0f) { *out = s_user_eye_height; return OVRP_SUCCESS; }
     float h = kl_env_float("KL_OVRP_EYE_HEIGHT", 1.6f);
     if (!(h > 0.0f && h < 3.0f)) h = 1.6f;
     *out = h;
+    return OVRP_SUCCESS;
+}
+
+// ovrp_SetUserEyeHeight2(float height) — DeoVR Classic's eye-height control;
+// GetUserEyeHeight2 then answers it. Outside 0.5..3 m it is ignored. DeoVR only.
+static uint64_t klovrp_SetUserEyeHeight2(float height) {
+    ovrp_hit("ovrp_SetUserEyeHeight2");
+    fprintf(stderr, "  [ovrp] SetUserEyeHeight2: %.4f m\n", (double)height);
+    if (height > 0.5f && height < 3.0f) s_user_eye_height = height;
     return OVRP_SUCCESS;
 }
 
@@ -13548,6 +13582,9 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetUserIPD2", (void *)klovrp_GetUserIPD2},
     {"ovrp_GetUserEyeHeight2", (void *)klovrp_GetUserEyeHeight2},
     {"ovrp_GetUserIPD", (void *)klovrp_GetUserIPD},
+    {"ovrp_SetUserIPD", (void *)klovrp_SetUserIPD},           // DeoVR only
+    {"ovrp_SetUserIPD2", (void *)klovrp_SetUserIPD2},         // DeoVR only
+    {"ovrp_SetUserEyeHeight2", (void *)klovrp_SetUserEyeHeight2}, // DeoVR only
     {"ovrp_GetAppCpuStartToGpuEndTime2", (void *)klovrp_GetAppCpuStartToGpuEndTime2},
     {"ovrp_GetAdaptiveGpuPerformanceScale2", (void *)klovrp_GetAdaptiveGpuPerformanceScale2},
     {"ovrp_IsPerfMetricsSupported", (void *)klovrp_IsPerfMetricsSupported},
@@ -14190,7 +14227,11 @@ static const char *const g_ovrp_absent[] = {
 // with the name (or says UNSUPPORTED under KL_OVRP_UNANSWERED).
 //   ovrp_GetTrackingCalibratedOrigin — Onward (x2677344882310094), fix 50
 //   ovrp_GetBoundaryConfigured/Geometry2/Geometry3 — KL_OVRP_BOUNDARY
+//   ovrp_SetUserIPD/IPD2/EyeHeight2 — DeoVR Classic (x2382576078453818), fix 100
 static int kl_ovrp_gated_out(const char *name) {
+    if (!strcmp(name, "ovrp_SetUserIPD") || !strcmp(name, "ovrp_SetUserIPD2") ||
+        !strcmp(name, "ovrp_SetUserEyeHeight2"))
+        return !kl_driver_target_is_deovr();
     // The Guardian under KL_OVRP_BOUNDARY: off, these keep their old answers
     // from the name lists below ("no boundary").
     if (!strcmp(name, "ovrp_GetBoundaryConfigured") || !strcmp(name, "ovrp_GetBoundaryGeometry2") ||

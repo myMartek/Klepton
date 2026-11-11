@@ -208,11 +208,16 @@ static klj_val klj_Handler_init(void *env, void *clazz, const klj_val *a, int n)
         // decoder was set up) showed nothing on device that way, 2026-10-15,
         // while the boot clips — sent straight after the Handler was made — played.
         // Moving a message to another thread is a change any game could see,
-        // so KL_JNI_PIN_LOOPER=0|1 is on by default for that title only.
+        // so KL_JNI_PIN_LOOPER=0|1 is on by default for those titles only.
+        // Gloomy Eyes (x2933720383334150): the same Unity VideoPlayer pattern —
+        // its first message after the decoder setup went to the main queue,
+        // the clip stopped after two or three frames and the credits at the
+        // start of an episode were missing (2026-11-10).
         static int pin = -1;
         if (pin < 0) {
             const char *t = kl_driver_target_name();
-            pin = kl_env_on("KL_JNI_PIN_LOOPER", t && strcmp(t, "x4015163475201433") == 0);
+            pin = kl_env_on("KL_JNI_PIN_LOOPER", t && (strcmp(t, "x4015163475201433") == 0 ||
+                                                         strcmp(t, "x2933720383334150") == 0));
         }
         klj_object *lo = klj_as_object(h->looper);
         if (pin && lo && lo->data && strcmp(lo->cls, "android/os/Looper") == 0)
@@ -895,7 +900,11 @@ static klj_val surface_init(void *env, void *cls, const klj_val *a, int n) {
 }
 void *kl_jni_surface_window(void *surface) {
     klj_object *o = klj_as_object(surface);
-    klj_surface_texture *st = o && !strcmp(o->cls, "android/view/Surface") ? surface_texture(o->data) : NULL;
+    if (!o || strcmp(o->cls, "android/view/Surface") != 0) return NULL;
+    // A Surface ANativeWindow_toSurface made of a native window (DeoVR's AVPro
+    // Video only; a pointer compare, so no other Surface's data is read).
+    if (kl_ndk_surface_window(o->data)) return o->data;
+    klj_surface_texture *st = surface_texture(o->data);
     return st && st->reader ? kl_mediandk_texture_window(st->reader) : NULL;
 }
 static klj_val surface_listener(void *env, void *self, const klj_val *a, int n) {

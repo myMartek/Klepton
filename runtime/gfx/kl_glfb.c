@@ -3838,14 +3838,18 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
             // z. Seen as whole 32x32 TILES of the world going black (every
             // fragment in them failing EQUAL) plus a stipple where they nearly
             // agree. Declaring it makes ANGLE emit [[invariant]] and compile with
-            // preserveInvariance. Vertex shaders only, and only for the guest
-            // that needs it; KL_GLFB_INVARIANT=0/1 is the A/B.
+            // preserveInvariance. Vertex shaders only, and only for the guests
+            // that need it; KL_GLFB_INVARIANT=0/1 is the A/B. Gloomy Eyes
+            // (x2933720383334150, Unity 2019.2): ground and objects flickered,
+            // faces going black for an instant and back, from the first scene
+            // of the first episode (owner on the headset, 2026-11-10).
             {
                 static int inv = -1;
                 if (inv < 0) {
                     extern const char *kl_driver_target_name(void);
                     const char *t = kl_driver_target_name();
-                    inv = kl_env_on("KL_GLFB_INVARIANT", t && strcmp(t, "doom3quest") == 0);
+                    inv = kl_env_on("KL_GLFB_INVARIANT", t && (strcmp(t, "doom3quest") == 0 ||
+                                                             strcmp(t, "x2933720383334150") == 0));
                 }
                 if (inv && klfb_shader_type(shader) == 0x8B31 /* GL_VERTEX_SHADER */ &&
                     strncmp(buf, "#version 3", 10) == 0 && !strstr(buf, "invariant gl_Position")) {

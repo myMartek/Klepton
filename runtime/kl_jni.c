@@ -1576,7 +1576,10 @@ static const klj_binding *klj_find_binding(const char *cls, const char *name,
     // fallback.
     const klj_binding *loose = NULL, *wide = NULL;
     int nwide = 0;
-    for (const klj_binding *const *t = klj_binding_tables; *t; t++)
+    // The shared tables, then one title's own (NULL, so nothing, for the rest).
+    const klj_binding *const title[] = { klj_avpro_table(), NULL };
+    for (int pass = 0; pass < 2; pass++)
+    for (const klj_binding *const *t = pass ? title : klj_binding_tables; *t; t++)
         for (const klj_binding *b = *t; b->cls; b++) {
             if (strcmp(b->cls, cls) != 0 || strcmp(b->name, name) != 0) continue;
             if (klj_sig_eq(b->sig, sig)) return b;
@@ -1666,7 +1669,9 @@ static const klj_binding *klj_find_by_name(const char *cls, const char *name,
     const klj_binding *first = NULL;
     const char *seen[16];
     int n = 0;
-    for (const klj_binding *const *t = klj_binding_tables; *t; t++)
+    const klj_binding *const title[] = { klj_avpro_table(), NULL };   // as above
+    for (int pass = 0; pass < 2; pass++)
+    for (const klj_binding *const *t = pass ? title : klj_binding_tables; *t; t++)
         for (const klj_binding *b = *t; b->cls; b++) {
             if (strcmp(b->cls, cls) != 0 || strcmp(b->name, name) != 0) continue;
             int dup = 0;
