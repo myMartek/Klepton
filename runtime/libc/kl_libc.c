@@ -1814,7 +1814,11 @@ static int kl_fs_jar_file(void) {
 // file again by the literal path ("Unable to open archive file:
 // /sdcard/Android/obb/com.vertigogames.azsq/main.21876…obb"), and everything
 // after it — FMOD's banks, the scene — fails, leaving the headset black once
-// the loading logo is gone (2026-10-30). Tied to that target like
+// the loading logo is gone (2026-10-30). Gloomy Eyes (x2933720383334150) loads
+// its episodes as an AssetBundle from the same literal path ("Unable to open
+// archive file: /sdcard/Android/obb/com.arte.gloomy_eyes/main.40…obb", then
+// "Scene 'EP1_QUEST' couldn't be loaded"), so it stays on the loading screen
+// after an episode is picked (2026-11-10). Tied to those targets like
 // KL_FS_REL_SDCARD; a UE4 target's OBB already lives at that path. Returns
 // the length of "/Android/obb/<package>" in `rest` (the path past the storage
 // prefix), or 0.
@@ -1823,7 +1827,8 @@ static size_t kl_fs_sdcard_obb(const char *rest) {
     if (v < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_FS_SDCARD_OBB", t && strcmp(t, "x2190353671014400") == 0);
+        v = kl_env_on("KL_FS_SDCARD_OBB", t && (strcmp(t, "x2190353671014400") == 0 ||
+                                                 strcmp(t, "x2933720383334150") == 0));
     }
     if (!v || strncmp(rest, "/Android/obb/", 13) != 0) return 0;
     const char *pkg = kl_jni_guest_package();

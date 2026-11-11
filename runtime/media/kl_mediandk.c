@@ -1369,8 +1369,12 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     // LES MILLS BODYCOMBAT's VideoPlayer is the same case: with no backpressure it
     // queued a whole clip at once (in=472) into a 16-frame decoder ring and got
     // two frames out — the first stayed on screen (on device, 2026-10-15).
+    // Gloomy Eyes (x2933720383334150) too: its episode credits queued in=249
+    // and in=1467 and got two to six frames out — black, a flash of the Unity
+    // logo, and none of the credits (on device, 2026-11-10).
     c->playback_backpressure=target && (!strcmp(target,"x2249318828413747") ||
-                                        !strcmp(target,"x4015163475201433"));
+                                        !strcmp(target,"x4015163475201433") ||
+                                        !strcmp(target,"x2933720383334150"));
     snprintf(c->mime, sizeof c->mime, "%s", mime ? mime : "");
     pthread_mutex_init(&c->lock, NULL);
     if (mime && !strcmp(mime, "audio/raw")) {

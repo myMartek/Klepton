@@ -1577,7 +1577,9 @@ static int guest_fresh_pose(void) {
 // Exit its sender ran with this and KL_UNITY_QUIT_TEARDOWN (kl_driver.c) for a
 // clean exit with its settings kept (fix 44, 2026-10-15), and MADiSON VR
 // (x157074645514372, Klepton #110), whose in-game Exit its sender saw close
-// cleanly; none run here. Every
+// cleanly; none run here. Gloomy Eyes (x2933720383334150): its main menu's
+// Exit left a dark grey picture standing and the app open, the engine
+// answering false with nothing drawn (owner on the headset, 2026-11-10). Every
 // other guest keeps the loop as it was until a false has been seen to mean the
 // same for it: a game that answers false once and draws on would be ended by
 // this.
@@ -1588,7 +1590,8 @@ static int guest_quit_exits(void) {
         v = kl_env_on("KL_UNITY_QUIT_EXITS", t && (strcmp(t, "x2582932495064035") == 0
                                                    || strcmp(t, "x2436558143118760") == 0
                                                    || strcmp(t, "x157074645514372") == 0
-                                                   || strcmp(t, "x2285803881494677") == 0));
+                                                   || strcmp(t, "x2285803881494677") == 0
+                                                   || strcmp(t, "x2933720383334150") == 0));
     }
     return v;
 }

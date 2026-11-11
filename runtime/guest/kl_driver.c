@@ -115,6 +115,19 @@ static void kl_driver_env_defaults(const kl_target *t) {
         setenv("KL_METAXR_AUDIO_STUB", "1", 0);
         fprintf(stderr, "  [klepton] Space Atlas VR: guest foveation disabled for image-placement test\n");
     }
+    if (!strcmp(t->name, "x2933720383334150")) {
+        // Gloomy Eyes (Unity 2019.2.18f1, build 40). Told GLES 3.2, its episodes
+        // drew objects and scenery in wrong colours and textures, partly rainbow,
+        // and the opening credits incompletely (owner on the headset,
+        // 2026-11-10); its particle shaders also failed to compile on the ES 3.0
+        // backend ("'std430' : invalid layout qualifier", read-only storage
+        // buffers). The ES 3.0 profile keeps Unity off the 3.1/3.2 paths this
+        // backend only translates, and the storage-buffer read path lets the
+        // shaders that still use them compile — the Space Atlas VR pair.
+        setenv("KL_GLES_VERSION", "3.0", 0);
+        setenv("KL_GLFB_SSBO_TEX", "1", 0);
+        fprintf(stderr, "  [klepton] Gloomy Eyes: GLES 3.0 profile, storage buffers read through textures\n");
+    }
     if (!strcmp(t->name, "hl2")) {
         // Validated Half-Life 2 VR configuration (2026-08-31): direct-array multiview
         // + forced eye-RT allocation, single-threaded material queue (threaded wedges
@@ -1168,7 +1181,9 @@ int kl_driver_lifecycle_begin(FILE *out) {
 // wrote nothing, and with TBMPrefs.Save in front of them they were kept across
 // a restart. MADiSON VR (x157074645514372, 1.0.1q3, Klepton #110; its sender's
 // headset) uses pause and teardown only: the preferences save is Gun Club's
-// (kl_mprobe_gunclub_save_preferences). Default on for those two titles,
+// (kl_mprobe_gunclub_save_preferences). Gloomy Eyes (x2933720383334150) the
+// same as MADiSON: pause and teardown, so Unity ends as it would on Android
+// when its main menu's Exit is chosen. Default on for those titles,
 // alongside KL_UNITY_QUIT_EXITS.
 static int unity_quit_teardown(void) {
     static int v = -1;
@@ -1176,7 +1191,8 @@ static int unity_quit_teardown(void) {
         const char *t = kl_driver_target_name();
         v = kl_env_on("KL_UNITY_QUIT_TEARDOWN", t &&
                       (strcmp(t, "x2285803881494677") == 0 ||
-                       strcmp(t, "x157074645514372") == 0));
+                       strcmp(t, "x157074645514372") == 0 ||
+                       strcmp(t, "x2933720383334150") == 0));
     }
     return v;
 }

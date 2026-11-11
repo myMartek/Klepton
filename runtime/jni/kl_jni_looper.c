@@ -208,11 +208,16 @@ static klj_val klj_Handler_init(void *env, void *clazz, const klj_val *a, int n)
         // decoder was set up) showed nothing on device that way, 2026-10-15,
         // while the boot clips — sent straight after the Handler was made — played.
         // Moving a message to another thread is a change any game could see,
-        // so KL_JNI_PIN_LOOPER=0|1 is on by default for that title only.
+        // so KL_JNI_PIN_LOOPER=0|1 is on by default for those titles only.
+        // Gloomy Eyes (x2933720383334150): the same Unity VideoPlayer pattern —
+        // its first message after the decoder setup went to the main queue,
+        // the clip stopped after two or three frames and the credits at the
+        // start of an episode were missing (2026-11-10).
         static int pin = -1;
         if (pin < 0) {
             const char *t = kl_driver_target_name();
-            pin = kl_env_on("KL_JNI_PIN_LOOPER", t && strcmp(t, "x4015163475201433") == 0);
+            pin = kl_env_on("KL_JNI_PIN_LOOPER", t && (strcmp(t, "x4015163475201433") == 0 ||
+                                                         strcmp(t, "x2933720383334150") == 0));
         }
         klj_object *lo = klj_as_object(h->looper);
         if (pin && lo && lo->data && strcmp(lo->cls, "android/os/Looper") == 0)
