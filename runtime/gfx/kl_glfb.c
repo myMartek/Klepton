@@ -21,7 +21,9 @@
 // AAPCS64 layout, then truncate. The int64_t parameters holding obviously
 // 32-bit values are load-bearing; removing the widening silently corrupts the
 // argument after it.
+#include <arm_neon.h>
 #include <dlfcn.h>
+#include <time.h>
 #include <pthread.h>
 #include <errno.h>
 #include <stdio.h>
@@ -7007,21 +7009,60 @@ static int klfb_nomip_filter(uint32_t pname, int32_t param) {
     return out;
 }
 
+// GL_CLAMP_TO_BORDER on a backend without the border-clamp extension.
+//
+// ANGLE's Metal backend here is ES 3.0 without OES/EXT_texture_border_clamp, so
+// a wrap write of CLAMP_TO_BORDER raises INVALID_ENUM and the wrap stays what
+// it was — REPEAT on a fresh texture or sampler. SourceVR's engine believes it
+// has border colour (Quest's ES 3.2 does) and projects the flashlight through
+// effects/flashlight_border.vtf, whose only address flag is "border": the cone
+// then tiles over everything the light's frustum reaches, in every direction
+// (Half-Life 2, Marcel's headset, 2026-11-11). The texture's own rim is black
+// to 3/255, the engine's border colour is black, and the shadow depth texture
+// that takes the same flag wants its rim value outside too — CLAMP_TO_EDGE is
+// what the border would have given. For the SourceVR targets, and only where
+// the backend really lacks the extension. KL_GL_BORDER_AS_EDGE=0/1.
+static int32_t klfb_border_wrap(uint32_t pname, int32_t param) {
+    if (param != 0x812D /* CLAMP_TO_BORDER */) return param;
+    if (pname != 0x2802 && pname != 0x2803 && pname != 0x8072) return param;   // WRAP_S/T/R
+    static int on = -1;
+    if (on < 0) {
+        if (!g_real_exts[0]) return 0x812F;      // not known yet: the edge is always a valid write
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        int lacks = !strstr(g_real_exts, " GL_OES_texture_border_clamp ") &&
+                    !strstr(g_real_exts, " GL_EXT_texture_border_clamp ");
+        on = kl_env_on("KL_GL_BORDER_AS_EDGE", lacks && t && strncmp(t, "sourcevr-", 9) == 0);
+        fprintf(stderr, "  [glfb] wrap CLAMP_TO_BORDER asked for; the backend %s border clamp: %s "
+                        "(KL_GL_BORDER_AS_EDGE)\n", lacks ? "has no" : "has",
+                on ? "written as CLAMP_TO_EDGE" : "handed over unchanged");
+    }
+    if (!on) return param;
+    static unsigned n;
+    unsigned c = __atomic_add_fetch(&n, 1, __ATOMIC_RELAXED);
+    if (c == 10 || c == 100 || c == 1000)
+        fprintf(stderr, "  [glfb] CLAMP_TO_BORDER -> CLAMP_TO_EDGE: %u writes so far\n", c);
+    return 0x812F /* CLAMP_TO_EDGE */;
+}
+
 // The other spellings of the min-filter write. They forward unchanged unless
-// KL_GLFB_NOMIP is on.
+// KL_GLFB_NOMIP is on (and the wrap write above).
 static void (*g_real_TexParameterf)(uint32_t, uint32_t, float);
 static void klfb_TexParameterf(uint32_t target, uint32_t pname, float param) {
     if (pname == 0x2801) param = (float)klfb_nomip_filter(pname, (int32_t)param);
+    if (param == (float)0x812D) param = (float)klfb_border_wrap(pname, 0x812D);   // other float parameters stay floats
     if (g_real_TexParameterf) g_real_TexParameterf(target, pname, param);
 }
 static void (*g_real_SamplerParameteri)(uint32_t, uint32_t, int32_t);
 static void klfb_SamplerParameteri(uint32_t sampler, uint32_t pname, int32_t param) {
     param = klfb_nomip_filter(pname, param);
+    param = klfb_border_wrap(pname, param);
     if (g_real_SamplerParameteri) g_real_SamplerParameteri(sampler, pname, param);
 }
 static void (*g_real_SamplerParameterf)(uint32_t, uint32_t, float);
 static void klfb_SamplerParameterf(uint32_t sampler, uint32_t pname, float param) {
     if (pname == 0x2801) param = (float)klfb_nomip_filter(pname, (int32_t)param);
+    if (param == (float)0x812D) param = (float)klfb_border_wrap(pname, 0x812D);   // other float parameters stay floats
     if (g_real_SamplerParameterf) g_real_SamplerParameterf(sampler, pname, param);
 }
 
@@ -7147,6 +7188,7 @@ static void klfb_TexParameteri(uint32_t target, uint32_t pname, int32_t param) {
     // those calls have to land on the same object the bind did.
     if (target == 0x8D65 /* TEXTURE_EXTERNAL_OES */) target = 0x0DE1;
     param = klfb_nomip_filter(pname, param);
+    param = klfb_border_wrap(pname, param);
     // The depth-texture completeness rule, which needs to know WHICH texture
     // is bound rather than only what was asked for.
     if (target == 0x0DE1 /* TEXTURE_2D */ && a_glGetIntegerv &&
@@ -7490,6 +7532,134 @@ int kl_glfb_is_texture(uint32_t tex) {
     return is ? is(tex) != 0 : 0;
 }
 
+// What a movie upload costs the render thread, said every 300: the path runs
+// inside the guest's frame, so this time comes straight off its rate.
+static void klfb_picture_timing(const struct timespec *a, const struct timespec *b,
+                                int w, int h, const char *how) {
+    static __thread double up_ms, up_worst;
+    static __thread unsigned up_n;
+    double ms = (b->tv_sec - a->tv_sec) * 1e3 + (b->tv_nsec - a->tv_nsec) / 1e6;
+    up_ms += ms;
+    if (ms > up_worst) up_worst = ms;
+    if (++up_n == 300) {
+        fprintf(stderr, "  [glfb] picture uploads %dx%d (%s): %.1f ms mean, %.1f worst (over 300)\n",
+                w, h, how, up_ms / 300, up_worst);
+        up_n = 0; up_ms = 0; up_worst = 0;
+    }
+}
+
+// Swap BGRA to RGBA (or copy), sixteen pixels a step: this runs on the
+// guest's render thread for every new movie frame, and at -O1 the byte loop
+// was not vectorised.
+static void klfb_picture_copy(uint8_t *dst, const uint8_t *s, size_t n, int bgra) {
+    if (!bgra) { memcpy(dst, s, n); return; }
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        uint8x16x4_t px = vld4q_u8(s + i);
+        uint8x16_t b = px.val[0];
+        px.val[0] = px.val[2];
+        px.val[2] = b;
+        vst4q_u8(dst + i, px);
+    }
+    for (; i < n; i += 4) {
+        dst[i] = s[i + 2]; dst[i + 1] = s[i + 1];
+        dst[i + 2] = s[i]; dst[i + 3] = s[i + 3];
+    }
+}
+
+// KL_GLFB_PICTURE_PBO=0|1: a movie frame through a pixel unpack buffer.
+//
+// glTexSubImage2D from client memory lands in ANGLE's replaceRegion, where
+// the CPU writes the pixels into the GPU's own texture layout (and waits for
+// the GPU to let go of the texture first). Measured on Realms of Flow: 48 ms
+// for every 4096x2048 frame — 0.7 GB/s — so a 60 fps movie held the game to
+// about 20 frames a second. From a buffer, ANGLE records a blit instead and
+// the GPU does the layout. The frame is written straight into the mapped
+// buffer (the RGBA swap is that write), and the buffer is orphaned first, so
+// a frame still being blitted is never waited for.
+//
+// Returns 1 done, 0 not taken (the caller uploads as before), -1 failed after
+// the texture was touched. Default 1 for x6062798767111272, else 0.
+static int klfb_picture_pbo(uint32_t tex, int w, int cw, int ch, const void *pixels, int bgra) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_GLFB_PICTURE_PBO", t && strcmp(t, "x6062798767111272") == 0);
+    }
+    if (!on || cw != w) return 0;   // a clipped width would need a row length; not worth it
+    static void (*gen)(int32_t, uint32_t *);
+    static void (*bindbuf)(uint32_t, uint32_t);
+    static void (*data)(uint32_t, intptr_t, const void *, uint32_t);
+    static void *(*map)(uint32_t, intptr_t, intptr_t, uint32_t);
+    static uint8_t (*unmap)(uint32_t);
+    static void (*bind)(uint32_t, uint32_t);
+    static void (*store)(uint32_t, int32_t);
+    static void (*sub)(uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
+                       uint32_t, uint32_t, const void *);
+    if (!gen) {
+        gen = asym("glGenBuffers");
+        bindbuf = asym("glBindBuffer");
+        data = asym("glBufferData");
+        map = asym("glMapBufferRange");
+        unmap = asym("glUnmapBuffer");
+        bind = asym("glBindTexture");
+        store = asym("glPixelStorei");
+        sub = asym("glTexSubImage2D");
+    }
+    if (!gen || !bindbuf || !data || !map || !unmap || !bind || !store || !sub || !a_glGetIntegerv)
+        return 0;
+    // One per thread: the movie plays on the guest's render thread, and a
+    // buffer name belongs to the context current there.
+    static __thread uint32_t pbo;
+    static __thread int dead;
+    if (dead) return 0;
+    if (!pbo) gen(1, &pbo);
+    if (!pbo) { dead = 1; return 0; }
+
+    size_t need = (size_t)w * (size_t)ch * 4;
+    int32_t prev_pbo = 0, prev_tex = 0, align = 4, rowlen = 0;
+    a_glGetIntegerv(0x88EF /* PIXEL_UNPACK_BUFFER_BINDING */, &prev_pbo);
+    a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &prev_tex);
+    a_glGetIntegerv(0x0CF5 /* UNPACK_ALIGNMENT */, &align);
+    a_glGetIntegerv(0x0CF2 /* UNPACK_ROW_LENGTH */, &rowlen);
+    if (a_glGetError) while (a_glGetError()) {}   // only our own errors below
+
+    bindbuf(0x88EC /* PIXEL_UNPACK_BUFFER */, pbo);
+    data(0x88EC, (intptr_t)need, NULL, 0x88E0 /* STREAM_DRAW */);   // orphan
+    uint8_t *dst = map(0x88EC, 0, (intptr_t)need,
+                       0x0002 /* MAP_WRITE */ | 0x0008 /* MAP_INVALIDATE_BUFFER */);
+    int ok = dst != NULL;
+    if (ok) {
+        klfb_picture_copy(dst, pixels, need, bgra);
+        ok = unmap(0x88EC) != 0;
+    }
+    if (ok) {
+        store(0x0CF5, 1);
+        store(0x0CF2, 0);
+        bind(0x0DE1, tex);
+        sub(0x0DE1, 0, 0, 0, cw, ch, 0x1908 /* RGBA */, 0x1401 /* UNSIGNED_BYTE */, (const void *)0);
+        uint32_t err = a_glGetError ? a_glGetError() : 0;
+        static int said;
+        if (said < 2 || err) {
+            if (said < 8) fprintf(stderr, "  [glfb] picture %dx%d -> texture %u through a pixel unpack "
+                                  "buffer, GL error 0x%x (KL_GLFB_PICTURE_PBO=0 to upload from memory)\n",
+                                  cw, ch, tex, err);
+            said++;
+        }
+        bind(0x0DE1, (uint32_t)prev_tex);
+        store(0x0CF2, rowlen);
+        store(0x0CF5, align);
+        if (err) { dead = 1; ok = 0; }
+    } else {
+        fprintf(stderr, "  [glfb] picture: the pixel unpack buffer would not map — "
+                        "uploading from memory from now on\n");
+        dead = 1;
+    }
+    bindbuf(0x88EC, (uint32_t)prev_pbo);
+    return ok ? 1 : 0;
+}
+
 int kl_glfb_upload_picture(uint32_t tex, int w, int h, const void *pixels, int bgra) {
     static void (*bind)(uint32_t, uint32_t);
     static void (*sub)(uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
@@ -7510,6 +7680,15 @@ int kl_glfb_upload_picture(uint32_t tex, int w, int h, const void *pixels, int b
         if (cw > tw) cw = tw;
         if (ch > th) ch = th;
     }
+    struct timespec ts0, ts1;
+    clock_gettime(CLOCK_MONOTONIC, &ts0);
+    int via_pbo = klfb_picture_pbo(tex, w, cw, ch, pixels, bgra);
+    if (via_pbo < 0) return 0;
+    if (via_pbo) {
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        klfb_picture_timing(&ts0, &ts1, cw, ch, "PBO + GPU blit");
+        return 1;
+    }
     // GLES takes RGBA; the decoder's frames are BGRA. Swapped into a buffer
     // kept per thread — a movie plays on one thread, and a frame a tick is a
     // megabyte or eight that should not be allocated each time.
@@ -7523,11 +7702,7 @@ int kl_glfb_upload_picture(uint32_t tex, int w, int h, const void *pixels, int b
             if (!grown) return 0;
             scratch = grown; scratch_n = need;
         }
-        const uint8_t *s = pixels;
-        for (size_t i = 0; i < need; i += 4) {
-            scratch[i] = s[i + 2]; scratch[i + 1] = s[i + 1];
-            scratch[i + 2] = s[i]; scratch[i + 3] = s[i + 3];
-        }
+        klfb_picture_copy(scratch, pixels, need, 1);
         src = scratch;
     }
     int32_t prev = 0, align = 4, rowlen = 0, pbo = 0;
@@ -7545,6 +7720,8 @@ int kl_glfb_upload_picture(uint32_t tex, int w, int h, const void *pixels, int b
     static int said;
     uint32_t before = (said < 4 && a_glGetError) ? a_glGetError() : 0;
     sub(0x0DE1, 0, 0, 0, cw, ch, 0x1908 /* RGBA */, 0x1401 /* UNSIGNED_BYTE */, src);
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    klfb_picture_timing(&ts0, &ts1, cw, ch, "client memory");
     if (said < 4) {
         said++;
         uint32_t err = a_glGetError ? a_glGetError() : 0;

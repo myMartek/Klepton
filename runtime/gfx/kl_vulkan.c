@@ -4612,7 +4612,10 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
     // MSAA, a subpass-input reader): the scene black but for glimpses of
     // models, the UI drawn over it (on device, 2026-10-23; the same picture as
     // its other build, x3151760, on 2026-10-22).
-    //   default 1 for those three titles, else 0
+    // The 7th Guest VR (x5223884527630557, UE 5.2 mobile, 4x MSAA, a
+    // subpass-input reader): from the first frame on, wrong colours and
+    // scattered blocks, the picture in pieces (on device, 2026-11-12).
+    //   default 1 for those four titles, else 0
     static int no_transient = -1;
     if (no_transient < 0) {
         extern const char *kl_driver_target_name(void);
@@ -4620,7 +4623,8 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
         no_transient = kl_env_on("KL_VK_NO_TRANSIENT",
                                  t && (!strcmp(t, "x5767635983306831") ||
                                        !strcmp(t, "x6605328856182465") ||
-                                       !strcmp(t, "x9269393463181825")));
+                                       !strcmp(t, "x9269393463181825") ||
+                                       !strcmp(t, "x5223884527630557")));
     }
     if (ci && (ci->usage & 0x40u) && no_transient) {
         mod = *ci;

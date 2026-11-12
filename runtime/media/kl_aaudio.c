@@ -878,7 +878,29 @@ static void *klaa_input_feeder(void *arg) {
         int32_t frames = s->burst;
         // Fill scratch with captured audio in the guest's format. Bounded wait so
         // the loop still checks `running` about once per burst if the mic stalls.
+        //
+        // KL_AAUDIO_IN_FULL_BURST=1: wait until the burst is really there. One
+        // burst's duration is too short whenever the mic's own period is longer
+        // than the guest's burst: with 480-frame mic buffers every 10 ms against a
+        // 256-frame burst, every second callback came up 32 frames short and was
+        // padded with zeros, so the guest was handed 51200 frames a second as
+        // 48000. A guest that queues its input fell further behind by the second:
+        // Realms of Flow's microphone check answered more than a second late
+        // (community fix 102, 2026-11-12). With it the tail is zeroed only after a
+        // real stall (40 ms, or four bursts if longer), which also bounds how
+        // often `running` is seen. Default 1 for x6062798767111272, the one title
+        // it ran on; else 0 until other microphone users have been heard with it.
+        static int full_burst = -1;
+        if (full_burst < 0) {
+            extern const char *kl_driver_target_name(void);
+            const char *t = kl_driver_target_name();
+            full_burst = kl_env_on("KL_AAUDIO_IN_FULL_BURST", t && strcmp(t, "x6062798767111272") == 0);
+        }
         int64_t budget = (int64_t)frames * 1000000000LL / (s->rate ? s->rate : 48000);
+        if (full_burst) {
+            budget *= 4;
+            if (budget < 40000000LL) budget = 40000000LL;
+        }
         int32_t got = klaa_capture_into(s, s->scratch, frames, budget);
         if (got < frames) {
             // Under-run: zero the tail so the guest never sees stale samples.

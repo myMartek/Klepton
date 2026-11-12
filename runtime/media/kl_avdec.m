@@ -34,6 +34,7 @@
 struct kl_avdec {
     char        path[1024];          // the file actually opened (see slice_out)
     int         width, height;
+    int         out_w, out_h;        // decoder-side scale (0 = native); see avdec_max_width
     long long   duration_ms;
 
     pthread_t       thread;
@@ -163,6 +164,58 @@ static AVAssetTrack *first_video_track(AVAsset *asset) {
     return first_track_of(asset, AVMediaTypeVideo);
 }
 
+// HEVC in an MP4 whose sample entry is 'hev1' rather than 'hvc1'.
+//
+// Both tags mean H.265; they differ only in whether parameter sets may also
+// travel in-band. Apple's decoders are registered for 'hvc1' alone, so for a
+// 'hev1' track AVAssetReader fails with -11833 "Cannot Decode" (underneath:
+// -12906, kVTCouldNotFindVideoDecoderErr) although the hardware decodes the
+// stream fine. Measured on Realms of Flow (x6062798767111272): every movie it
+// ships is 'hev1' Main, High tier, level 6.1, 6K to 8K — its tutorial's 360°
+// backdrop never started and the sphere showed whatever the texture held.
+//
+// The fix is a relabel, not a decoder: open the file as an AVMutableMovie and
+// replace each 'hev1' description by one that is identical (same dimensions,
+// same extensions, the hvcC among them) except for the subtype. AVFoundation
+// then decodes, reorders and seeks as for any other file. Mac-tested: 6K and
+// 8K, BGRA out, presentation order, a seek honoured. KL_AVDEC_HEV1=0 skips it.
+static AVAssetTrack *hev1_as_hvc1(NSURL *url, AVAssetTrack *track, AVAsset **asset) {
+    CMFormatDescriptionRef fd =
+        (__bridge CMFormatDescriptionRef)track.formatDescriptions.firstObject;
+    if (!fd || CMFormatDescriptionGetMediaSubType(fd) != 'hev1') return track;
+    if (!kl_env_on("KL_AVDEC_HEV1", 1)) return track;
+    NSError *err = nil;
+    AVMutableMovie *movie = [AVMutableMovie movieWithURL:url options:nil error:&err];
+    AVMutableMovieTrack *mt = movie
+        ? (AVMutableMovieTrack *)first_track_of(movie, AVMediaTypeVideo) : nil;
+    if (!mt) {
+        fprintf(stderr, "  [avdec] 'hev1' track, and the file would not open as a movie (%s)"
+                " — left as it is, which AVFoundation will not decode\n",
+                err.localizedDescription.UTF8String ?: "?");
+        return track;
+    }
+    int n = 0;
+    for (id o in mt.formatDescriptions) {
+        CMFormatDescriptionRef old = (__bridge CMFormatDescriptionRef)o;
+        if (CMFormatDescriptionGetMediaSubType(old) != 'hev1') continue;
+        CMVideoDimensions dim = CMVideoFormatDescriptionGetDimensions(old);
+        CMFormatDescriptionRef nf = NULL;
+        if (CMVideoFormatDescriptionCreate(kCFAllocatorDefault, kCMVideoCodecType_HEVC,
+                                           dim.width, dim.height,
+                                           CMFormatDescriptionGetExtensions(old),
+                                           &nf) != noErr || !nf)
+            continue;
+        [mt replaceFormatDescription:old withFormatDescription:nf];
+        CFRelease(nf);
+        n++;
+    }
+    fprintf(stderr, "  [avdec] 'hev1' HEVC: %d description(s) relabelled 'hvc1' so the "
+            "decoder takes them (KL_AVDEC_HEV1=0 to skip)\n", n);
+    if (!n) return track;
+    *asset = movie;
+    return mt;
+}
+
 static double now_seconds(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -201,17 +254,24 @@ static void publish(kl_avdec *d, CVPixelBufferRef pb, long long pts_ms) {
 }
 
 static AVAssetReader *make_reader(AVAsset *asset, AVAssetTrack *track,
-                                  CMTime from, NSError **err) {
+                                  CMTime from, int out_w, int out_h, NSError **err) {
     AVAssetReader *r = [AVAssetReader assetReaderWithAsset:asset error:err];
     if (!r) return nil;
     // BGRA out of the decoder rather than the native 4:2:0: UE4 reads this
     // buffer as packed RGBA-family pixels and has no plane handling on this
     // path at all, so the conversion has to happen somewhere and VideoToolbox
     // does it on the way out for free.
-    NSDictionary *settings = @{
+    NSMutableDictionary *settings = [@{
         (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
         (id)kCVPixelBufferMetalCompatibilityKey : @YES,
-    };
+    } mutableCopy];
+    // Scaled by the decoder itself (see avdec_max_width): every later stage —
+    // the copy in publish, the RGBA swap and the upload on the guest's render
+    // thread — then moves the smaller picture.
+    if (out_w > 0 && out_h > 0) {
+        settings[(id)kCVPixelBufferWidthKey] = @(out_w);
+        settings[(id)kCVPixelBufferHeightKey] = @(out_h);
+    }
     AVAssetReaderTrackOutput *out =
         [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track
                                                    outputSettings:settings];
@@ -220,7 +280,11 @@ static AVAssetReader *make_reader(AVAsset *asset, AVAssetTrack *track,
     [r addOutput:out];
     if (CMTIME_IS_VALID(from) && CMTimeGetSeconds(from) > 0)
         r.timeRange = CMTimeRangeMake(from, kCMTimePositiveInfinity);
-    if (![r startReading]) return nil;
+    if (![r startReading]) {
+        // The reader's own error: without it the log said only "?".
+        if (err) *err = r.error;
+        return nil;
+    }
     return r;
 }
 
@@ -229,9 +293,10 @@ static void *decode_thread(void *arg) {
     @autoreleasepool {
         NSURL *url = [NSURL fileURLWithPath:
                           [NSString stringWithUTF8String:d->path]];
-        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+        AVAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
         AVAssetTrack *track = first_video_track(asset);
         if (!track) return NULL;
+        track = hev1_as_hvc1(url, track, &asset);
 
         CMTime start = kCMTimeZero;
         AVAssetReader *reader = nil;
@@ -261,7 +326,7 @@ static void *decode_thread(void *arg) {
 
             if (!reader) {
                 NSError *err = nil;
-                reader = make_reader(asset, track, start, &err);
+                reader = make_reader(asset, track, start, d->out_w, d->out_h, &err);
                 if (!reader) {
                     fprintf(stderr, "  [avdec] the reader could not be started: %s\n",
                             err.localizedDescription.UTF8String ?: "?");
@@ -305,7 +370,26 @@ static void *decode_thread(void *arg) {
                 if (slack > 0) usleep((useconds_t)(slack * 1e6));
 
                 CVImageBufferRef pb = CMSampleBufferGetImageBuffer(sb);
-                if (pb) publish(d, pb, (long long)(pts_s * 1000.0));
+                if (pb) {
+                    // How fast frames actually arrive, said every 300: a movie
+                    // that cannot keep its own rate stutters whatever the
+                    // guest does with the frames.
+                    static __thread double st0, st_pub;
+                    static __thread unsigned st_n, st_late;
+                    double p0 = now_seconds();
+                    if (!st_n) st0 = p0;
+                    if (slack < -0.050) st_late++;
+                    publish(d, pb, (long long)(pts_s * 1000.0));
+                    st_pub += now_seconds() - p0;
+                    if (++st_n == 300) {
+                        double span = now_seconds() - st0;
+                        fprintf(stderr, "  [avdec] %zux%zu: 300 frames in %.2f s (%.1f fps), "
+                                "copy-out %.1f ms mean, %u more than 50 ms behind the movie's clock\n",
+                                CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb),
+                                span, span > 0 ? 300 / span : 0, st_pub * 1000 / 300, st_late);
+                        st_n = 0; st_pub = 0; st_late = 0;
+                    }
+                }
             }
             CFRelease(sb);
 
@@ -452,6 +536,23 @@ static void *audio_decode_thread(void *arg) {
     return NULL;
 }
 
+// KL_AVDEC_MAX_WIDTH=<px>: the widest picture handed to the guest; a wider
+// movie is scaled down by the decoder, keeping its aspect. 0 = native.
+//
+// Realms of Flow (x6062798767111272) plays 360° backdrops of 6144x3072 to
+// 8192x4096 at 60 fps. On the GLES path each frame is copied, swapped to RGBA
+// and uploaded on the guest's render thread — 75 MB a frame, 4.5 GB/s — and
+// measured on the headset the game fell from 90 to about 9 frames a second
+// for as long as the tutorial's movie ran, 90 again without it. Default 4096
+// for it (4096x2048: 2.25x less of every stage), else 0.
+static int avdec_max_width(void) {
+    extern const char *kl_driver_target_name(void);
+    const char *t = kl_driver_target_name();
+    int dflt = (t && strcmp(t, "x6062798767111272") == 0) ? 4096 : 0;
+    const char *e = getenv("KL_AVDEC_MAX_WIDTH");
+    return e && *e ? atoi(e) : dflt;
+}
+
 kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
     if (!path || !*path) return NULL;
     char real[1024];
@@ -495,6 +596,14 @@ kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
     kl_avdec *d = calloc(1, sizeof *d);
     if (!d) return NULL;
     snprintf(d->path, sizeof d->path, "%s", real);
+    int cap = avdec_max_width();
+    if (cap > 0 && w > cap) {
+        int nh = (int)((long long)h * cap / w) & ~1;
+        fprintf(stderr, "  [avdec] %dx%d scaled to %dx%d by the decoder "
+                "(KL_AVDEC_MAX_WIDTH=%d; 0 = native)\n", w, h, cap, nh, cap);
+        d->out_w = cap; d->out_h = nh;
+        w = cap; h = nh;
+    }
     d->width = w; d->height = h; d->duration_ms = dur;
     d->has_audio = has_aud;
     d->audio_rate = aud_rate;

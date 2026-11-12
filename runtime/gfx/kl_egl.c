@@ -1025,7 +1025,11 @@ int kl_gl_cap_integerv(uint32_t pname, int32_t *params) {
     // KL_GL_TB_ALIGN=<n> answers n for any target, 0 leaves it unanswered.
     if (pname == 0x919F) {
         const char *t = kl_driver_target_name();
-        int a = kl_env_int("KL_GL_TB_ALIGN", t && strcmp(t, "x5190288877703616") == 0 ? 16 : 0);
+        // Realms of Flow (x6062798767111272) asks too: its Niagara effects
+        // flashed as green and white rays and arcs before the tutorial movie,
+        // every glTexBufferRange window at offset 0 (log, 2026-11-12).
+        int a = kl_env_int("KL_GL_TB_ALIGN", t && (strcmp(t, "x5190288877703616") == 0 ||
+                                                   strcmp(t, "x6062798767111272") == 0) ? 16 : 0);
         if (a > 0) { params[0] = a; return 1; }
         return 0;
     }
