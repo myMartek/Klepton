@@ -1721,6 +1721,28 @@ static klj_val klj_MP14_setAudioVolume(void *env, void *self, const klj_val *a, 
 // made a texture at all (2026-10-18). The ADDRESS behind it is stable for the
 // life of the decoder; the frame buffer is reallocated only when the dimensions
 // change.
+// KL_MP14_NEW_FRAMES_ONLY: answer "nothing new" for a frame already handed
+// over, as Android's player does when nothing new was decoded. Vampire's UE
+// 4.27 copies every non-null answer into a new 4 MB sample, and two 30 fps
+// movies asked every tick piled up ~6 GB in seconds in the sanctuary until the
+// system ended the app (2026-10-29). On the GLES path (getVideoLastFrame(int))
+// the engine adds a sample for every true answer, in a texture from its pool —
+// one that still holds an OLDER frame when nothing was uploaded. Realms of
+// Flow asks 90 times a second for a 60 fps movie, so a third of its samples
+// were frames from several ticks back and the tutorial's movie jumped back
+// and forth (2026-11-12). Default 1 for `vampire`, `x6565887093433499` and
+// `x6062798767111272`.
+static int klj_mp14_new_only(void) {
+    static int new_only = -1;
+    if (new_only < 0) {
+        const char *t = kl_driver_target_name();
+        int def = (t && (strcmp(t, "vampire") == 0 || strcmp(t, "x6565887093433499") == 0 ||
+                         strcmp(t, "x6062798767111272") == 0));
+        new_only = kl_env_on("KL_MP14_NEW_FRAMES_ONLY", def);
+    }
+    return new_only;
+}
+
 static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
                                               const klj_val *a, int n) {
     (void)a; (void)n;
@@ -1732,18 +1754,8 @@ static klj_val klj_MP14_getVideoLastFrameData(void *env, void *self,
     const void *px = kl_avdec_frame(m->dec, &w, &h, &bytes, &serial);
     klj_media_trace("getVideoLastFrameData(serial)", px && bytes ? (long long)serial : -1);
     if (!px || !bytes) return (klj_val){.l = NULL};
-    // KL_MP14_NEW_FRAMES_ONLY: answer null for a frame already handed over,
-    // as Android's player does when nothing new was decoded. Vampire's UE 4.27
-    // copies every non-null answer into a new 4 MB sample, and two 30 fps
-    // movies asked every tick piled up ~6 GB in seconds in the sanctuary
-    // until the system ended the app (2026-10-29). Default 1 for `vampire`.
-    static int new_only = -1;
-    if (new_only < 0) {
-        const char *t = kl_driver_target_name();
-        int def = (t && (strcmp(t, "vampire") == 0 || strcmp(t, "x6565887093433499") == 0));
-        new_only = kl_env_on("KL_MP14_NEW_FRAMES_ONLY", def);
-    }
-    if (new_only && serial == m->buf_serial) return (klj_val){.l = NULL};
+    // KL_MP14_NEW_FRAMES_ONLY: see klj_mp14_new_only.
+    if (klj_mp14_new_only() && serial == m->buf_serial) return (klj_val){.l = NULL};
     if (w != m->last_w || h != m->last_h) {
         m->res_changed = 1;
         m->last_w = w; m->last_h = h;
@@ -1810,6 +1822,10 @@ static klj_val klj_MP14_getVideoLastFrame_locked(klj_media *m, uint32_t tex) {
                     m->tex_nseen >= 64 ? " (or more)" : "", alive);
         }
     }
+    // Nothing new since the last upload: "no frame", so the engine does not
+    // queue this texture, which would show whatever older frame it held.
+    if (!m->vulkan && tex && serial == m->tex_serial && klj_mp14_new_only())
+        return (klj_val){.j = 0};
     if (!m->vulkan && tex && serial != m->tex_serial) {
         extern int kl_glfb_upload_picture(uint32_t, int, int, const void *, int);
         if (kl_glfb_upload_picture(tex, w, h, px, !m->swizzle)) {

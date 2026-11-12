@@ -1930,6 +1930,28 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
         }
     }
     if (path[0] != '/') return KL_GP_PASS();
+    // Repeated leading slashes before external storage: Linux takes
+    // "///storage/emulated/0/…" as "/storage/emulated/0/…", the prefix match
+    // below does not. Realms of Flow (x6062798767111272) names its scene movies
+    // "file://///storage/emulated/0/Android/obb/<package>/ATL_6K.mp4" and checks
+    // "///storage/emulated/0/…/Quest3Identifier.txt" first; with neither found,
+    // every scene but the tutorial's showed no movie (2026-11-12). Only a path
+    // that then names external storage is collapsed — any other path is passed
+    // on as it was.
+    if (path[1] == '/' && g_ext_target[0]) {
+        const char *q = path;
+        while (q[1] == '/') q++;
+        for (size_t i = 0; i < sizeof g_ext_prefix / sizeof *g_ext_prefix; i++) {
+            size_t n = strlen(g_ext_prefix[i]);
+            if (strncmp(q, g_ext_prefix[i], n) == 0 && (q[n] == '/' || q[n] == '\0')) {
+                char one[1024];
+                snprintf(one, sizeof one, "%s", q);
+                snprintf(tmp, sizeof tmp, "%s", one);
+                path = tmp;
+                break;
+            }
+        }
+    }
     size_t alen = strlen(g_apk_prefix);
     if (alen && strncmp(path, g_apk_prefix, alen) == 0 && path[alen] == '/') {
         snprintf(buf, cap, "%s%s", g_apk_target, path + alen);

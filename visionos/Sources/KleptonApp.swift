@@ -1002,7 +1002,11 @@ struct BootView: View {
     // Walkabout's multiplayer rooms have voice chat (Photon Voice, AudioInAEC in
     // kl_jni_services.c), and there the switch is a player's, not a tinkerer's:
     // it sits with the game's own settings rather than under Advanced.
-    private var micUpFront: Bool { klTargetName() == "walkabout" }
+    // Realms of Flow (x6062798767111272) tests the microphone in its tutorial
+    // and asks for RECORD_AUDIO in its manifest; with the switch hidden that
+    // step could not pass ("openStream(INPUT) -> UNAVAILABLE"). Still off until
+    // a person turns it on.
+    private var micUpFront: Bool { ["walkabout", "x6062798767111272"].contains(klTargetName()) }
 
     var body: some View {
         Group {

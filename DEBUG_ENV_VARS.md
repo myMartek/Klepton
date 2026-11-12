@@ -694,7 +694,9 @@ answers GL and kl_glfb never initializes.
   is 0 — so every allocation in the pool lands at byte 0 and each one
   overwrites the last. Default 16 for `x5190288877703616` (Saints & Sinners -
   Chapter 2, whose Niagara effects all read the last effect's particle data:
-  sparks drawn as coloured streaks), else unanswered (0). The texel-buffer
+  sparks drawn as coloured streaks) and `x6062798767111272` (Realms of Flow:
+  green and white rays and arcs flashing before the tutorial movie), else
+  unanswered (0). The texel-buffer
   emulation takes a window at any byte offset.
 - `KL_GLFB_ES32_ALIAS=0|1` — the ES 3.2 core names of the indexed blend and
   enable calls (`glEnablei`, `glBlendFuncSeparatei`, `glColorMaski`, …) are
@@ -1277,6 +1279,40 @@ result is gated against the BGRA path by `make vidtex`.
   `AImage_getCropRect` are served. With 0, DeoVR's AVPro Video calls go where
   they went before (no video). Every other title — VRChat ships the same plugin
   — never takes this path, whatever the value.
+- `KL_AVDEC_HEV1=0|1` — (`runtime/media/kl_avdec.m`, `hev1_as_hvc1`) a movie
+  whose HEVC sample entry is `hev1` is opened as an `AVMutableMovie` and its
+  descriptions relabelled `hvc1` before the reader starts. Apple registers its
+  HEVC decoder for `hvc1` only, so without it AVAssetReader fails with
+  -11833/-12906 (log: *"the reader could not be started: Cannot Decode"*) and
+  the movie's texture is never filled. Default 1 (it only acts on `hev1`);
+  found on Realms of Flow (`x6062798767111272`), whose 6K-8K 360° movies are
+  all `hev1`. Log: *"'hev1' HEVC: N description(s) relabelled 'hvc1'"*.
+- `KL_AVDEC_MAX_WIDTH=<px>` — (`kl_avdec.m`, `avdec_max_width`) the widest
+  movie picture handed to a UE4 guest; a wider movie is scaled down by the
+  decoder, aspect kept, and the guest is told the scaled size. `0` = native.
+  Default **4096** for Realms of Flow (`x6062798767111272`), whose 360° movies
+  are 6K-8K at 60 fps: on the GLES path every frame is copied, swapped to RGBA
+  and uploaded on the guest's render thread, and at 6144x3072 the game fell
+  from 90 to about 9 frames a second while the tutorial's movie ran. Else 0.
+  Log: *"scaled to WxH by the decoder"*; every 300 frames the decoder says
+  its real rate (*"[avdec] WxH: 300 frames in ..."*) and the upload its cost
+  (*"[glfb] picture uploads ..."*).
+- `KL_GLFB_PICTURE_PBO=0|1` — (`kl_glfb.c`, `klfb_picture_pbo`) a UE4 movie
+  frame on the GLES path goes into the guest's texture through a pixel unpack
+  buffer (orphaned, mapped, the RGBA swap written straight into it) instead of
+  `glTexSubImage2D` from memory. From memory ANGLE writes the GPU's texture
+  layout on the CPU: 48 ms per 4096x2048 frame on Realms of Flow, which held a
+  60 fps movie and the whole game to ~20 fps. From a buffer it is a GPU blit.
+  Default 1 for `x6062798767111272`, else 0; falls back to the old path for
+  good on any GL error. Log: *"picture uploads WxH (PBO + GPU blit): N ms"*.
+- `KL_MP14_NEW_FRAMES_ONLY=0|1` — (`kl_jni_ue4.c`, `klj_mp14_new_only`) UE4's
+  MediaPlayer14 is told "nothing new" for a frame it already has, as Android's
+  player answers: `getVideoLastFrameData` returns null (Vulkan) and
+  `getVideoLastFrame(int)` false (GLES). On GLES a true answer makes the engine
+  queue the texture it named, and a pool texture nothing was uploaded into
+  still shows an older frame — Realms of Flow's 60 fps tutorial movie, asked
+  90 times a second, kept jumping back. Default 1 for `vampire`,
+  `x6565887093433499` and `x6062798767111272`, else 0.
 - `KL_UE4_MEDIA_FRAME_LOCK=0|1` — (`kl_jni_ue4.c`,
   `klj_MP14_getVideoLastFrame`) hold `kl_avdec_frame_lock` while the UE4
   MediaPlayer14 path uploads the decoder's frame into the guest's texture, so
@@ -3140,6 +3176,13 @@ asks below the native rate (Steam Link's 16/24 kHz voice against 48 kHz).
 - `KL_MIC_RAW=1` — capture through plain RemoteIO: no voice processing at all
   (quiet, ~759/32767 on Vision Pro, room and game sound included). The other
   half of that A/B. Default 0. A Test switch in the start window.
+- `KL_AAUDIO_IN_FULL_BURST=0|1` — (`kl_aaudio.c`, `klaa_input_feeder`) an input
+  stream with a data callback is handed a burst only once the whole burst has
+  been captured; zeros fill its tail only after a stall of 40 ms (or four
+  bursts). With 0 the wait is one burst, which zero-pads every second callback
+  whenever the mic's period (10 ms) is longer than the burst, so the guest gets
+  more frames than real time and falls behind — over a second on Realms of
+  Flow. Default 1 for `x6062798767111272`, else 0.
 - `KL_MIC_REPORT_SECS=<n>` — interval of the two mic lines below (default 5,
   0 = none). While the capture unit is open, `[au] mic: <unit> AGC on|OFF|n/a
   <rate>/<ch> | … s captured (+…), … s read (+…), … s dropped (+…) in n s |
