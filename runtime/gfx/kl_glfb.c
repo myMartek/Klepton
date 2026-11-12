@@ -7007,21 +7007,60 @@ static int klfb_nomip_filter(uint32_t pname, int32_t param) {
     return out;
 }
 
+// GL_CLAMP_TO_BORDER on a backend without the border-clamp extension.
+//
+// ANGLE's Metal backend here is ES 3.0 without OES/EXT_texture_border_clamp, so
+// a wrap write of CLAMP_TO_BORDER raises INVALID_ENUM and the wrap stays what
+// it was — REPEAT on a fresh texture or sampler. SourceVR's engine believes it
+// has border colour (Quest's ES 3.2 does) and projects the flashlight through
+// effects/flashlight_border.vtf, whose only address flag is "border": the cone
+// then tiles over everything the light's frustum reaches, in every direction
+// (Half-Life 2, Marcel's headset, 2026-11-11). The texture's own rim is black
+// to 3/255, the engine's border colour is black, and the shadow depth texture
+// that takes the same flag wants its rim value outside too — CLAMP_TO_EDGE is
+// what the border would have given. For the SourceVR targets, and only where
+// the backend really lacks the extension. KL_GL_BORDER_AS_EDGE=0/1.
+static int32_t klfb_border_wrap(uint32_t pname, int32_t param) {
+    if (param != 0x812D /* CLAMP_TO_BORDER */) return param;
+    if (pname != 0x2802 && pname != 0x2803 && pname != 0x8072) return param;   // WRAP_S/T/R
+    static int on = -1;
+    if (on < 0) {
+        if (!g_real_exts[0]) return 0x812F;      // not known yet: the edge is always a valid write
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        int lacks = !strstr(g_real_exts, " GL_OES_texture_border_clamp ") &&
+                    !strstr(g_real_exts, " GL_EXT_texture_border_clamp ");
+        on = kl_env_on("KL_GL_BORDER_AS_EDGE", lacks && t && strncmp(t, "sourcevr-", 9) == 0);
+        fprintf(stderr, "  [glfb] wrap CLAMP_TO_BORDER asked for; the backend %s border clamp: %s "
+                        "(KL_GL_BORDER_AS_EDGE)\n", lacks ? "has no" : "has",
+                on ? "written as CLAMP_TO_EDGE" : "handed over unchanged");
+    }
+    if (!on) return param;
+    static unsigned n;
+    unsigned c = __atomic_add_fetch(&n, 1, __ATOMIC_RELAXED);
+    if (c == 10 || c == 100 || c == 1000)
+        fprintf(stderr, "  [glfb] CLAMP_TO_BORDER -> CLAMP_TO_EDGE: %u writes so far\n", c);
+    return 0x812F /* CLAMP_TO_EDGE */;
+}
+
 // The other spellings of the min-filter write. They forward unchanged unless
-// KL_GLFB_NOMIP is on.
+// KL_GLFB_NOMIP is on (and the wrap write above).
 static void (*g_real_TexParameterf)(uint32_t, uint32_t, float);
 static void klfb_TexParameterf(uint32_t target, uint32_t pname, float param) {
     if (pname == 0x2801) param = (float)klfb_nomip_filter(pname, (int32_t)param);
+    if (param == (float)0x812D) param = (float)klfb_border_wrap(pname, 0x812D);   // other float parameters stay floats
     if (g_real_TexParameterf) g_real_TexParameterf(target, pname, param);
 }
 static void (*g_real_SamplerParameteri)(uint32_t, uint32_t, int32_t);
 static void klfb_SamplerParameteri(uint32_t sampler, uint32_t pname, int32_t param) {
     param = klfb_nomip_filter(pname, param);
+    param = klfb_border_wrap(pname, param);
     if (g_real_SamplerParameteri) g_real_SamplerParameteri(sampler, pname, param);
 }
 static void (*g_real_SamplerParameterf)(uint32_t, uint32_t, float);
 static void klfb_SamplerParameterf(uint32_t sampler, uint32_t pname, float param) {
     if (pname == 0x2801) param = (float)klfb_nomip_filter(pname, (int32_t)param);
+    if (param == (float)0x812D) param = (float)klfb_border_wrap(pname, 0x812D);   // other float parameters stay floats
     if (g_real_SamplerParameterf) g_real_SamplerParameterf(sampler, pname, param);
 }
 
@@ -7147,6 +7186,7 @@ static void klfb_TexParameteri(uint32_t target, uint32_t pname, int32_t param) {
     // those calls have to land on the same object the bind did.
     if (target == 0x8D65 /* TEXTURE_EXTERNAL_OES */) target = 0x0DE1;
     param = klfb_nomip_filter(pname, param);
+    param = klfb_border_wrap(pname, param);
     // The depth-texture completeness rule, which needs to know WHICH texture
     // is bound rather than only what was asked for.
     if (target == 0x0DE1 /* TEXTURE_2D */ && a_glGetIntegerv &&
