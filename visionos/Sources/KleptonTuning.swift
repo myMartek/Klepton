@@ -332,6 +332,17 @@ final class KleptonRendering: ObservableObject {
     /// The full space, as the person chose it. Never for a mixed-reality game.
     var wantsFullSpace: Bool { !Self.targetIsMixedReality && maxRate == 120 }
 
+    /// Crown-driven progressive immersion: a switch in the start window, read
+    /// at boot. Off by default, and never for a mixed-reality game — its room
+    /// is the point (crown patch).
+    private static let crownKey = "klepton.crownImmersion"
+    @Published var crownImmersion: Bool {
+        didSet { UserDefaults.standard.set(crownImmersion, forKey: Self.crownKey) }
+    }
+    /// True for this run: the switch was on at boot and the title is not mixed
+    /// reality. Published so the scene follows it.
+    @Published var crownImmersionActive = false
+
     /// Frame generation (KleptonFrameGen): "off", "ahead" or "between", read at the start. Starts at
     /// the target's own (targets.py "framegen", KLFrameGenDefault): between for Half-Life: Alyx, whose
     /// owner found it "fühlt sich auch besser an als ohne" (2026-10-28), off for the rest. A copy that
@@ -472,6 +483,9 @@ final class KleptonRendering: ObservableObject {
         // says otherwise.
         foveation = (UserDefaults.standard.object(forKey: Self.key) as? Bool)
             ?? Self.targetFoveation
+        // Never chosen is off: the progressive path changes how the whole game
+        // is presented, so it is opt-in per title (crown patch).
+        crownImmersion = (UserDefaults.standard.object(forKey: Self.crownKey) as? Bool) ?? false
         // Never chosen is the target's own (100 unless targets.py "max_rate"
         // says 120); anything a test build stored besides 100 and 120 is 100.
         maxRate = (UserDefaults.standard.object(forKey: Self.rateKey) as? Int)

@@ -1153,9 +1153,9 @@ statscard: build/t_statscard
 
 # Half-Life: Alyx's loading screen, from the game's own models (KleptonHologram.swift), on the Mac's GPU.
 # Needs T_ALYX_HLVR, the game's hlvr folder; without it the test says so and passes.
-build/t_hologram: tests/t_hologram.swift visionos/Sources/KleptonHologram.swift
+build/t_hologram: tests/t_hologram.swift tests/t_hologram_immersion.swift visionos/Sources/KleptonHologram.swift
 	@mkdir -p build
-	swiftc -O -o $@ visionos/Sources/KleptonHologram.swift tests/t_hologram.swift
+	swiftc -O -o $@ visionos/Sources/KleptonHologram.swift tests/t_hologram_immersion.swift tests/t_hologram.swift
 
 .PHONY: hologram
 hologram: build/t_hologram

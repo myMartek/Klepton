@@ -778,6 +778,8 @@ final class KleptonHologram {
             d.vertexFunction = library.makeFunction(name: vertex)
             d.fragmentFunction = fragment.flatMap { library.makeFunction(name: $0) }
             d.depthAttachmentPixelFormat = .depth32Float
+            d.depthAttachmentPixelFormat = .depth32Float
+            d.stencilAttachmentPixelFormat = KleptonImmersion.stencilFormat
             d.maxVertexAmplificationCount = amplification
             let c = d.colorAttachments[0]!
             c.pixelFormat = color

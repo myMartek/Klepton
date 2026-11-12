@@ -163,6 +163,19 @@ struct KleptonStageConfiguration: CompositorLayerConfiguration {
         // layouts are not the same set with a rate map in play.
         let layouts = capabilities.supportedLayouts(options: foveate ? [.foveationEnabled] : [])
         configuration.layout = layouts.contains(.layered) ? .layered : .dedicated
+
+        // The progressive portal needs a stencil for the system to draw its
+        // mask into, and a single-sample context to draw it with.
+        if KleptonImmersion.enabled {
+            if capabilities.drawableRenderContextSupportedStencilFormats.contains(.stencil8) {
+                configuration.drawableRenderContextStencilFormat = .stencil8
+                configuration.drawableRenderContextRasterSampleCount = 1
+                let layoutName = configuration.layout == .layered ? "layered" : "dedicated"
+                NSLog("[crown] progressive immersion: stencil8, sample count 1, layout \(layoutName)")
+            } else {
+                NSLog("[crown] progressive immersion unavailable: stencil8 not offered")
+            }
+        }
     }
 }
 
@@ -231,6 +244,22 @@ final class KLDrawable {
     /// The real drawable, when there is one.
     let system: LayerRenderer.Drawable?
 
+    /// The system render context for a progressive space, and the stencil the
+    /// portal mask is drawn into. Both stay nil for mixed/full and for the
+    /// RealityKit stand-in.
+    var renderContext: LayerRenderer.Drawable.RenderContext?
+    var portalStencil: MTLTexture?
+
+    /// End through the render context when progressive; that is what applies
+    /// the system's portal fade. Otherwise end the encoder as before.
+    func endEncoding(_ enc: MTLRenderCommandEncoder) {
+        if let rc = renderContext {
+            rc.endEncoding(commandEncoder: enc)
+        } else {
+            enc.endEncoding()
+        }
+    }
+
     init(_ d: LayerRenderer.Drawable) {
         system = d
         views = d.views.map {
@@ -292,6 +321,11 @@ final class KleptonCompositor {
     /// has to know whether the head is still turning (KleptonControllerRecovery).
     nonisolated(unsafe) static var headYaw: Float = 0
     nonisolated(unsafe) static var headYawAt: TimeInterval = 0
+    /// When the immersive space's layer attached. The space reports its own
+    /// opening as an immersion change — 0 at 14:26:54.084, back to 1.0 at
+    /// 14:26:54.320 on the headset — and a crown turn within the first seconds
+    /// of that is not a turn. See KLControllerRecovery.crownTick().
+    nonisolated(unsafe) static var spaceOpenedAt: TimeInterval = 0
     nonisolated(unsafe) static var expectingHandover = false
     private let handover = DispatchSemaphore(value: 0)
     private let handoverLock = NSLock()
@@ -299,6 +333,10 @@ final class KleptonCompositor {
     private var pendingRK: KLRealityTarget?
     /// The colour format the pipelines were built for.
     private var pipelineFormat: MTLPixelFormat = .invalid
+
+    /// The progressive portal's stencil, reused while the drawable size holds.
+    private var portalStencil: MTLTexture?
+    private var portalStencilSize: (width: Int, height: Int, layers: Int)?
 
     /// A new Compositor Services layer: handed to the running compositor if a
     /// move is under way, else a compositor of its own (the usual start).
@@ -311,6 +349,7 @@ final class KleptonCompositor {
         let c = KleptonCompositor(layer)
         live = c
         outputEnded = false
+        Self.spaceOpenedAt = CACurrentMediaTime()
         c.startRenderLoop()
     }
     /// A RealityKit target for the running compositor (the picture moving at
@@ -1149,6 +1188,7 @@ final class KleptonCompositor {
             desc.fragmentFunction = lib.makeFunction(name: "kl_reproject_f")
             desc.colorAttachments[0].pixelFormat = color
             desc.depthAttachmentPixelFormat = .depth32Float
+            desc.stencilAttachmentPixelFormat = KleptonImmersion.stencilFormat
             // Both eyes in one pass — see encodeComposite. Declared whatever
             // the layout turns out to be, because a pipeline that permits
             // amplification costs nothing when it is not amplified. Clamped to
@@ -1223,6 +1263,7 @@ final class KleptonCompositor {
             odesc.fragmentFunction = olib.makeFunction(name: "kl_ov_f")
             odesc.colorAttachments[0].pixelFormat = color
             odesc.depthAttachmentPixelFormat = .depth32Float
+            odesc.stencilAttachmentPixelFormat = KleptonImmersion.stencilFormat
             odesc.maxVertexAmplificationCount = amplification
             odesc.colorAttachments[0].isBlendingEnabled = true
             odesc.colorAttachments[0].rgbBlendOperation = .add
@@ -1247,6 +1288,7 @@ final class KleptonCompositor {
                 qdesc.fragmentFunction = qlib.makeFunction(name: "kl_eq_f")
                 qdesc.colorAttachments[0].pixelFormat = color
                 qdesc.depthAttachmentPixelFormat = .depth32Float
+                qdesc.stencilAttachmentPixelFormat = KleptonImmersion.stencilFormat
                 qdesc.maxVertexAmplificationCount = amplification
                 equirectPipeline = try? device.makeRenderPipelineState(descriptor: qdesc)
             }
@@ -1278,6 +1320,7 @@ final class KleptonCompositor {
                 let d = MTLRenderPipelineDescriptor()
                 d.colorAttachments[0].pixelFormat = color
                 d.depthAttachmentPixelFormat = .depth32Float
+                d.stencilAttachmentPixelFormat = KleptonImmersion.stencilFormat
                 d.maxVertexAmplificationCount = amplification
                 switch probe {
                 case 2:  d.vertexFunction   = lib.makeFunction(name: "kl_reproject_v")
@@ -3847,6 +3890,35 @@ final class KleptonCompositor {
         return n
     }
 
+    /// A single-sample stencil for the progressive portal. The pass clears it,
+    /// the system draws its mask into it, and the system fades the edge when
+    /// the render context ends. Reused while the drawable's size is stable.
+    private func portalStencilTexture(for drawable: KLDrawable, layers: Int) -> MTLTexture? {
+        guard let color = drawable.colorTextures.first else { return nil }
+        let device = color.device
+        let key = (width: color.width, height: color.height, layers: layers)
+        if let tex = portalStencil, let s = portalStencilSize,
+           s.width == key.width, s.height == key.height, s.layers == key.layers {
+            return tex
+        }
+        let desc = MTLTextureDescriptor()
+        desc.pixelFormat = .stencil8
+        desc.width = color.width
+        desc.height = color.height
+        desc.textureType = layers > 1 ? .type2DArray : .type2D
+        desc.arrayLength = layers
+        desc.usage = .renderTarget
+        desc.storageMode = .private
+        guard let tex = device.makeTexture(descriptor: desc) else {
+            NSLog("[crown] portal stencil allocation failed")
+            return nil
+        }
+        portalStencil = tex
+        portalStencilSize = key
+        NSLog("[crown] portal stencil \(color.width)x\(color.height)x\(layers)")
+        return tex
+    }
+
     /// A group of views sharing one attachment, and therefore one render pass.
     private func encodeViews(_ viewIndices: [Int],
                              drawable: KLDrawable,
@@ -3857,6 +3929,25 @@ final class KleptonCompositor {
                              originFromHead: simd_float4x4) -> Int {
         guard let first = viewIndices.first else { return 0 }
         let firstMap = drawable.views[first].textureMap
+
+        // A render context for every layered drawable, crown or not. The plain
+        // `drawable.encodePresent` path aborts with "BUG IN CLIENT" in
+        // cp_drawable_encode_present on visionOS 26/27 once the scene offers the
+        // progressive style, so the context is what the system requires; the
+        // stencil belongs to the portal and is only allocated when the crown is
+        // on. Only a real drawable gets a context — the RealityKit stand-in has
+        // none and therefore no portal either.
+        if layered, drawable.renderContext == nil {
+            if KleptonImmersion.enabled {
+                drawable.portalStencil = portalStencilTexture(for: drawable, layers: viewIndices.count)
+            }
+            // No log here: this runs every frame, and one line per frame at
+            // display rate makes the boot log unreadable. The one-time line in
+            // makeConfiguration is the evidence that the path is on.
+            if let system = drawable.system {
+                drawable.renderContext = system.addRenderContext(commandBuffer: cmd)
+            }
+        }
 
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture     = drawable.colorTextures[firstMap.textureIndex]
@@ -3896,6 +3987,12 @@ final class KleptonCompositor {
             pass.depthAttachment.storeAction = drawable.system == nil ? .dontCare : .store
             pass.depthAttachment.clearDepth  = 0.0
         }
+        if let stencil = drawable.portalStencil {
+            pass.stencilAttachment.texture = stencil
+            pass.stencilAttachment.loadAction = .clear
+            pass.stencilAttachment.clearStencil = 0
+            pass.stencilAttachment.storeAction = .dontCare
+        }
         if layered {
             // The array length, not a slice: this is what lets the rate map's
             // per-eye layers be reached at all (see encodeComposite).
@@ -3914,8 +4011,14 @@ final class KleptonCompositor {
 
         guard let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return 0 }
         enc.label = "klepton composite view\(viewIndices)"
-        if probe == 1 { enc.endEncoding(); return viewIndices.count }
-        guard let pipeline, let sampler else { enc.endEncoding(); return 0 }
+        // The mask belongs to the portal. Without the crown there is no
+        // stencil attachment, and asking the render context to draw a mask on
+        // one is a client bug.
+        if let rc = drawable.renderContext, drawable.portalStencil != nil {
+            rc.drawMaskOnStencilAttachment(commandEncoder: enc, value: 200)
+        }
+        if probe == 1 { drawable.endEncoding(enc); return viewIndices.count }
+        guard let pipeline, let sampler else { drawable.endEncoding(enc); return 0 }
 
         // Loading skybox. While an Equirect loading layer is live the guest's
         // eye is black - AC Nexus feeds that layer an Android MediaPlayer video
@@ -3937,7 +4040,7 @@ final class KleptonCompositor {
             _ = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                originFromHead: originFromHead, writeDepth: true,
                                backdrop: false)
-            enc.endEncoding()
+            drawable.endEncoding(enc)
             return viewIndices.count
         }
 
@@ -4240,7 +4343,7 @@ final class KleptonCompositor {
         let panels = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                     originFromHead: originFromHead,
                                     writeDepth: visible == 0)
-        enc.endEncoding()
+        drawable.endEncoding(enc)
         // "How many eyes got a picture", which is what the caller counts black
         // frames with — and a panel IS a picture. Without this a guest that
         // composites only quad layers reports every frame black while showing
@@ -6536,6 +6639,16 @@ final class KleptonCompositor {
     /// so they have to be *something*; an unwritten drawable is whatever was in
     /// that texture last.
     private func clearAndPresent(_ drawable: LayerRenderer.Drawable) {
+        // Every priming frame goes through a render context, stencil or not:
+        // the plain `drawable.encodePresent` path below aborts with
+        // "BUG IN CLIENT" in cp_drawable_encode_present on visionOS 26 and 27
+        // once the scene offers the progressive style — with the switch off the
+        // app died on its first frame (measured 2026-11-06).
+        if KleptonImmersion.enabled || KleptonImmersion.primingThroughContext {
+            guard let cmd = queue?.makeCommandBuffer() else { return }
+            clearAndPresentProgressive(drawable, cmd: cmd)
+            return
+        }
         guard let cmd = queue?.makeCommandBuffer() else { return }
         for view in drawable.views {
             let map = view.textureMap
@@ -6549,6 +6662,57 @@ final class KleptonCompositor {
         }
         drawable.encodePresent(commandBuffer: cmd)
         cmd.commit()
+    }
+
+    /// The priming path: the system only presents a drawable that went through
+    /// a render context once the layer is configured for one, so the black
+    /// priming frame gets the same treatment as the game's frames.
+    ///
+    /// The stencil is the portal's, and only exists when the crown feature is
+    /// on. Without it this is a plain black clear through the same render
+    /// context.
+    private func clearAndPresentProgressive(_ drawable: LayerRenderer.Drawable,
+                                            cmd: MTLCommandBuffer) {
+        let t = LayerRenderer.Clock.Instant.epoch
+            .duration(to: drawable.frameTiming.presentationTime).timeInterval
+        if let anchor = worldTracking.queryDeviceAnchor(atTimestamp: t) {
+            drawable.deviceAnchor = anchor
+        }
+        guard let color = drawable.colorTextures.first,
+              let depth = drawable.depthTextures.first else {
+            NSLog("[crown] priming: drawable has no colour/depth texture")
+            return
+        }
+        let kd = KLDrawable(drawable)
+        let stencil = KleptonImmersion.enabled
+            ? portalStencilTexture(for: kd, layers: drawable.views.count)
+            : nil
+        let rc = drawable.addRenderContext(commandBuffer: cmd)
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = color
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+        pass.depthAttachment.texture = depth
+        pass.depthAttachment.loadAction = .clear
+        pass.depthAttachment.storeAction = .store
+        pass.depthAttachment.clearDepth = 0.0
+        if let stencil {
+            pass.stencilAttachment.texture = stencil
+            pass.stencilAttachment.loadAction = .clear
+            pass.stencilAttachment.clearStencil = 0
+            pass.stencilAttachment.storeAction = .dontCare
+        }
+        pass.renderTargetArrayLength = drawable.views.count
+        pass.rasterizationRateMap = drawable.rasterizationRateMaps.first
+        guard let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+        if stencil != nil {
+            rc.drawMaskOnStencilAttachment(commandEncoder: enc, value: 200)
+        }
+        rc.endEncoding(commandEncoder: enc)
+        drawable.encodePresent(commandBuffer: cmd)
+        cmd.commit()
+        NSLog("[crown] priming: clear presented (context, stencil: \(stencil != nil))")
     }
 
     /// The measurement that says whether any of this is doing anything.

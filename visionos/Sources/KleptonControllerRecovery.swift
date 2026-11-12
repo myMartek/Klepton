@@ -46,6 +46,12 @@ enum KLControllerRecovery {
     /// return cannot start a second recovery on top of the first.
     private static var busy = false
 
+    /// When the last take-back proved itself. A residual immersion change
+    /// arrives within a second of the pinch that dismissed the prompt (the HUD
+    /// closing), and without this it released the controllers and raised a new
+    /// prompt straight away — measured 2026-11-06: prompt at 14:50:05.445,
+    /// back at 07.406, prompt again at 08.234.
+    private static var lastTakeBackAt: TimeInterval = 0
     private static var referenceYaw: Double = 0
     private static var haveYaw = false
     private static var lastTurnAt: TimeInterval = 0
@@ -85,19 +91,72 @@ enum KLControllerRecovery {
         Task { await recover(controllers) }
     }
 
+    /// One crown change. The prompt waits until the turn is over. The crown is
+    /// a continuous control here, and a gesture that goes down and back up used
+    /// to raise the first prompt mid-turn and a second one after the pinch
+    /// (measured 2026-11-06: two prompts for one gesture). A second without a
+    /// change means the HUD is about to close.
+    private static var crownGeneration = 0
+
+    static func crownChanged() {
+        guard KleptonImmersion.enabled else { return }
+        crownGeneration += 1
+        let generation = crownGeneration
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1000))
+            guard generation == crownGeneration else { return }
+            crownTick()
+        }
+    }
+
+    /// The Digital Crown's immersion HUD is up. Unlike a return to the
+    /// foreground, this is certain: the system reported the amount change, so
+    /// the list is handed over without asking whether the stream is dead.
+    static func crownTick() {
+        guard klEnvOn("KL_CTRL_RECOVERY", default: true),
+              KleptonImmersion.enabled,
+              !busy, !promptUp,
+              KleptonCompositor.live != nil,
+              let controllers = KleptonControllers.active,
+              controllers.mode == .standard,
+              !KleptonControllers.spatialControllers().isEmpty else { return }
+        // A crown tick inside an `.inactive` window belongs to the system, not
+        // to the game: the double-click peek and a crown press both land there.
+        guard UIApplication.shared.applicationState == .active else { return }
+        // The space reports its own opening as an immersion change, 0 and then
+        // back to 1.0 within a quarter second (measured twice on 2026-11-06:
+        // 14:26:54.084 -> .320 and 14:35:04.572 -> .809). Without this the
+        // prompt came up on a launch where nobody had touched the crown. Five
+        // seconds is the same grace the local plugin gives its start.
+        guard CACurrentMediaTime() - KleptonCompositor.spaceOpenedAt > 5 else { return }
+        // A residual tick arrives within a second of the pinch that dismissed
+        // the prompt. Ignoring those keeps the panel from reappearing right
+        // after it was dismissed, exactly as the local plugin does.
+        guard CACurrentMediaTime() - lastTakeBackAt > 1.0 else { return }
+
+        busy = true
+        Task { await recover(controllers, waitForStill: false) }
+    }
+
     /// Wait for the head to settle, hand the accessories to the system, raise
     /// the prompt, wait for the pinch.
-    private static func recover(_ controllers: KleptonControllers) async {
+    private static func recover(_ controllers: KleptonControllers,
+                                waitForStill: Bool = true) async {
         defer { busy = false }
 
-        // A fresh reference, so the wait starts now instead of trusting a yaw
-        // from the last recovery.
-        haveYaw = false
-        noteHead()
-        let deadline = CACurrentMediaTime() + stillTimeout
-        while CACurrentMediaTime() < deadline, !headStill() {
-            try? await Task.sleep(for: .milliseconds(100))
+        // The head settles first only where the trigger is a scene change: a
+        // window opens where the gaze points, and raising it mid-turn puts it
+        // behind the user. A crown turn is not that — the local plugin raises
+        // its prompt at the tick, and waiting here made the panel arrive seconds
+        // after the turn, which read as "it needs a button press" (2026-11-06).
+        if waitForStill {
+            haveYaw = false
             noteHead()
+            let deadline = CACurrentMediaTime() + stillTimeout
+            while CACurrentMediaTime() < deadline, !headStill() {
+                try? await Task.sleep(for: .milliseconds(100))
+                noteHead()
+            }
         }
 
         guard await controllers.suspendAccessories() else {
@@ -199,6 +258,7 @@ enum KLControllerRecovery {
             return nil
         }
         NSLog("[ctrl] controllers back (\(count)), \(states) states in the probe")
+        lastTakeBackAt = CACurrentMediaTime()
         return count
     }
 }

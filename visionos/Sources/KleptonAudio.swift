@@ -58,10 +58,17 @@ enum KleptonAudio {
         }
     }
 
+    /// The crown's fade: the render callback walks toward this gain over about
+    /// a third of a second, so the sound leaves and returns smoothly. Unlike
+    /// setSilenced this never stops the unit, so crossing the 0 % edge cannot
+    /// click or cost a session round-trip (crown patch).
+    static func setCrownGain(_ gain: Float) {
+        kl_audio_set_gain(gain)
+    }
+
     /// Configure and activate the session, then tell the C side what the
     /// hardware rate turned out to be. Safe to call more than once.
-    static func start() {
-        guard !started else { return }
+    static func start() {        guard !started else { return }
         started = true
 
         let session = AVAudioSession.sharedInstance()
