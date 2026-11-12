@@ -1962,7 +1962,8 @@ puts the camera on the ground with its hands underneath it.
   BEHEMOTH), `x6605328856182465` (Into The Radius 2, whose main menu showed
   blocks of garbage, different per eye and per frame, without it) and
   `x9269393463181825` (Roboquest VR, Meta Store build: a black scene with
-  glimpses of models under its UI), else 0.
+  glimpses of models under its UI) and `x5223884527630557` (The 7th Guest
+  VR: wrong colours and scattered blocks from the first frame), else 0.
 - `KL_VK_PASS_BARRIERS=0|1|2` — what happens to a `vkCmdPipelineBarrier`
   recorded INSIDE a dynamic-rendering pass that only makes colour attachments
   readable as input attachments. MoltenVK answers one by ending the Metal pass
@@ -2130,7 +2131,9 @@ puts the camera on the ground with its hands underneath it.
   `KL_UE4_FORCE_QUIT=1` obeys it as the Quest does — the pump ends and the app
   leaves as for a game's own quit. On by default for Medal of Honor
   (`x3647259232032222`), whose Quit button ends in it once
-  `moh-exit-no-rhi-teardown` lets `FEngineLoop::Exit` through. The bounded quit
+  `moh-exit-no-rhi-teardown` lets `FEngineLoop::Exit` through, and for The 7th
+  Guest VR (`x5223884527630557`), whose Quit button tears down Vulkan and then
+  calls it; ignored, the last picture froze. The bounded quit
   that came with the surface around it (`KL_UE4_QUIT_LIMIT`,
   `KL_UE4_QUIT_TRACE`) is not taken.
 - `KL_UE4_CXX_ALLOC=0|1` — (`kl_ue4.c`) bind libc++_shared's own calls to

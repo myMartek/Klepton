@@ -1113,10 +1113,14 @@ static klj_val klj_GA_forceQuit(void *env, void *self, const klj_val *a, int n) 
     // KL_UE4_FORCE_QUIT=1: obey it, as the Quest does. The pump ends and the
     // app leaves as for a game's own quit. On by default for Medal of Honor,
     // whose Quit button reaches ForceQuit once FEngineLoop::Exit is through
-    // (moh-exit-no-rhi-teardown, kl_guestpatch.c); off for every other title,
+    // (moh-exit-no-rhi-teardown, kl_guestpatch.c), and for The 7th Guest VR
+    // (x5223884527630557), whose Quit button stops audio, destroys its Vulkan
+    // device and then calls ForceQuit with no error kept; ignored, the last
+    // picture froze on the headset (2026-11-12). Off for every other title,
     // where ForceQuit is still a bail worth staying alive for.
     const char *t = kl_driver_target_name();
-    if (kl_env_on("KL_UE4_FORCE_QUIT", t && strcmp(t, "x3647259232032222") == 0)) {
+    if (kl_env_on("KL_UE4_FORCE_QUIT", t && (strcmp(t, "x3647259232032222") == 0 ||
+                                             strcmp(t, "x5223884527630557") == 0))) {
         fprintf(stderr, "  [ue4] ForceQuit obeyed (KL_UE4_FORCE_QUIT): the game quit — ending the run\n");
         fflush(stderr);
         kl_ue4_note_force_quit();
