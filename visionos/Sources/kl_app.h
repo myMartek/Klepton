@@ -148,7 +148,8 @@ int  kl_app_guest_asked_quit(void);
 //
 // The default is compiled in (KL_TARGET_DEFAULT, from gen_xcodeproj.py) rather
 // than read from the environment, because an app launched by hand from the Home
-// View has no environment. KL_TARGET overrides it.
+// View has no environment. KL_TARGET overrides it. The app template has no game
+// compiled in: its Info.plist names one (KLTarget; see kl_app.c).
 const char *kl_app_target_name(void);
 // The target name even BEFORE kl_app_configure runs (g_target is nil until then):
 // the build's compile-time default, honouring a KL_TARGET override. Lets the

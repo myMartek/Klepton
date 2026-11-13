@@ -41,6 +41,14 @@
 // to know which guest it is when it is launched by hand from the Home View with
 // no environment at all. KL_TARGET still overrides it, which is what makes an
 // A/B possible from `run.sh` without regenerating the project.
+//
+// The app template is the exception to "baked in": it is one build for every
+// title, so what it is comes from its Info.plist, which is written per game
+// after the build — KLTarget names the guest, and for a name the table does not
+// have, KLTargetEntry / KLTargetObb / KLTargetKind are its row (see
+// kl_target_define). An app built for one title has no KLTarget and is not
+// affected.
+#include <CoreFoundation/CoreFoundation.h>
 #include "kl_target.h"
 
 #ifndef KL_TARGET_DEFAULT
@@ -48,6 +56,42 @@
 #endif
 
 static const kl_target *g_target;
+
+// One string out of the app's Info.plist; "" if it is not there.
+static const char *info_string(const char *key, char *out, size_t size) {
+    out[0] = 0;
+    CFBundleRef bundle = CFBundleGetMainBundle();
+    CFStringRef name = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
+    if (bundle && name) {
+        CFTypeRef value = CFBundleGetValueForInfoDictionaryKey(bundle, name);
+        if (value && CFGetTypeID(value) == CFStringGetTypeID()
+            && !CFStringGetCString((CFStringRef)value, out, (CFIndex)size, kCFStringEncodingUTF8))
+            out[0] = 0;
+    }
+    if (name) CFRelease(name);
+    return out;
+}
+
+// Which guest this app is when nothing in the environment says: Info.plist's
+// KLTarget (the template), else the name compiled in.
+static const char *default_target(void) {
+    static char name[128];
+    if (!*name) {
+        info_string("KLTarget", name, sizeof name);
+        if (!*name) snprintf(name, sizeof name, "%s", KL_TARGET_DEFAULT);
+    }
+    return name;
+}
+
+// The template's row for a name the table does not have. Only for the name the
+// Info.plist itself states: KL_TARGET naming something else still fails by name.
+static const kl_target *target_from_info(const char *want) {
+    char name[128], entry[128], obb[512], kind[32];
+    if (strcmp(info_string("KLTarget", name, sizeof name), want) != 0) return NULL;
+    return kl_target_define(want, info_string("KLTargetEntry", entry, sizeof entry),
+                            info_string("KLTargetObb", obb, sizeof obb),
+                            info_string("KLTargetKind", kind, sizeof kind));
+}
 
 // Which of Steam Link's front doors this run opened, and whether the VR one's
 // chain has been mapped yet.
@@ -74,7 +118,7 @@ const char *kl_app_target_name(void) { return g_target ? g_target->name : "(unco
 // launcher UI knows which game it is on the first render. Same source configure
 // uses (KL_TARGET override, else the compile-time default).
 const char *kl_app_target_name_or_default(void) {
-    return g_target ? g_target->name : kl_env_str("KL_TARGET", KL_TARGET_DEFAULT);
+    return g_target ? g_target->name : kl_env_str("KL_TARGET", default_target());
 }
 int kl_app_target_is_steamlink(void) {
     return g_target && g_target->kind == KL_GUEST_STEAMLINK;
@@ -470,8 +514,9 @@ static void alyx_video_gpu_ids(const char *container) {
 int kl_app_configure(const char *resources, const char *container) {
     if (!resources || !container) return missing("path", "(null)");
 
-    const char *want = kl_env_str("KL_TARGET", KL_TARGET_DEFAULT);
+    const char *want = kl_env_str("KL_TARGET", default_target());
     g_target = kl_target_lookup(want);
+    if (!g_target) g_target = target_from_info(want);
     if (!g_target) return missing("guest target (KL_TARGET)", want);
 
     // The veneers' TSD slot is claimed HERE rather than wherever the first guest

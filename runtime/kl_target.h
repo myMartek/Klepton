@@ -98,6 +98,27 @@ typedef struct {
 // NULL if the name is not in the table. `kl_target_names()` is for the error
 // message that follows.
 const kl_target *kl_target_lookup(const char *name);
+
+// A target stated at RUN time, for a name the table does not have.
+//
+// The table is compiled in, so an app built for a title outside it (a store
+// title nobody added a row for) used to need its own compile: targets.py wrote
+// the row, and the runtime was built again around it. That ties every such app
+// to a Mac. The app template (visionos/mktemplate.sh) is ONE build for every
+// title, finished per game without a compiler, so its row cannot come from the
+// table: it comes from the app's Info.plist, and this is how kl_app_configure
+// hands it over.
+//
+// The layout is the generic one targets.py gives such a title: the tree is the
+// name, the APK is <name>.apk, the assets are <name>/assets. What is left to
+// say is what differs between engines: the entry library, where the OBB is
+// looked for, and the kind — by the name targets.py uses ("unity", "ue4",
+// "native", "sdl2", ...).
+//
+// One slot, because an app is one guest. Afterwards kl_target_lookup(name)
+// finds it like any row. NULL if something is missing or the kind is unknown.
+const kl_target *kl_target_define(const char *name, const char *entry_lib,
+                                  const char *obb, const char *kind);
 const kl_target *kl_target_default(void);
 const char      *kl_target_names(void);
 

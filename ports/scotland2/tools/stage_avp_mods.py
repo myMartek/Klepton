@@ -9,6 +9,12 @@ files against it, translates the libraries with this checkout's klepton-ld,
 and prepares the hook gates in the game's own libil2cpp/libunity before Xcode
 signs the app. A version without a profile stops with the reason.
 
+With --template (visionos/mktemplate.sh) there is no game: only the mods are
+staged, and what a game has to be checked against and where its hook gates go is
+written to visionos/build/mods.json. Whoever finishes the template for the
+owner's game does that part then (the checks and prepare_hooks.py, on the
+game's own libil2cpp and libunity).
+
 Runs with the system Python (AVP Play builds with PATH=/usr/bin:/bin).
 Prints SC2_GAME_PROFILE=<name> as its last line for run.sh.
 """
@@ -45,7 +51,7 @@ def version_code(tree):
 def profile_for(target, code):
     profiles = json.loads((PORT / 'avp-profiles.json').read_text())['profiles']
     for row in profiles:
-        if row['target'] == target and row['versionCode'] == code:
+        if row['target'] == target and (code is None or row['versionCode'] == code):
             return row
     made = ', '.join(r['versionName'] for r in profiles if r['target'] == target)
     fail(f'not ported to version code {code} of {target} yet (they exist for {made or "no version"})')
@@ -75,14 +81,18 @@ def translate(ld, elf, binary):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--target', required=True)
-    p.add_argument('--tree', type=Path, required=True, help='the unpacked game (e.g. beatsaber140)')
+    p.add_argument('--tree', type=Path, help='the unpacked game (e.g. beatsaber140)')
+    p.add_argument('--template', action='store_true', help='stage the mods alone; describe the game part in build/mods.json')
+    p.add_argument('--version-code', type=int, help='with --template: the game version to stage the mods of')
     a = p.parse_args()
-    tree = a.tree.resolve()
+    if a.template == bool(a.tree):
+        fail('give either --tree or --template')
+    tree = a.tree.resolve() if a.tree else None
     ld = ROOT / 'build/klepton-ld'
     if not ld.is_file():
         fail('build/klepton-ld is missing (make build/klepton-ld)')
 
-    row = profile_for(a.target, version_code(tree))
+    row = profile_for(a.target, a.version_code if a.template else version_code(tree))
     selection = json.loads((PORT / row['selection']).read_text())
     prebuilt = (PORT / row['prebuilt']).resolve()
     if not prebuilt.is_relative_to(PORT.resolve()):
@@ -91,7 +101,7 @@ def main():
         fail('Fake ID must stay excluded')
 
     # The owner's game must be exactly the version the hooks were measured on.
-    for name, expected in selection['game']['files'].items():
+    for name, expected in ({} if a.template else selection['game']['files']).items():
         relative = ('assets/bin/Data/Managed/Metadata/' if name == 'global-metadata.dat' else 'lib/arm64-v8a/') + name
         if bootstrap.digest(tree / relative) != expected:
             fail(f'{name} is not the one of {row["versionName"]}; the mods need exactly that version')
@@ -145,7 +155,27 @@ def main():
 
         # The game's own libraries, with the measured hook gates prepared before signing.
         targets = 0
-        for name, profile in game_profiles(combined).items():
+        if a.template:
+            # No game here: say what its files must be and which entries get a gate.
+            libraries = game_profiles(combined)
+            targets = sum(len(profile['targets']) for profile in libraries.values())
+            described = {
+                'schema': 1,
+                'profile': {**{key: row[key] for key in ('name', 'target', 'versionName', 'versionCode')},
+                            'defaultOn': bool(row.get('defaultOn', False))},
+                # SHA-256 of the game's files, as they lie in its APK (lib/arm64-v8a/<name>, and
+                # assets/bin/Data/Managed/Metadata/global-metadata.dat).
+                'gameFiles': selection['game']['files'],
+                # Per library of the game: the ELF's SHA-256, the entries (prepare_hooks.py's manifest
+                # 'targets') and originalEntryDepth.
+                'libraries': libraries,
+                # Libraries of the game the mods bring themselves; the game's own copy stays out.
+                'replaced': ['libc++_shared'],
+            }
+            out = ROOT / 'visionos/build/mods.json'
+            out.parent.mkdir(exist_ok=True)
+            out.write_text(json.dumps(described, indent=1) + '\n')
+        for name, profile in ({} if a.template else game_profiles(combined)).items():
             raw = tree / 'lib/arm64-v8a' / (name + '.so')
             plain = work / 'game' / (name + '.unprepared.dylib')
             plain.parent.mkdir(parents=True, exist_ok=True)
