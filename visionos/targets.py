@@ -1428,6 +1428,32 @@ def _add_generic():
 _add_generic()
 
 
+# The app template — ONE build for every title, finished per game without a
+# compiler (mktemplate.sh; runtime/kl_target.h, kl_target_define). It is built
+# through the same generator as any app, so it needs a row; the row has no game
+# in it. The values are a store title's (_generic_row), because that is what the
+# template mostly becomes; whoever finishes it writes the game's own into the
+# Info.plist (template_data below is what they work from).
+TEMPLATE_ENV = "KLEPTON_TEMPLATE"
+TEMPLATE = "template"
+
+
+def _add_template():
+    import os
+    if os.environ.get(TEMPLATE_ENV) != "1":
+        return
+    TARGETS[TEMPLATE] = {
+        "libs": "", "srcdir": TEMPLATE + "/lib/arm64-v8a", "tree": TEMPLATE,
+        "apk": TEMPLATE + ".apk", "assets": TEMPLATE + "/assets", "qtplugins": "",
+        "obb": "obb", "entry": "libmain", "kind": "unity",
+        "product": "KleptonTemplate", "display": "Klepton",
+        "autoboot": False, "generic": True,
+    }
+
+
+_add_template()
+
+
         # `"libs": None` means "whatever this tree would translate for that srcdir",
         # which the Makefile already decides — the .so files that are really ELF, minus
 # the ones we REPLACE (libOVRPlugin, libovrplatformloader, libvrapi) and the
@@ -1574,15 +1600,9 @@ def _follow_unpacked_build(t):
         t["meta_apk_id"] = t["meta_obb_id"] = ""
 
 
-def resolve(name):
-    if name not in TARGETS:
-        print(f"!! unknown target {name!r} — one of: {', '.join(sorted(TARGETS))}",
-              file=sys.stderr)
-        sys.exit(1)
-    t = dict(TARGETS[name])
-    t["name"] = name
-    t["bundle"] = bundle_for(name)
-    t["display"] = display_for(t["display"])
+def _settle(name, t):
+    """The defaults of a row, filled in. Reads no files: resolve() does that part
+    afterwards, and the template data (template_data) has to do without it."""
     # The DEFAULTS only: the settings panel, KL_HAND_MATTING and KL_VRR still
     # decide. Both are what a player wants from a game they just installed:
     #
@@ -1656,6 +1676,18 @@ def resolve(name):
     # (the ids); a Unity target that wants the panel states obb_file, even "".
     for k in ("obb_file", "meta_apk_id", "meta_obb_id"):
         t.setdefault(k, "")
+
+
+def resolve(name):
+    if name not in TARGETS:
+        print(f"!! unknown target {name!r} — one of: {', '.join(sorted(TARGETS))}",
+              file=sys.stderr)
+        sys.exit(1)
+    t = dict(TARGETS[name])
+    t["name"] = name
+    t["bundle"] = bundle_for(name)
+    t["display"] = display_for(t["display"])
+    _settle(name, t)
     t["data_panel"] = "obb_file" in TARGETS[name]
     _follow_unpacked_build(t)
     if t["kind"] == "linux":
@@ -1689,6 +1721,8 @@ def c_table():
         "",
     ]
     for name in sorted(TARGETS):
+        if name == TEMPLATE:
+            continue        # not a guest: see _add_template
         t = TARGETS[name]
         kind = "KL_GUEST_" + t["kind"].upper()
         # `userdata` defaults to the row name — one profile per target is the
@@ -1701,7 +1735,78 @@ def c_table():
     return "\n".join(out)
 
 
+def info_values(t):
+    """The Info.plist values that come from a row, as gen_xcodeproj.py writes
+    them (its KL_* build settings; every one is a string in the built plist).
+    What a build's own options decide (start screen, test switches, language,
+    controller mode, render scale from KLEPTON_RENDER_SCALE) is not in here."""
+    import re
+    flag = lambda v: "1" if v else "0"
+    return {
+        "KLHandMattingDefault": flag(t["hand_matting"]),
+        "KLGamepadMap": t["gamepad_map"],
+        "KLRenderScaleDefault": "%.2f" % float(t["render_scale"]),
+        "KLVideoDefault": flag(t["video"]),
+        "KLAutoBootDefault": flag(t["autoboot"]),
+        "KLFoveationDefault": flag(t["foveation"]),
+        "KLFoveationReset": str(int(t["foveation_reset"])),
+        "KLVkMsaaDefault": str(int(t["vk_msaa"])),
+        "KLVkFoveationDefault": t["vk_foveation"],
+        "KLPictureReset": str(int(t["picture_reset"])),
+        "KLMaxRateDefault": str(int(t["max_rate"])),
+        "KLFrameGenDefault": t["framegen"],
+        "KLOutputDefault": t["output"],
+        "KLTestOn": ",".join(n for n in re.split(r"[,\s]+", t["test_on"]) if n),
+    }
+
+
+def template_data():
+    """What finishing the app template for a game needs from this file, for
+    someone who cannot run it (a headset): the rows of the table, and for a
+    store title outside it, how its row is worked out and which settings the
+    title is known to want. mktemplate.sh puts this beside the template."""
+    def row(name, t):
+        t = dict(t)
+        _settle(name, t)
+        return {"tree": t["tree"], "apk": t["apk"], "obb": t["obb"], "entry": t["entry"],
+                "kind": t["kind"], "userdata": t.get("userdata", name),
+                "display": t["display"], "generic": bool(t["generic"]),
+                "obbFile": t["obb_file"], "stageFiles": t.get("stage_files", ""),
+                # The libraries the row names; null where the row leaves it to
+                # what is in the game ("libs": None), as for a store title.
+                "libraries": t["libs"].split() if isinstance(t["libs"], str) else None,
+                "info": info_values(t)}
+    generic = {"libs": None, "srcdir": "", "tree": "", "apk": "", "assets": "", "qtplugins": "",
+               "obb": "", "entry": "", "kind": "unity", "product": "", "display": "",
+               "autoboot": False, "generic": True}
+    def store(name):
+        t = {**generic, **STORE_DEFAULTS.get(name, {})}
+        _settle(name, t)
+        return info_values(t)
+    return {
+        "format": 1,
+        # Rows the runtime has compiled in: KLTarget alone is enough for these.
+        "targets": {name: row(name, t) for name, t in sorted(TARGETS.items())
+                    if name != TEMPLATE and t["kind"] != "linux"},
+        # A store title outside the table, x<app id>: its row is worked out from
+        # its files (see _generic_row for the rule these three lists belong to)...
+        "generic": {
+            "info": store(""),
+            "obb": dict(sorted(GENERIC_OBB.items())),
+            # ...the libraries the runtime replaces or leaves out (Makefile, guestlibs-list)...
+            "replacedLibraries": ["libOVRPlugin", "libovrplatformloader", "libvrapi"],
+            "excludedLibraries": ["libfrda", "libscript"],
+        },
+        # ...and the settings single titles are known to want.
+        "store": {name: store(name) for name in sorted(STORE_DEFAULTS)},
+    }
+
+
 def main(argv):
+    if len(argv) > 1 and argv[1] == "--template-data":
+        import json
+        print(json.dumps(template_data(), indent=1, sort_keys=True))
+        return 0
     if len(argv) > 1 and argv[1] == "--list":
         for k in sorted(TARGETS):
             print(k)

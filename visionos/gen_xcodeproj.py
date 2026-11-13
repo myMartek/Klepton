@@ -201,7 +201,8 @@ if SC2:
     if os.environ.get('SC2_TEST_SET') == 'coremods':
         SC2 += ['SC2_libdatakeeper','SC2_libunicode']
     # The bundle id is the target's usual one (or AVP Play's prefix): mods are an update of the same app.
-    if KLT['name'] != 'beatsaber140':
+    # ...or the app template (mktemplate.sh), which is finished for that game later.
+    if KLT['name'] != 'beatsaber140' and not (KLT['name'] == 'template' and os.environ.get('KLEPTON_TEMPLATE') == '1'):
         raise SystemExit('Scotland2 mods exist for beatsaber140 only.')
     if os.environ.get('SC2_BUILD_MODE') == 'release':
         import json as _sc2_json

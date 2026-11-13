@@ -16,11 +16,46 @@ static const kl_target TARGETS[] = {
 };
 #undef KL_TARGET_ROW
 
+// The one row stated at run time — kl_target_define(). Empty until then.
+static kl_target g_defined;
+
 const kl_target *kl_target_lookup(const char *name) {
     if (!name || !*name) return NULL;
     for (unsigned i = 0; i < sizeof TARGETS / sizeof *TARGETS; i++)
         if (!strcmp(TARGETS[i].name, name)) return &TARGETS[i];
+    if (g_defined.name && !strcmp(g_defined.name, name)) return &g_defined;
     return NULL;
+}
+
+const kl_target *kl_target_define(const char *name, const char *entry_lib,
+                                  const char *obb, const char *kind) {
+    // The names targets.py's rows carry in "kind"; its --c-table writes them
+    // as KL_GUEST_<NAME>.
+    static const struct { const char *name; kl_guest_kind kind; } KINDS[] = {
+        { "unity", KL_GUEST_UNITY },   { "steamlink", KL_GUEST_STEAMLINK },
+        { "ue4", KL_GUEST_UE4 },       { "jkxr", KL_GUEST_JKXR },
+        { "native", KL_GUEST_NATIVE }, { "sdl2", KL_GUEST_SDL2 },
+        { "gles3jni", KL_GUEST_GLES3JNI }, { "linux", KL_GUEST_LINUX },
+    };
+    static char s_name[128], s_apk[160], s_assets[160], s_libdir[192],
+                s_entry[128], s_obb[512];
+    if (!name || !*name || !entry_lib || !*entry_lib || !obb || !kind) return NULL;
+    const kl_guest_kind *found = NULL;
+    for (unsigned i = 0; i < sizeof KINDS / sizeof *KINDS; i++)
+        if (!strcmp(KINDS[i].name, kind)) found = &KINDS[i].kind;
+    if (!found) return NULL;
+
+    snprintf(s_name,   sizeof s_name,   "%s", name);
+    snprintf(s_apk,    sizeof s_apk,    "%s.apk", name);
+    snprintf(s_assets, sizeof s_assets, "%s/assets", name);
+    snprintf(s_libdir, sizeof s_libdir, "%s/lib/arm64-v8a", name);
+    snprintf(s_entry,  sizeof s_entry,  "%s", entry_lib);
+    snprintf(s_obb,    sizeof s_obb,    "%s", obb);
+    g_defined = (kl_target){ .name = s_name, .tree = s_name, .apk = s_apk,
+                             .assets = s_assets, .libdir = s_libdir,
+                             .entry_lib = s_entry, .userdata = s_name,
+                             .obb = s_obb, .kind = *found };
+    return &g_defined;
 }
 
 const kl_target *kl_target_default(void) {
