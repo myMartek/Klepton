@@ -77,6 +77,54 @@ static void P(FILE *out, const char *fmt, ...) {
 // already default-on for hl2 via their own target check, so they are not repeated.
 static void kl_driver_env_defaults(const kl_target *t) {
     if (!t || !t->name) return;
+    if (!strcmp(t->name, "vivecraft")) {
+        // Minecraft: Java Edition with Vivecraft (the Mach-O guest). The row of
+        // rebelancap's vivecraft-visionos 1.0.3 as far as this tree has the
+        // switch; what it measured is in that tree's targets.py.
+        //
+        // The game's ONE eye swapchain is a 2-slice array it attaches a slice at
+        // a time. Served directly, the slices are the compositor's own eye
+        // textures and no per-eye copy is made (two full copies a frame cost
+        // about 3 ms there). =0 is the copy.
+        setenv("KL_XR_ARRAY_DIRECT", "1", 0);
+        // Vivecraft's scene target is single-sampled and of the eye's size: with
+        // this it takes the display's rate map like the swapchain does, and the
+        // VR post shader is rewritten to read it at the physical position, so
+        // the whole eye chain is drawn foveated (about half the fragments).
+        // Needs Vivecraft's render scale at 1.0 and its FSAA off, which is how
+        // the game's files come. Only with "Foveated rendering" on (KL_VRR).
+        setenv("KL_VRR_MIN_SAMPLES", "1", 0);
+        // The rate map the game is drawn through is the display's own, floored
+        // and ramped (KleptonCompositor.swift): no zone below 0.40 of full rate
+        // (+1.3 mip levels at the far edge, where the display itself keeps 0.10
+        // to 0.20), and no zone-to-zone fall of more than 8%, which is what took
+        // a visible line of coarser leaves out of the upper field of view.
+        setenv("KL_VRR_FLOOR", "0.40", 0);
+        setenv("KL_VRR_RAMP", "0.92", 0);
+        // (KL_VRR_MIRROR is deliberately NOT set: here it means the rate map for
+        // multiview framebuffers on the copy path, which this game has none of;
+        // should the direct route ever fall back to the copy, an unset switch
+        // leaves that picture unfoveated but right.)
+        setenv("KL_XR_EYE_MIRROR", "0", 0);
+        // Minecraft renders in GAMMA space on every version: what it writes is an
+        // sRGB code value, never linear light, and the visionOS drawable treats
+        // every sample as linear. Its "L/R Eye" RGBA8 targets are blitted into
+        // the sRGB swapchain, which encodes a second time on ES; the forced
+        // decode undoes that ("bright, washed" without).
+        setenv("KL_SRGB_DECODE", "1", 0);
+        // 8x anisotropic filtering on mipmapped textures (the block atlas); the
+        // game does not ask for it on every path.
+        setenv("KL_GLFB_ANISO", "8", 0);
+        // The first frame waits for the compositor's first pose, and a head pose
+        // is only called valid once one has been published. Off for the other
+        // guests of this tree; rebelancap's runs of this game had both on, and
+        // Vivecraft places the player by the first head pose it is given.
+        setenv("KL_XR_BOOT_GATE", "1", 0);
+        setenv("KL_XR_HONEST_HEAD", "1", 0);
+        // libltw's own counter line for its staged buffer uploads ([ltw-buf]),
+        // once a second: read by the translator, not by anything here.
+        setenv("LTW_DARWIN_BUFSTATS", "1", 0);
+    }
     if (!strcmp(t->name, "x3044656825604617")) {
         // Doctor Who: The Edge of Time, build 368 (community fix 93). Its
         // multiview programs target separate-eye framebuffers: kl_glfb lowers
@@ -576,6 +624,12 @@ void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) 
         kl_egl_set_gles_version(3, 0);
         fprintf(stderr, "  [gl] DeoVR: GLES 3.0 capability profile (ANGLE backend)\n");
     }
+    if (t && !strcmp(t->name, "vivecraft")) {
+        // Minecraft through libltw: the translator must see an honest ES 3.0
+        // (it is what ANGLE on Metal is), or it takes paths the backend lacks.
+        kl_egl_set_gles_version(3, 0);
+        fprintf(stderr, "  [gl] Minecraft: GLES 3.0 capability profile (ANGLE backend)\n");
+    }
     // KL_GLES_VERSION=<major>.<minor> — the GLES level described to any guest,
     // for trying a title on the 3.0 profile above without a build.
     {
@@ -687,6 +741,8 @@ int kl_driver_owns_frame_loop(void) {
     case KL_GUEST_SDL2:
     case KL_GUEST_LINUX:
     case KL_GUEST_GLES3JNI: return 1;
+    // Its loop is its own main(), entered by the app (kl_app_macho.inc).
+    case KL_GUEST_MACHO:    return 1;
     default:            return 0;
     }
 }
@@ -966,6 +1022,9 @@ int kl_driver_boot(FILE *out) {
     case KL_GUEST_SDL2:      rc = boot_sdl2(out);      break;
     case KL_GUEST_LINUX:     rc = boot_linux(out);     break;
     case KL_GUEST_GLES3JNI:  rc = boot_gles3jni(out);  break;
+    // Refused by name rather than left to the Unity sequence below: a Mach-O
+    // guest has no libmain to load, and its door is the app's.
+    case KL_GUEST_MACHO:     return fail("a Mach-O guest is loaded by the app's own door, not by kl_driver_boot");
     default:                 rc = boot_unity(out);     break;
     }
     if (rc == 0 && g_gap_only)
@@ -1189,6 +1248,7 @@ int kl_driver_lifecycle_begin(FILE *out) {
     case KL_GUEST_SDL2:      return begin_sdl2(out);
     case KL_GUEST_LINUX:     return begin_linux(out);
     case KL_GUEST_GLES3JNI:  return begin_gles3jni(out);
+    case KL_GUEST_MACHO:     return fail("a Mach-O guest is started by the app's own door, not by kl_driver_lifecycle_begin");
     default:                 return begin_unity(out);
     }
 }

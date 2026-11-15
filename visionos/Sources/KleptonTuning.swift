@@ -13,7 +13,12 @@
 // panel behaves exactly as it did before this file existed.
 import SwiftUI
 import Metal
+// (Not in the visionOS simulator's SDK. A simulator build of the Minecraft
+// target declares the few names used below itself, as a device without a
+// scaler: Minecraft/MetalFXSimulatorStandIn.swift.)
+#if canImport(MetalFX)
 import MetalFX
+#endif
 import simd
 
 /// One complete set. Value semantics on purpose: the render thread reads a

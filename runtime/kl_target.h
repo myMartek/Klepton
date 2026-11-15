@@ -67,6 +67,15 @@ typedef enum {
     // here. `libdir`, `apk` and `assets` mean nothing to it; its files are the
     // staged tree kl_linuxproc.h describes.
     KL_GUEST_LINUX,
+    // A guest that is ALREADY a Darwin library: no APK, no klepton-ld, no ELF
+    // and no shim under it. Its dylibs are embedded in the app's Frameworks/ and
+    // loaded with dlopen, and it is entered through one exported C function on a
+    // thread of its own. Minecraft with Vivecraft (the vivecraft row: a GraalVM
+    // native-image, `klmc_main`) is the first. Not to be confused with
+    // KL_GUEST_NATIVE above, which is an Android NativeActivity. The door is the
+    // app's (visionos/Sources/Minecraft/kl_app_macho.inc): kl_driver has no boot
+    // sequence for this kind, and `libdir`, `apk` and `assets` mean nothing to it.
+    KL_GUEST_MACHO,
 } kl_guest_kind;
 
 typedef struct {

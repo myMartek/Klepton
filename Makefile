@@ -1559,6 +1559,22 @@ swiftcheck:
 	  > build/swiftcheck.log 2>&1 || { cat build/swiftcheck.log; exit 1; }; \
 	  echo "  swiftcheck: the visionOS app typechecks against runtime/*.h"
 
+# ...and the same check for the Mach-O guest's app (Minecraft, target vivecraft).
+# Its own sources are in visionos/Sources/Minecraft/ and the shared ones reach
+# them behind `#if KL_MACHO_GUEST`: the check above sees neither, which is right
+# for it — that is every other target's app, and it must stay what it was. Not a
+# prerequisite of `xros` for the same reason: this is one target's gate.
+.PHONY: swiftcheck-macho
+swiftcheck-macho:
+	@mkdir -p build/swift-module-cache
+	@xcrun -sdk xros swiftc -typecheck -target arm64-apple-xros26.0 \
+	  -module-cache-path build/swift-module-cache -D KL_MACHO_GUEST \
+	  -import-objc-header visionos/Sources/Klepton-Bridging-Header.h \
+	  $(RUNTIME_INC) visionos/Sources/*.swift visionos/Sources/Minecraft/*.swift \
+	  visionos/SteamCloudKit/Sources/SteamCloudKit/*.swift \
+	  > build/swiftcheck-macho.log 2>&1 || { cat build/swiftcheck-macho.log; exit 1; }; \
+	  echo "  swiftcheck-macho: the Minecraft app typechecks against runtime/*.h"
+
 # The archives are real targets with real prerequisites, not side effects of a
 # .PHONY rule. That distinction cost a debugging pass: with only a phony rule
 # producing it, an edited kl_image.c left a stale libklepton.a in place, the

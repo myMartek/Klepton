@@ -174,6 +174,13 @@ enum Immersive {
 /// session wants when the headset comes off with a capture still open.
 enum Lifecycle {
     static func scenePhaseChanged(to phase: ScenePhase) {
+        #if KL_MACHO_GUEST
+        // Minecraft's world goes on playing with its launcher window closed, and
+        // its game can end and the launcher come back: neither is "leave when
+        // the picture is gone", so that target has a rule of its own
+        // (Minecraft/KleptonMCBoot.swift, MCLifecycle).
+        if kl_app_target_is_macho() != 0 { MCLifecycle.scenePhaseChanged(to: phase); return }
+        #endif
         NSLog("[app] scene phase -> \(phase)")
         // The crown press delivers .inactive at once but .background only when
         // the system gets round to it (measured ~30 s). The music belongs to
@@ -376,10 +383,24 @@ struct KleptonApp: App {
         KLControllerFocus.start()
         // Spatial controllers after a system interruption (KleptonControllerRecovery.swift).
         KLControllerRecovery.start()
+        #if KL_MACHO_GUEST
+        // Before any view reads the game's launch.txt: Minecraft's files ride in
+        // the bundle, and an empty container has to be a game dir by the time
+        // its launcher appears (Minecraft/KleptonPayload.swift).
+        if kl_app_target_is_macho() != 0 { KleptonPayload.materialize() }
+        #endif
     }
 
     var body: some Scene {
-        WindowGroup(id: SurrealAimGuide.launcherID) { BootView() }
+        WindowGroup(id: SurrealAimGuide.launcherID) {
+            #if KL_MACHO_GUEST
+            // Minecraft's window is its own launcher (accounts, world, play
+            // mode) and, while the game plays windowed, the game.
+            if kl_app_target_is_macho() != 0 { MCBootView() } else { BootView() }
+            #else
+            BootView()
+            #endif
+        }
             .defaultSize(width: 1280, height: 800)
             // On the app's phase, not this window's: closing the boot window
             // while the immersive space is up is not backgrounding, and must
@@ -484,10 +505,21 @@ struct KleptonApp: App {
         // `.progressive` is offered as well: with the crown switch on, that is
         // the style the scene selects, and the Digital Crown becomes the
         // immersion control instead of a Home button (crown patch).
+        #if targetEnvironment(simulator)
+        // The simulator (visionOS 27.0) refuses every plain present of a scene
+        // that offers the progressive style ("cannot present drawable: need to
+        // use drawable render context when supporting progressive style"), the
+        // ordinary frames included, which a headset takes. So a simulator build
+        // offers the two styles every game had before the crown switch, and
+        // with them the plain present works again (seen with the Minecraft
+        // target, the one whose libraries exist for the simulator).
+        .immersionStyle(selection: .constant(chroma.immersionFull ? .full : .mixed), in: .mixed, .full)
+        #else
         .immersionStyle(selection: .constant(immersiveStyle),
                         in: .mixed, .full,
                         .progressive(KleptonImmersion.minimum...KleptonImmersion.maximum,
                                      initialAmount: KleptonImmersion.initial))
+        #endif
         // See Immersive.systemOverlays. On the scene, not on a view inside it:
         // a CompositorLayer has no view hierarchy for the View-level modifier to
         // attach to, so the Scene-level one is the only one that applies here.

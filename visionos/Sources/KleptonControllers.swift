@@ -2729,6 +2729,12 @@ final class KleptonControllers {
                 publishJoints(hand: hand, anchor: hand == 0 ? leftHand : rightHand,
                               holdsController: accPose != nil || st.fromController)
             }
+            #if KL_MACHO_GUEST
+            // Minecraft: whether this hand's input comes from the hand alone is
+            // said afresh every frame; every branch below that does not make it
+            // so leaves it at "a controller, not a hand" (machoFingers).
+            if Self.machoGuest { kl_openxr_set_hand_fingers(Int32(hand), 0, 0, 0) }
+            #endif
             if let accPose {
                 if Self.discretePinch { resetDiscretePinch(hand) }
                 handSuppressed[hand] = false
@@ -2816,6 +2822,13 @@ final class KleptonControllers {
                                         : OVRPRawButton.rIndexTrigger
                     st.buttons |= bit; st.touches |= bit
                 }
+                #if KL_MACHO_GUEST
+                // Minecraft from a bare hand: the fingers a Touch controller
+                // has no pinch for (machoFingers). Not with a gamepad merged
+                // over the hand below, whose shoulder button is the hand
+                // trigger and would read as a middle pinch.
+                if Self.machoGuest, padName == nil { machoFingers(anchor, hand: hand, into: &st) }
+                #endif
                 // The gamepad's sticks and buttons, on top of what the hand said.
                 mergePad(into: &st, hand: hand)
                 }
@@ -3097,3 +3110,51 @@ enum KLControllerFocus {
         currentWatch(.GCControllerDidStopBeingCurrent, "controller no longer current")
     }
 }
+
+#if KL_MACHO_GUEST
+// Minecraft with Vivecraft played with bare hands. The game wants a whole Touch
+// controller from each hand, and this tree gives a bare hand one input, the
+// index pinch as the trigger. From KleptonControllers.swift of rebelancap's
+// vivecraft-visionos 1.0.3: the thumb's pinch against each of the other three
+// fingers goes to kl_openxr, whose KL_XR_HANDS_TOUCH turns the ring and little
+// pinches into the face buttons and the middle pinch — published here as the
+// hand trigger, 0..1 — into squeeze, the hotbar and a drag thumbstick. The
+// thresholds, the hysteresis and the one-finger-at-a-time rule are there, where
+// a host test can drive them. For this target only: no other game has ever been
+// handed a hand trigger from a bare hand.
+extension KleptonControllers {
+    static let machoGuest = kl_app_target_is_macho() != 0
+
+    /// Thumb to `tip`, as 0 (open, `KL_PINCH_OPEN`) .. 1 (touching,
+    /// `KL_PINCH_CLOSED`) — the index pinch's calibration, reused for the other
+    /// fingers until a worn round measures them apart.
+    private func machoPinch(_ anchor: HandAnchor, _ tip: HandSkeleton.JointName) -> Float {
+        guard let sk = anchor.handSkeleton else { return 0 }
+        let thumb = sk.joint(.thumbTip), f = sk.joint(tip)
+        guard thumb.isTracked && f.isTracked else { return 0 }
+        let a = thumb.anchorFromJointTransform.columns.3
+        let b = f.anchorFromJointTransform.columns.3
+        let d = simd_length(SIMD3<Float>(a.x - b.x, a.y - b.y, a.z - b.z))
+        return max(0, min(1, (Self.pinchOpen - d) / (Self.pinchOpen - Self.pinchClosed)))
+    }
+
+    /// Called for a hand whose input is the hand's own this frame (no Sense or
+    /// Surreal controller wrote it, no gamepad is merged over it).
+    fileprivate func machoFingers(_ anchor: HandAnchor, hand: Int, into st: inout KleptonHandState) {
+        // The middle pinch is the grab. Analog, and pinned to 1 with its bit
+        // once it reads as pressed, exactly as the index trigger is: a bit that
+        // says pressed over an axis that says 0.6 is a disagreement a guest
+        // resolves the wrong way half the time.
+        let g = machoPinch(anchor, .middleFingerTip)
+        let grabbed = g > 0.55
+        st.handTrigger = grabbed ? 1 : g
+        if grabbed {
+            let bit = hand == 0 ? OVRPRawButton.lHandTrigger : OVRPRawButton.rHandTrigger
+            st.buttons |= bit; st.touches |= bit
+        }
+        kl_openxr_set_hand_fingers(Int32(hand), 1,
+                                   machoPinch(anchor, .ringFingerTip),
+                                   machoPinch(anchor, .littleFingerTip))
+    }
+}
+#endif

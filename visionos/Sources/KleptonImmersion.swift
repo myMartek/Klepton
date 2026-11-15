@@ -46,5 +46,11 @@ enum KleptonImmersion {
     /// soon as the scene offers the progressive style, so an app with the
     /// switch off cannot start at all without this (measured 2026-11-06, first
     /// launch with the switch off).
+    #if targetEnvironment(simulator)
+    // A simulator build's scene does not offer the progressive style
+    // (KleptonApp.swift), so its priming frames take the plain present.
+    static let primingThroughContext = false
+    #else
     static let primingThroughContext = true
+    #endif
 }

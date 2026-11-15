@@ -1557,10 +1557,26 @@ static XrResult klxr_StructureTypeToString(void *instance, int32_t value, char *
     return KLXR_SUCCESS;
 }
 
+static void klxr_reset_instance_children(void);   // defined after the action and space pools
+static int  g_instances_created;                  // instances this process has been GIVEN
+static int  g_spec_input;                         // kl_openxr_set_spec_input, with the pools below
+
 static XrResult klxr_CreateInstance(const XrInstanceCreateInfo *info, void **instance) {
     fprintf(stderr, "  [xr] >> %s\n", "xrCreateInstance");
     if (!info || !instance) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     if (info->type != XR_TYPE_INSTANCE_CREATE_INFO) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
+    // One instance at a time (g_instance is a single slot). A SECOND instance in
+    // the same process — Minecraft quit to its launcher and started again —
+    // means the one before it is gone, and with it, per the spec, every handle
+    // it owned. A guest that ends without destroying its actions (the finished
+    // game is parked, not shut down) would otherwise fill the action pool run
+    // by run, which the Vivecraft line saw as XR_ERROR_LIMIT_REACHED.
+    // Only once an instance has really been handed out: a guest whose first
+    // xrCreateInstance was refused and who asks again owns nothing yet.
+    // And only for the guest that runs twice in one process, the one that came
+    // through kl_openxr_set_spec_input: every other guest's second
+    // xrCreateInstance finds what it always found, whatever it does with it.
+    if (g_instances_created && g_spec_input) klxr_reset_instance_children();
 
     // XrInstanceCreateInfoAndroidKHR rides in `next` and carries the VM and the
     // activity. We need neither — we made both — so this is logged and not read.
@@ -1601,6 +1617,7 @@ static XrResult klxr_CreateInstance(const XrInstanceCreateInfo *info, void **ins
     }
     if (missing) { g_instance.magic = 0; KLXR_RET(KLXR_ERROR_EXTENSION_NOT_PRESENT); }
 
+    g_instances_created++;
     *instance = &g_instance;
     return KLXR_SUCCESS;
 }
@@ -3783,6 +3800,20 @@ static XrPosef klxr_space_pose_ex(const klxr_space *sp, int *tracked,
         if (motion_known) *motion_known = kl_ovrp_head_motion(lin, ang);
     } else if (sp->reference_type == KLXR_REF_SPACE_LOCAL) {
         base.position.y = klxr_local_height();
+    } else if (sp->reference_type == KLXR_REF_SPACE_STAGE) {
+        // KL_XR_STAGE_DROP=<metres> (default 0, which leaves STAGE where it
+        // always was): put STAGE's floor that far BELOW the tracking origin — a
+        // SIMULATOR aid, from rebelancap's tree. The visionOS simulator's device
+        // anchor sits at the tracking origin (head y = 0), so a guest that
+        // trusts STAGE as floor-relative (Minecraft with Vivecraft) puts its
+        // camera at the player's feet: the title menu floats overhead and a
+        // world renders as sky with the ground edge-on. On a headset ARKit's
+        // origin is near the floor and this stays 0. Every STAGE-relative pose —
+        // views, hands, submitted layers — goes through here, so they move
+        // together.
+        static float drop = -1.0f;
+        if (drop < 0.0f) { drop = kl_env_float("KL_XR_STAGE_DROP", 0.0f); if (drop < 0.0f) drop = 0.0f; }
+        if (drop > 0.0f) base.position.y = -drop;   // unset: not even a negative zero
     } else if (KLXR_IS_ANCHOR(sp->reference_type)) {
         // A room anchor: where kl_ovrp's emulated room puts it, in the tracking
         // space STAGE is. Static, so no motion to report.
@@ -4265,7 +4296,17 @@ enum { KLXR_MAGIC_ACTION_SET = 0x584b4c41 /* 'XKLA' */,
 // per Minecraft key mapping plus Vivecraft's hidden keys (~100 before mods)
 // across 8 sets. At 128, a modded instance hit LIMIT_REACHED, and the guest
 // then suggests a NULL action, which fails its whole profile.
-enum { KLXR_PATH_MAX = 512, KLXR_ACTION_SET_MAX = 16, KLXR_ACTION_MAX = 256 };
+// Newer Vivecraft also makes one action per physical source and controller
+// profile: about 790 for Minecraft 1.21.11 and 758 for 26.2 (measured on the
+// Vivecraft line, where 534 calls hit LIMIT_REACHED at 256 and the null handles
+// then failed its VR start). So the pools HOLD 2048 actions and 1024 paths —
+// and hand out more than the 256 and 512 they always had only to a guest that
+// came through kl_openxr_set_spec_input (klxr_action_limit, klxr_path_limit):
+// a pool running out is an answer too, and no other guest's has been looked at
+// with a larger one. The loops over the action pool skip an empty slot on one
+// compare.
+enum { KLXR_PATH_MAX = 1024, KLXR_ACTION_SET_MAX = 16, KLXR_ACTION_MAX = 2048,
+       KLXR_PATH_MAX_USUAL = 512, KLXR_ACTION_MAX_USUAL = 256 };
 
 enum { KLXR_ACTION_TYPE_BOOLEAN = 1, KLXR_ACTION_TYPE_FLOAT = 2,
        KLXR_ACTION_TYPE_VECTOR2F = 3, KLXR_ACTION_TYPE_POSE = 4,
@@ -4519,6 +4560,48 @@ static klxr_action     g_actions[KLXR_ACTION_MAX];
 // guest never asked" from "we never answered".
 static struct { unsigned syncs, bound, hands_seen, haptic_pulses; } g_xr_input;
 
+// What a new instance finds of the one before it: nothing (klxr_CreateInstance).
+// Action sets, actions and spaces are the pools a guest that never destroys
+// anything fills up. The rest is what a fresh process starts with and a second
+// run would otherwise inherit: a session nobody destroyed, still answering
+// xrPollEvent with whatever it had queued (a STOPPING the old run never read,
+// handed to a guest that has no session yet); the profile the previous run
+// suggested, answered by xrGetCurrentInteractionProfile until this run suggests
+// its own; and the refresh rate it asked for.
+//
+// Left alone, because nothing here can free them safely: swapchains and hand
+// trackers the previous run never destroyed. Their GL textures belong to a
+// context this call may not be on — xrCreateInstance comes before the guest has
+// bound anything — so they keep their pool slots (64 and 8) and their storage.
+// The paths stay too: a path is only a number for a string, and the same
+// strings come again.
+static void klxr_reset_instance_children(void) {
+    int sets = 0, acts = 0, spaces = 0;
+    for (int i = 0; i < KLXR_ACTION_SET_MAX; i++) sets += g_action_sets[i].magic != 0;
+    for (int i = 0; i < KLXR_ACTION_MAX; i++) acts += g_actions[i].magic != 0;
+    for (int i = 0; i < KLXR_SPACE_MAX; i++) spaces += g_spaces[i].magic != 0;
+    const int session = g_session.magic == KLXR_MAGIC_SESSION;
+    memset(g_action_sets, 0, sizeof g_action_sets);
+    memset(g_actions, 0, sizeof g_actions);
+    memset(g_spaces, 0, sizeof g_spaces);
+    g_session.magic = 0;
+    g_active_profile[0] = 0;
+    g_xr_refresh_requested = 0.0f;
+    fprintf(stderr, "  [xr] new instance in this process: the previous instance's %d action set(s), "
+                    "%d action(s), %d space(s)%s released\n", sets, acts, spaces,
+            session ? " and its session" : "");
+}
+
+// Spec-strict input. See kl_openxr_set_spec_input in kl_openxr.h. Read per call
+// rather than latched at the first one, so the answer is the driver's whenever
+// it made its call; the price is two getenv()s in each xrSyncActions.
+static int g_spec_input;
+void kl_openxr_set_spec_input(int on) { g_spec_input = on ? 1 : 0; }
+static int klxr_spec(const char *env) { return kl_env_on(env, g_spec_input); }
+// How much of each pool is handed out — see KLXR_ACTION_MAX.
+static int klxr_action_limit(void) { return g_spec_input ? KLXR_ACTION_MAX : KLXR_ACTION_MAX_USUAL; }
+static uint32_t klxr_path_limit(void) { return g_spec_input ? KLXR_PATH_MAX : KLXR_PATH_MAX_USUAL; }
+
 static XrResult klxr_StringToPath(void *instance, const char *path_string, XrPath *path) {
     if (!klxr_inst(instance)) KLXR_RET(KLXR_ERROR_HANDLE_INVALID);
     if (!path_string || !path) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
@@ -4531,7 +4614,7 @@ static XrResult klxr_StringToPath(void *instance, const char *path_string, XrPat
 
     for (uint32_t i = 0; i < g_path_count; i++)
         if (strcmp(g_paths[i], path_string) == 0) { *path = i + 1; return KLXR_SUCCESS; }
-    if (g_path_count >= KLXR_PATH_MAX) KLXR_RET(KLXR_ERROR_PATH_COUNT_EXCEEDED);
+    if (g_path_count >= klxr_path_limit()) KLXR_RET(KLXR_ERROR_PATH_COUNT_EXCEEDED);
     snprintf(g_paths[g_path_count], XR_MAX_PATH_LENGTH, "%s", path_string);
     *path = ++g_path_count;         // 1-based; 0 stays XR_NULL_PATH
     return KLXR_SUCCESS;
@@ -4609,7 +4692,8 @@ static XrResult klxr_CreateAction(void *action_set, const XrActionCreateInfo *in
     if (!info || !action) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     if (info->type != XR_TYPE_ACTION_CREATE_INFO) KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     klxr_log_chain("xrCreateAction", info->next);
-    for (int i = 0; i < KLXR_ACTION_MAX; i++) {
+    const int limit = klxr_action_limit();
+    for (int i = 0; i < limit; i++) {
         if (g_actions[i].magic) continue;
         g_actions[i].magic = KLXR_MAGIC_ACTION;
         g_actions[i].type = info->actionType;
@@ -4762,6 +4846,7 @@ static XrResult klxr_SuggestInteractionProfileBindings(
     if (active && !strcmp(profile, KLXR_HAND_PROFILE))
         fprintf(stderr, "  [xr] BRINK native hand profile: anatomy-based grip, pinch, poke enabled\n");
     unsigned took = 0, unknown = 0;
+    const int shorthand = klxr_spec("KL_XR_PATH_SHORTHAND");
     for (uint32_t i = 0; i < bindings->countSuggestedBindings; i++) {
         const XrActionSuggestedBinding *b = &bindings->suggestedBindings[i];
         klxr_action *a = klxr_action_of(b->action);
@@ -4772,12 +4857,37 @@ static XrResult klxr_SuggestInteractionProfileBindings(
         int kind = KLXR_SRC_NONE;
         uint32_t bit = 0;
         if (hand >= 0) {
+            int matched = 0;
             for (int s = 0; s < KLXR_SOURCE_COUNT; s++)
                 if (strcmp(g_xr_sources[s].suffix, suffix) == 0) {
                     kind = g_xr_sources[s].kind;
                     bit  = g_xr_sources[s].bit[hand];
+                    matched = 1;
                     break;
                 }
+            // KL_XR_PATH_SHORTHAND: the spec lets a binding name a component's
+            // PARENT (`/input/squeeze`, `/input/a`), and the runtime then picks
+            // its `value` if the component has one, else its `click`. Vivecraft
+            // binds trigger and squeeze this way (so the Vivecraft line, where
+            // attack, use, the GUI click and the hotbar were unbound without
+            // it). Only a path the table does not know as it stands is
+            // completed: the bare trigger has a row of its own above, and a
+            // boolean on the bare thumbstick is given the stick's click further
+            // down, for every guest.
+            if (shorthand && !matched) {
+                static const char *const comp[] = { "/value", "/click" };
+                for (int c = 0; c < 2 && !matched; c++) {
+                    char full[XR_MAX_PATH_LENGTH];
+                    snprintf(full, sizeof full, "%s%s", suffix, comp[c]);
+                    for (int s = 0; s < KLXR_SOURCE_COUNT; s++)
+                        if (strcmp(g_xr_sources[s].suffix, full) == 0) {
+                            kind = g_xr_sources[s].kind;
+                            bit  = g_xr_sources[s].bit[hand];
+                            matched = 1;
+                            break;
+                        }
+                }
+            }
             // XR_EXT_hand_interaction has its own, ANATOMICAL action sources.
             // It must not inherit Oculus Touch grip/aim offsets or threshold bits.
             if (!strcmp(profile, KLXR_HAND_PROFILE)) {
@@ -5095,6 +5205,287 @@ static float klxr_eval(const klxr_action *a, int bind, int hand, const klxr_hand
     }
 }
 
+// ---- KL_XR_HANDS_TOUCH: Touch controllers made from tracked hands ----------
+//
+// From the Vivecraft line (refs/vivecraft/1.0.3), gesture for gesture. Vivecraft
+// suggests bindings for oculus/touch_controller and never asks for hand
+// tracking, so someone with no controllers reaches it only through whatever
+// Touch state the frontend publishes for a hand — and a hand has no thumbstick
+// (walk, turn, GUI scroll) and no face buttons (jump, inventory, teleport,
+// radial menu, pause). This turns four fingertip pinches per hand into the
+// whole controller:
+//
+//   finger (thumb to)   left hand                    right hand
+//   index               trigger (use / place)        trigger (attack, GUI click)
+//   middle  tap         squeeze (hotbar prev)        squeeze (hotbar next)
+//   middle  hold        squeeze held (climb, shift)  squeeze held
+//   middle  hold+drag   thumbstick (walk)            thumbstick (turn x, scroll y)
+//   ring                X (teleport: hold, release)  A (jump, GUI right click)
+//   little  tap         Y (inventory)                B (radial menu, hold)
+//   little  hold 0.8 s  menu (pause)                 B, still held
+//
+// Where the four values come from: index and middle are this hand's index and
+// hand trigger as kl_ovrp holds them (kl_ovrp_set_controller_input), ring and
+// little arrive through kl_openxr_set_hand_fingers. So the frontend has to
+// publish a tracked hand's thumb-to-MIDDLE pinch as its hand trigger, 0..1, as
+// the Vivecraft line's does (its "grab"). A frontend that publishes the index
+// pinch alone leaves the three middle rows without a source; the rest works.
+//
+// One finger owns the thumb at a time. A pinch to one fingertip brings the
+// neighbouring tips close too, so the first finger over its press threshold
+// (the nearest, on a tie) owns the gesture until it lets go, and the others
+// read released for the duration.
+//
+// Only a hand the frontend says is a HAND is rewritten. A controller
+// (tracked = 0), a report older than 250 ms, and a run with no frontend all
+// pass through untouched. Off unless the guest came through
+// kl_openxr_set_spec_input; KL_XR_HANDS_TOUCH=0/1 overrides.
+//
+// KL_XR_HANDS_FAKE="<t0>-<t1>:<L|R><I|M|R|P>[@dx,dy,dz][;...]" is the stand-in
+// for a run without hands: that finger pinches from t0 to t1 seconds after the
+// first sync, and for an M pinch the hand is displaced by (dx,dy,dz) metres
+// (tracking space) from 0.1 s into the window, which is a drag. Read only with
+// the switch on.
+enum { KLXR_F_INDEX = 0, KLXR_F_MIDDLE, KLXR_F_RING, KLXR_F_LITTLE, KLXR_F_N };
+enum { KLXR_MID_PENDING = 0, KLXR_MID_STICK, KLXR_MID_SQUEEZE };
+
+static struct {
+    float    ring[2], little[2];
+    int      tracked[2];
+    int64_t  stamp[2];
+} g_hf;
+static pthread_mutex_t g_hf_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void kl_openxr_set_hand_fingers(int hand, int tracked, float ring, float little) {
+    if ((unsigned)hand > 1) return;
+    pthread_mutex_lock(&g_hf_lock);
+    g_hf.tracked[hand] = tracked ? 1 : 0;
+    g_hf.ring[hand]    = ring;
+    g_hf.little[hand]  = little;
+    g_hf.stamp[hand]   = klxr_now();
+    pthread_mutex_unlock(&g_hf_lock);
+}
+
+#define KLXR_HF_FAKE_MAX 16
+static struct { float t0, t1; int hand, finger; float d[3]; } g_hf_fake[KLXR_HF_FAKE_MAX];
+static int g_hf_fake_n = -1;
+static int64_t g_hf_t0;
+
+static void klxr_hf_fake_parse(void) {
+    g_hf_fake_n = 0;
+    const char *p = kl_env_str("KL_XR_HANDS_FAKE", NULL);
+    while (p && *p && g_hf_fake_n < KLXR_HF_FAKE_MAX) {
+        float t0, t1; char hc, fc; int used = 0;
+        if (sscanf(p, " %f-%f:%c%c%n", &t0, &t1, &hc, &fc, &used) != 4) break;
+        p += used;
+        int hand = (hc == 'L' || hc == 'l') ? 0 : (hc == 'R' || hc == 'r') ? 1 : -1;
+        const char *fs = "IMRP", *fp = strchr(fs, fc >= 'a' ? fc - 32 : fc);
+        float d[3] = { 0, 0, 0 };
+        if (*p == '@') {
+            p++;
+            if (sscanf(p, "%f,%f,%f%n", &d[0], &d[1], &d[2], &used) == 3) p += used;
+        }
+        if (hand >= 0 && fc && fp) {
+            g_hf_fake[g_hf_fake_n].t0 = t0; g_hf_fake[g_hf_fake_n].t1 = t1;
+            g_hf_fake[g_hf_fake_n].hand = hand;
+            g_hf_fake[g_hf_fake_n].finger = (int)(fp - fs);
+            memcpy(g_hf_fake[g_hf_fake_n].d, d, sizeof d);
+            fprintf(stderr, "  [xr] KL_XR_HANDS_FAKE: %c %c pinch %.2f-%.2f s, drag (%.3f, %.3f, %.3f) m\n",
+                    hand ? 'R' : 'L', fs[g_hf_fake[g_hf_fake_n].finger], (double)t0, (double)t1,
+                    (double)d[0], (double)d[1], (double)d[2]);
+            g_hf_fake_n++;
+        }
+        while (*p && *p != ';') p++;
+        if (*p == ';') p++;
+    }
+}
+
+static struct {
+    int      owner[2];          // KLXR_F_* or -1
+    int64_t  since[2];          // when the owner pressed
+    int      mid_mode[2];       // KLXR_MID_* while the middle finger owns
+    float    anchor[2][3];      // hand position at the middle press
+    XrVector3f fwd[2], right[2];// the head's yaw frame at the middle press
+    int64_t  squeeze_pulse[2];  // squeeze reads 1 until this time (a tap)
+    int64_t  y_pulse, menu_pulse;
+    int      menu_sent;         // this left-little hold already sent menu
+    unsigned edges;
+} g_ht = { .owner = { -1, -1 } };
+
+// Latched at the first xrSyncActions, which a guest reaches long after the
+// driver has said what it is.
+static int klxr_hands_touch_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = klxr_spec("KL_XR_HANDS_TOUCH");
+        // Said only when on: the line belongs to the guest that has the mapping.
+        if (on)
+            fprintf(stderr, "  [xr] hands -> Touch (KL_XR_HANDS_TOUCH): ON — tracked hands "
+                            "drive trigger/squeeze/stick/A/B/X/Y/menu\n");
+    }
+    return on;
+}
+
+static const char *const g_hf_names[KLXR_F_N] = { "index", "middle", "ring", "little" };
+
+static void klxr_hands_edge(int h, const char *what) {
+    if (g_ht.edges++ < 400 || kl_env_on("KL_XR_HANDS_TRACE", 0))
+        fprintf(stderr, "  [xr] hands: %s %s\n", h ? "R" : "L", what);
+}
+
+// Rewrite in[h] for each hand-tracked hand. Called with kl_ovrp's raw state
+// already in `in`, before any action is evaluated.
+static void klxr_hands_touch(klxr_hand_input *in, int64_t now) {
+    if (!klxr_hands_touch_on()) return;
+    if (g_hf_fake_n < 0) klxr_hf_fake_parse();
+    if (!g_hf_t0) g_hf_t0 = now;
+    const float t = (float)((double)(now - g_hf_t0) / 1e9);
+    static float dead = -1, full, engage, hold_s, menu_s;
+    if (dead < 0) {
+        dead   = kl_env_float("KL_XR_HANDS_STICK_DEAD", 0.015f);
+        full   = kl_env_float("KL_XR_HANDS_STICK_FULL", 0.07f);
+        engage = kl_env_float("KL_XR_HANDS_STICK_ENGAGE", 0.025f);
+        hold_s = kl_env_float("KL_XR_HANDS_HOLD", 0.30f);
+        menu_s = kl_env_float("KL_XR_HANDS_MENU_HOLD", 0.80f);
+        if (dead < 0) dead = 0;                 // a negative knob must not re-read every sync
+        if (full <= dead + 0.005f) full = dead + 0.005f;
+    }
+    const int64_t pulse_ns = 150000000;   // a tap holds its button 150 ms
+
+    for (int h = 0; h < 2; h++) {
+        float f[KLXR_F_N];
+        float drag[3] = { 0, 0, 0 };
+        pthread_mutex_lock(&g_hf_lock);
+        int tracked = g_hf.tracked[h] && now - g_hf.stamp[h] < 250000000;
+        f[KLXR_F_RING] = g_hf.ring[h]; f[KLXR_F_LITTLE] = g_hf.little[h];
+        pthread_mutex_unlock(&g_hf_lock);
+        if (!tracked) f[KLXR_F_RING] = f[KLXR_F_LITTLE] = 0;
+        f[KLXR_F_INDEX]  = in[h].index_trigger;
+        f[KLXR_F_MIDDLE] = in[h].hand_trigger;
+        int faked = 0;
+        for (int k = 0; k < g_hf_fake_n; k++) {
+            if (g_hf_fake[k].hand != h) continue;
+            faked = 1;
+            if (t < g_hf_fake[k].t0 || t >= g_hf_fake[k].t1) continue;
+            f[g_hf_fake[k].finger] = 1.0f;
+            if (t - g_hf_fake[k].t0 >= 0.1f) memcpy(drag, g_hf_fake[k].d, sizeof drag);
+        }
+        if (!tracked && !faked) {
+            if (g_ht.owner[h] >= 0) g_ht.owner[h] = -1;   // a controller took over
+            continue;
+        }
+        if (faked) in[h].present = 1;
+
+        // --- ownership: one finger at a time, with hysteresis.
+        int o = g_ht.owner[h];
+        if (o >= 0 && f[o] < (o <= KLXR_F_MIDDLE ? 0.4f : 0.30f)) {
+            // Release. Middle: a short press that never dragged is a tap.
+            if (o == KLXR_F_MIDDLE && g_ht.mid_mode[h] == KLXR_MID_PENDING) {
+                g_ht.squeeze_pulse[h] = now + pulse_ns;
+                klxr_hands_edge(h, "middle tap -> squeeze click");
+            }
+            if (o == KLXR_F_LITTLE && h == 0 && !g_ht.menu_sent) {
+                g_ht.y_pulse = now + pulse_ns;
+                klxr_hands_edge(h, "little tap -> Y (inventory)");
+            }
+            if (o == KLXR_F_MIDDLE && g_ht.mid_mode[h] == KLXR_MID_STICK)
+                klxr_hands_edge(h, "middle release -> thumbstick centred");
+            o = g_ht.owner[h] = -1;
+        }
+        if (o < 0) {
+            int best = -1;
+            for (int k = 0; k < KLXR_F_N; k++) {
+                float thr = k <= KLXR_F_MIDDLE ? 0.6f : 0.55f;
+                if (f[k] >= thr && (best < 0 || f[k] > f[best])) best = k;
+            }
+            if (best >= 0) {
+                o = g_ht.owner[h] = best;
+                g_ht.since[h] = now;
+                if (best == KLXR_F_MIDDLE) {
+                    float pos[3] = { 0, 0, 0 }, q[4] = { 0, 0, 0, 1 }, hp[3];
+                    kl_ovrp_hand_motion(h, pos, NULL, NULL, NULL);
+                    for (int c = 0; c < 3; c++) g_ht.anchor[h][c] = pos[c] + drag[c];
+                    kl_ovrp_get_guest_head_pose(&hp[0], &hp[1], &hp[2],
+                                                &q[0], &q[1], &q[2], &q[3]);
+                    XrVector3f fw = klxr_qrot((XrQuaternionf){ q[0], q[1], q[2], q[3] },
+                                              (XrVector3f){ 0, 0, -1 });
+                    fw.y = 0;
+                    float n = sqrtf(fw.x * fw.x + fw.z * fw.z);
+                    if (n < 1e-3f) fw = (XrVector3f){ 0, 0, -1 };
+                    else { fw.x /= n; fw.z /= n; }
+                    g_ht.fwd[h] = fw;
+                    g_ht.right[h] = (XrVector3f){ -fw.z, 0, fw.x };
+                    g_ht.mid_mode[h] = KLXR_MID_PENDING;
+                }
+                if (best == KLXR_F_LITTLE && h == 0) g_ht.menu_sent = 0;
+                char m[64];
+                snprintf(m, sizeof m, "%s pinch (%.2f)", g_hf_names[best], (double)f[best]);
+                klxr_hands_edge(h, m);
+            }
+        }
+
+        // --- the Touch state this hand now reports.
+        uint32_t keep = in[h].buttons & ~(KL_OVRP_RAW_LINDEX_TRIGGER | KL_OVRP_RAW_RINDEX_TRIGGER |
+                                          KL_OVRP_RAW_LHAND_TRIGGER | KL_OVRP_RAW_RHAND_TRIGGER);
+        uint32_t b = keep, tch = in[h].touches & keep;
+        float trig = 0, sq = 0, sx = in[h].stick_x, sy = in[h].stick_y;
+        const float held_s = o >= 0 ? (float)((double)(now - g_ht.since[h]) / 1e9) : 0;
+        if (o == KLXR_F_INDEX) {
+            trig = f[KLXR_F_INDEX];
+            b |= h ? KL_OVRP_RAW_RINDEX_TRIGGER : KL_OVRP_RAW_LINDEX_TRIGGER;
+        } else if (o < 0) {
+            trig = f[KLXR_F_INDEX] < 0.6f ? f[KLXR_F_INDEX] : 0;   // analog approach only
+        }
+        if (o == KLXR_F_MIDDLE) {
+            float pos[3] = { 0, 0, 0 };
+            kl_ovrp_hand_motion(h, pos, NULL, NULL, NULL);
+            XrVector3f d = { pos[0] + drag[0] - g_ht.anchor[h][0],
+                             pos[1] + drag[1] - g_ht.anchor[h][1],
+                             pos[2] + drag[2] - g_ht.anchor[h][2] };
+            float x = d.x * g_ht.right[h].x + d.z * g_ht.right[h].z;
+            float y = h == 0 ? d.x * g_ht.fwd[h].x + d.z * g_ht.fwd[h].z  // left: push = walk
+                             : d.y;                                       // right: up = scroll up
+            float r = sqrtf(x * x + y * y);
+            if (g_ht.mid_mode[h] == KLXR_MID_PENDING) {
+                if (r >= engage) {
+                    g_ht.mid_mode[h] = KLXR_MID_STICK;
+                    klxr_hands_edge(h, "middle drag -> thumbstick");
+                } else if (held_s >= hold_s) {
+                    g_ht.mid_mode[h] = KLXR_MID_SQUEEZE;
+                    klxr_hands_edge(h, "middle hold -> squeeze held");
+                }
+            }
+            if (g_ht.mid_mode[h] == KLXR_MID_STICK) {
+                float s = r <= dead ? 0 : fminf(1.0f, (r - dead) / (full - dead));
+                sx = r > 1e-6f ? x / r * s : 0;
+                sy = r > 1e-6f ? y / r * s : 0;
+                tch |= h ? KL_OVRP_RAW_RTHUMBSTICK : KL_OVRP_RAW_LTHUMBSTICK;
+            } else if (g_ht.mid_mode[h] == KLXR_MID_SQUEEZE) {
+                sq = 1.0f;
+            }
+        }
+        if (now < g_ht.squeeze_pulse[h]) sq = 1.0f;
+        if (sq > 0) b |= h ? KL_OVRP_RAW_RHAND_TRIGGER : KL_OVRP_RAW_LHAND_TRIGGER;
+        if (o == KLXR_F_RING) b |= h ? KL_OVRP_RAW_A : KL_OVRP_RAW_X;
+        if (o == KLXR_F_LITTLE) {
+            if (h) b |= KL_OVRP_RAW_B;
+            else if (!g_ht.menu_sent && held_s >= menu_s) {
+                g_ht.menu_sent = 1;
+                g_ht.menu_pulse = now + pulse_ns;
+                klxr_hands_edge(h, "little hold -> menu");
+            }
+        }
+        if (h == 0 && now < g_ht.y_pulse) b |= KL_OVRP_RAW_Y;
+        if (h == 0 && now < g_ht.menu_pulse) b |= KL_OVRP_RAW_START;
+        in[h].buttons = b;
+        in[h].touches = tch | (b & ~(KL_OVRP_RAW_START));
+        in[h].index_trigger = trig;
+        in[h].hand_trigger = sq;
+        in[h].stick_x = sx;
+        in[h].stick_y = sy;
+    }
+}
+
 // The per-frame input snapshot. This must succeed even when nothing is bound —
 // an app that treats a failed sync as fatal is an app that never renders a
 // frame.
@@ -5111,6 +5502,9 @@ static XrResult klxr_SyncActions(void *session, const XrActionsSyncInfo *info) {
                                                  &in[h].index_trigger,
                                                  &in[h].hand_trigger,
                                                  &in[h].stick_x, &in[h].stick_y);
+    // KL_XR_HANDS_TOUCH: a hand-tracked hand's pinches become the whole Touch
+    // controller (stick, face buttons) before any action reads it.
+    klxr_hands_touch(in, klxr_now());
     // The Oculus Touch profile has a menu button on the LEFT hand only — the
     // right's slot is the reserved system button, and guests (Steam Link)
     // suggest bindings accordingly. A menu press arriving on the RIGHT hand
@@ -5124,10 +5518,32 @@ static XrResult klxr_SyncActions(void *session, const XrActionsSyncInfo *info) {
           in[0].buttons |= KL_OVRP_RAW_START;
           in[0].touches |= KL_OVRP_RAW_START;
       } }
+    // KL_XR_ACTIVE_SETS: only the sets named in this sync are live. The spec
+    // makes an action in a set the app did not sync inactive, and Vivecraft
+    // depends on it: its own priority rule disables any action that shares a
+    // source with a higher-priority ACTIVE one, so with every set reported
+    // active its keyboard set's click (priority 50, both triggers) disables
+    // attack and use for good. A set listed with a subaction path is live for
+    // that hand only. Off, every set is live, as it always was here.
+    const int sets_on = klxr_spec("KL_XR_ACTIVE_SETS");
+    const int thresh_on = klxr_spec("KL_XR_BOOL_THRESHOLD");
+    if (sets_on && info->countActiveActionSets && !info->activeActionSets)
+        KLXR_RET(KLXR_ERROR_VALIDATION_FAILURE);
     int64_t now = klxr_now();
     for (int i = 0; i < KLXR_ACTION_MAX; i++) {
         klxr_action *a = &g_actions[i];
         if (!a->magic) continue;
+        int set_mask = 3;
+        if (sets_on) {
+            set_mask = 0;
+            for (uint32_t k = 0; k < info->countActiveActionSets; k++) {
+                if (info->activeActionSets[k].actionSet != a->set) continue;
+                XrPath sp = info->activeActionSets[k].subactionPath;
+                if (!sp) { set_mask = 3; break; }
+                int sh = klxr_path_hand(klxr_path_str(sp), NULL);
+                if (sh >= 0) set_mask |= 1 << sh;
+            }
+        }
         for (int h = 0; h < 2; h++) {
             int b = klxr_bind_hand(a, h);
             int kind = a->kind[b];
@@ -5136,6 +5552,7 @@ static XrResult klxr_SyncActions(void *session, const XrActionsSyncInfo *info) {
                 klxr_hand_sample hs;
                 active = klxr_native_hand_sample(h, &hs);
             }
+            if (!(set_mask & (1 << h))) active = 0;
             float v = 0.0f, w = 0.0f;
             if (active) {
                 if (kind == KLXR_SRC_STICK_VEC) {
@@ -5148,6 +5565,17 @@ static XrResult klxr_SyncActions(void *session, const XrActionsSyncInfo *info) {
                 } else {
                     klxr_eval_other = &in[1 - h];
                     v = klxr_eval(a, b, h, &in[h]);
+                }
+                // KL_XR_BOOL_THRESHOLD: a BOOLEAN action bound to an analog
+                // source (a trigger or squeeze value, a stick axis) is pressed
+                // through hysteresis, which is what the spec asks of a runtime.
+                // Off, "pressed" is any non-zero value: a trigger resting at
+                // 0.02 reads held, and every tremor is an edge.
+                if (thresh_on && a->type == KLXR_ACTION_TYPE_BOOLEAN &&
+                    (kind == KLXR_SRC_INDEX_TRIGGER || kind == KLXR_SRC_HAND_TRIGGER ||
+                     kind == KLXR_SRC_STICK_X || kind == KLXR_SRC_STICK_Y)) {
+                    int was = a->active[h] && a->value[h] != 0.0f;
+                    v = fabsf(v) > (was ? 0.4f : 0.6f) ? 1.0f : 0.0f;
                 }
             }
             // "Changed" only between two ACTIVE syncs. A controller appearing
@@ -5630,6 +6058,12 @@ typedef struct {
     // under (klxr_vk_stage_base), 0 while none is assigned.
     int      vk_stage1;
     int      vk_flat;      // its images were told to kl_vulkan as a flat layer's (klxr_vk_flat)
+    // KL_XR_ARRAY_DIRECT (klxr_array_direct_back): 1 while this array swapchain's
+    // slices are served as the 2D textures below, 2 once a newer swapchain has
+    // taken the eye storage from it, 0 for every other swapchain.
+    int      direct;
+    uint32_t slice_tex[KLXR_SWAPCHAIN_IMAGES][2];   // [image][slice], compositor-backed
+    unsigned noted_views;     // ...and the views of it already registered as eyes
 } klxr_swapchain;
 
 static klxr_swapchain g_swapchains[KLXR_SWAPCHAIN_MAX];
@@ -5765,6 +6199,120 @@ static void klxr_gl_init(void) {
 #define KLXR_GL_TEXTURE_2D       0x0DE1
 #define KLXR_GL_TEXTURE_2D_ARRAY 0x8C1A
 
+// KL_XR_ARRAY_DIRECT (off unless a target sets it): serve an arraySize-2 colour
+// swapchain's slices as 2D textures backed by the compositor's eye storage,
+// from creation. From the Vivecraft line (refs/vivecraft/1.0.3).
+//
+// Why: an array swapchain cannot be re-pointed (glEGLImageTargetTexture2DOES
+// takes GL_TEXTURE_2D only, and ANGLE's Metal EGLImage is ONE slice, as 2D), so
+// it reaches the compositor by COPY — kl_glfb_mirror_eye_layer, a full-size
+// blit per eye per frame on top of whatever the guest did to fill the slice,
+// and a copy whose source is an array slice is the one kind ANGLE cannot carry
+// texel for texel between two foveated targets. Minecraft with Vivecraft
+// touches its swapchain images in exactly one way: it attaches a slice to a
+// framebuffer with glFramebufferTextureLayer, once at setup, and writes that
+// framebuffer every frame. So the slice can BE a texture of ours: kl_glfb
+// answers that attachment with the 2D texture (kl_glfb_array_redirect), the
+// guest writes the compositor's storage, and the copy is gone.
+//
+// The storage is what the copy would have landed in — a GL name of ours given
+// a provider slice by kl_glfb_bind_eye_mtl_texture, as klfb_mirror_dest makes
+// its destinations — and it is filed as the re-point route files its own
+// (klxr_back_eye_images): under the image index, so one swapchain owns the eye
+// slots at a time.
+//
+// Why at creation and not at the first xrEndFrame, as that route does: the
+// guest attaches at setup, before any frame, and re-pointing storage under a
+// live attachment is what broke JKXR (klxr_eye_mirror_on). The price is that
+// with the switch on EVERY two-slice colour swapchain is taken for the eyes,
+// submitted as a projection layer or not — it is for a guest known to make
+// exactly one. View v must read slice v (Vivecraft: imageArrayIndex is the
+// view index); xrEndFrame checks it and says so if a guest does otherwise.
+static int klxr_array_direct_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = kl_env_on("KL_XR_ARRAY_DIRECT", 0);
+        if (on)
+            fprintf(stderr, "  [xr] KL_XR_ARRAY_DIRECT=1 — an arraySize-2 eye swapchain's "
+                            "slices are the compositor's own 2D eye textures; the guest "
+                            "writes where the compositor samples, NO per-eye mirror copy\n");
+    }
+    return on;
+}
+
+static void klxr_array_direct_back(klxr_swapchain *sc) {
+    if (!klxr_array_direct_on() || sc->array_size != 2 || sc->mip_count != 1) return;
+    if (klxr_format_is_depth(sc->session, sc->format) || !kl_glfb_has_mtl_provider()) return;
+    if (sc->count > KLXR_SWAPCHAIN_IMAGES) return;
+    // A bind leaves GL_TEXTURE_2D naming the texture it was given, and this is
+    // the guest's context, between two of its own calls: Minecraft keeps its
+    // own record of what is bound and would go on drawing with ours.
+    int32_t save_tex = -1;
+    if (gl_GetIntegerv) gl_GetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &save_tex);
+    uint32_t t[KLXR_SWAPCHAIN_IMAGES][2] = {{0}};
+    int bound[KLXR_SWAPCHAIN_IMAGES][2] = {{0}};
+    int done = 0;
+    for (int k = 0; k < sc->count; k++) {
+        gl_GenTextures(2, t[k]);
+        for (int e = 0; e < 2; e++) {
+            bound[k][e] = t[k][e] && kl_glfb_bind_eye_mtl_texture(e, k, t[k][e],
+                                                                  (int)sc->width, (int)sc->height,
+                                                                  (uint32_t)sc->format);
+            done += bound[k][e];
+        }
+    }
+    if (save_tex >= 0) gl_BindTexture(KLXR_GL_TEXTURE_2D, (uint32_t)save_tex);
+    const int served = done == 2 * sc->count;
+    // Exactly one swapchain owns the eye slots (klxr_back_eye_images' rule). A
+    // bind above that took a slot from an older direct swapchain released — and
+    // deleted — that one's 2D texture through kl_glfb's replace backstop, so its
+    // redirect would now name a dead, later recycled GL name: drop it (an attach
+    // of the old array's layer then falls through to its own 1x1 storage, which
+    // nothing composites) and forget the texture. When this swapchain is served
+    // it has taken every slot, so the older one keeps nothing at all — not even
+    // a name that happens to equal a new one, which is what a second run on a
+    // fresh GL context hands out. When it is not, the older one keeps what its
+    // slots still hold and loses the rest; either way it is no longer shown.
+    for (int i = 0; i < KLXR_SWAPCHAIN_MAX; i++) {
+        klxr_swapchain *o = &g_swapchains[i];
+        if (o == sc || !o->direct) continue;
+        int lost = served;
+        for (int k = 0; k < o->count && k < KLXR_SWAPCHAIN_IMAGES; k++)
+            for (int e = 0; e < 2; e++) {
+                if (!o->slice_tex[k][e]) continue;
+                if (!served && kl_glfb_eye_gl_texture(e, k) == o->slice_tex[k][e]) continue;
+                kl_glfb_array_redirect(o->tex[k], e, 0);
+                o->slice_tex[k][e] = 0;
+                lost = 1;
+            }
+        if (lost) o->direct = 2;
+    }
+    if (!served) {
+        // The provider declined somewhere: this swapchain takes the mirror
+        // copy, whole. What was bound is released (which deletes the name with
+        // the storage), what was not is only a name.
+        for (int k = 0; k < sc->count; k++)
+            for (int e = 0; e < 2; e++) {
+                if (!t[k][e]) continue;
+                if (bound[k][e]) kl_glfb_release_eye_texture(e, k);
+                else if (gl_DeleteTextures) gl_DeleteTextures(1, &t[k][e]);
+            }
+        fprintf(stderr, "  [xr] array direct: only %d of %d slices could be backed — "
+                        "this swapchain takes the mirror copy\n", done, 2 * sc->count);
+        return;
+    }
+    memcpy(sc->slice_tex, t, sizeof t);
+    sc->direct = 1;
+    sc->mtl_eye = -1;
+    for (int k = 0; k < sc->count; k++)
+        for (int e = 0; e < 2; e++) kl_glfb_array_redirect(sc->tex[k], e, t[k][e]);
+    fprintf(stderr, "  [xr] array direct: swapchain %ux%u fmt 0x%llx x%d images — slices "
+                    "served as compositor-backed 2D textures (%u/%u %u/%u %u/%u); the "
+                    "per-eye mirror copy is off for it\n",
+            sc->width, sc->height, (unsigned long long)sc->format, sc->count,
+            t[0][0], t[0][1], t[1][0], t[1][1], t[2][0], t[2][1]);
+}
+
 static XrResult klxr_CreateSwapchain(void *session, const XrSwapchainCreateInfo *info,
                                      void **swapchain) {
     klxr_session *s = klxr_sess(session);
@@ -5891,12 +6439,20 @@ static XrResult klxr_CreateSwapchain(void *session, const XrSwapchainCreateInfo 
     gl_GenTextures(sc->count, sc->tex);
 
     uint32_t target = sc->array_size > 1 ? KLXR_GL_TEXTURE_2D_ARRAY : KLXR_GL_TEXTURE_2D;
+    // Before the array storage: a direct-served swapchain needs only a token
+    // one (KL_XR_ARRAY_DIRECT; `direct` stays 0 with the switch off).
+    if (target == KLXR_GL_TEXTURE_2D_ARRAY) klxr_array_direct_back(sc);
     for (int i = 0; i < sc->count; i++) {
         gl_BindTexture(target, sc->tex[i]);
         if (target == KLXR_GL_TEXTURE_2D_ARRAY) {
+            // Direct: every attachment of a slice goes to its 2D texture
+            // instead, so the array is a name the guest can label and bind and
+            // nothing ever draws into — 1x1, not three images of two eyes
+            // (450 MB at 4864x3902).
             if (gl_TexStorage3D)
                 gl_TexStorage3D(target, (int32_t)sc->mip_count, (uint32_t)sc->format,
-                                (int32_t)sc->width, (int32_t)sc->height,
+                                sc->direct ? 1 : (int32_t)sc->width,
+                                sc->direct ? 1 : (int32_t)sc->height,
                                 (int32_t)sc->array_size);
         } else if (gl_TexStorage2D) {
             gl_TexStorage2D(target, (int32_t)sc->mip_count, (uint32_t)sc->format,
@@ -6189,6 +6745,65 @@ static int klxr_mirror_eye_image(klxr_swapchain *sc, int eye, int layer) {
                                     sc->array_size > 1 ? layer : -1,
                                     (int)sc->width, (int)sc->height,
                                     (uint32_t)sc->format);
+}
+
+// KL_XR_ARRAY_DIRECT, per frame: nothing to copy — what the guest wrote is
+// already in the compositor's storage for (view, image). The slot IS the image
+// index, as on the re-point route. Returns -1 (eye not composited, said once)
+// wherever the answer would be the wrong picture rather than none: the guest
+// reads a slice other than its view's, a newer swapchain owns the storage, or
+// the slot no longer holds this swapchain's texture (a copied swapchain was
+// filed over it: the copy takes its slots from a pool that does not know these).
+static int klxr_array_direct_frame(klxr_swapchain *sc, int view, int slice) {
+    if (sc->last_released < 0 || sc->last_released >= sc->count) return -1;
+    if (sc->direct != 1) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [xr] array direct: an older array swapchain is still "
+                            "submitted after a newer one took the eye storage — its "
+                            "views are not composited\n");
+        return -1;
+    }
+    if (slice != view) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [xr] array direct: view %d reads slice %d — the direct "
+                            "route serves slice v as eye v only; this eye is not "
+                            "composited (KL_XR_ARRAY_DIRECT=0 for the mirror copy)\n",
+                    view, slice);
+        return -1;
+    }
+    uint32_t tex = sc->slice_tex[sc->last_released][view];
+    if (!tex || kl_glfb_eye_gl_texture(view, sc->last_released) != tex) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [xr] array direct: eye %d slot %d no longer holds this "
+                            "swapchain's texture %u (it holds %u) — this eye is not "
+                            "composited\n", view, sc->last_released, tex,
+                    kl_glfb_eye_gl_texture(view, sc->last_released));
+        return -1;
+    }
+    static int said[2];
+    if (!said[view]++)
+        fprintf(stderr, "  [xr] array direct: eye %d composited straight from slice %d's "
+                        "2D texture (image %d -> GL %u) — no mirror copy this run\n",
+                view, slice, sc->last_released, tex);
+    return sc->last_released;
+}
+
+// The texture (and layer) that holds view `slice` of image `idx`: the direct
+// route's 2D texture, or the swapchain's own image and slice. For a swapchain
+// that is not served direct — every one, with KL_XR_ARRAY_DIRECT off — this is
+// sc->tex[idx] and the slice (-1 for a 2D image), what the callers passed
+// before it existed.
+static uint32_t klxr_image_tex(const klxr_swapchain *sc, int idx, int slice, int *layer) {
+    if (sc->direct && sc->array_size > 1 && idx >= 0 && idx < KLXR_SWAPCHAIN_IMAGES &&
+        slice >= 0 && slice < 2 && sc->slice_tex[idx][slice]) {
+        if (layer) *layer = -1;
+        return sc->slice_tex[idx][slice];
+    }
+    if (layer) *layer = sc->array_size > 1 ? slice : -1;
+    return sc->tex[idx];
 }
 
 // ---------------------------------------------------------------------------
@@ -6535,6 +7150,21 @@ static XrResult klxr_DestroySwapchain(void *swapchain) {
     // they cannot be found from `count` the way the eye textures below are.
     // Same +1 as the mirror uses, so swapchain 0 is not the unknown sentinel.
     kl_glfb_forget_eye_source((uint32_t)(klxr_layer_id(sc) + 1));
+    // KL_XR_ARRAY_DIRECT: the slices' 2D textures, and the redirects that name
+    // them. A texture is released only where it still owns its eye slot; one a
+    // newer swapchain took was released (and deleted) through kl_glfb's replace
+    // backstop and forgotten here when that happened (klxr_array_direct_back),
+    // and a second delete could hit a name GL has handed out again since. The
+    // array itself is deleted below, like any swapchain that was never backed.
+    if (sc->direct) {
+        for (int k = 0; k < sc->count && k < KLXR_SWAPCHAIN_IMAGES; k++)
+            for (int e = 0; e < 2; e++) {
+                uint32_t t = sc->slice_tex[k][e];
+                if (!t) continue;
+                kl_glfb_array_redirect(sc->tex[k], e, 0);
+                if (kl_glfb_eye_gl_texture(e, k) == t) kl_glfb_release_eye_texture(e, k);
+            }
+    }
     // `mtl_eye`, not `eye`: every projection layer's views claim an eye, so
     // releasing on `eye` would have one layer's swapchain tear down the storage
     // another layer's is still rendering into — and mtl_eye is cleared when a
@@ -7839,11 +8469,11 @@ static XrResult klxr_EndFrame_inner(void *session, const XrFrameEndInfo *info) {
             if (probe_layers && sc->last_released >= 0 && sc->last_released < sc->count) {
                 char ptag[24];
                 snprintf(ptag, sizeof ptag, "PLYR%uE%u", li, v);
-                kl_glfb_probe_tex(ptag, sc->tex[sc->last_released],
-                                  sc->array_size > 1
-                                    ? (int)proj->views[v].subImage.imageArrayIndex
-                                    : -1,
-                                  (int)sc->width, (int)sc->height);
+                int probe_layer = -1;
+                uint32_t probe_tex = klxr_image_tex(sc, sc->last_released,
+                                         (int)proj->views[v].subImage.imageArrayIndex,
+                                         &probe_layer);
+                kl_glfb_probe_tex(ptag, probe_tex, probe_layer, (int)sc->width, (int)sc->height);
             }
             // One-time geometry census: every projection layer's reference
             // space, field of view and pose. A layer in VIEW space is
@@ -7931,11 +8561,10 @@ static XrResult klxr_EndFrame_inner(void *session, const XrFrameEndInfo *info) {
                         char dp[512];
                         snprintf(dp, sizeof dp, "%s/eye%u_%03u_layer%u.png",
                                  ddir, v, frame_seq, li);
-                        kl_glfb_dump_tex(dp, sc->tex[sc->last_released],
-                                         sc->array_size > 1
-                                           ? (int)proj->views[v].subImage.imageArrayIndex
-                                           : -1,
-                                         (int)sc->width, (int)sc->height);
+                        int d_layer = -1;
+                        uint32_t d_tex = klxr_image_tex(sc, sc->last_released,
+                                             (int)proj->views[v].subImage.imageArrayIndex, &d_layer);
+                        kl_glfb_dump_tex(dp, d_tex, d_layer, (int)sc->width, (int)sc->height);
                         fprintf(stderr,
                             "  [xr] dump eye %u layer %u #%03u: %ux%u tan "
                             "L%.4f R%.4f U%.4f D%.4f%s\n",
@@ -7984,6 +8613,11 @@ static XrResult klxr_EndFrame_inner(void *session, const XrFrameEndInfo *info) {
                     klxr_publish_eye_vulkan(sc, (int)v,
                                             (int)proj->views[v].subImage.imageArrayIndex);
                     slot = klxr_vk_stage_base(sc) + sc->last_released;
+                } else if (sc->direct && sc->array_size > 1) {
+                    // KL_XR_ARRAY_DIRECT: the guest wrote the compositor's
+                    // storage itself, so there is nothing to copy.
+                    slot = klxr_array_direct_frame(sc, (int)v,
+                                          (int)proj->views[v].subImage.imageArrayIndex);
                 } else if (klxr_eye_mirror_on() || sc->array_size > 1) {
                     slot = klxr_mirror_eye_image(sc, (int)v,
                                           (int)proj->views[v].subImage.imageArrayIndex);
@@ -8016,11 +8650,14 @@ static XrResult klxr_EndFrame_inner(void *session, const XrFrameEndInfo *info) {
                 // ARRAY swapchain gives both eyes ONE texture that differ only
                 // by layer. Without either, the capture read the eye at the
                 // window's size and produced the window.
-                kl_glfb_set_live_eye_image((int)v, sc->tex[sc->last_released],
-                                           (int32_t)sc->width, (int32_t)sc->height,
-                                           sc->array_size > 1
-                                               ? (int)proj->views[v].subImage.imageArrayIndex
-                                               : -1);
+                {
+                    int live_layer = -1;
+                    uint32_t live_tex = klxr_image_tex(sc, sc->last_released,
+                                            (int)proj->views[v].subImage.imageArrayIndex,
+                                            &live_layer);
+                    kl_glfb_set_live_eye_image((int)v, live_tex, (int32_t)sc->width,
+                                               (int32_t)sc->height, live_layer);
+                }
                 // The layer states its pose in ITS space, which need not be the
                 // tracking space — so it is composed out of that space rather
                 // than used raw. The frustum comes with it: a picture rendered
@@ -8212,7 +8849,8 @@ static XrResult klxr_EndFrame_inner(void *session, const XrFrameEndInfo *info) {
                     base_tan[v][3] = tanf(f->angleDown);
                     base_eye_x[v] = proj->views[v].pose.position.x;
                     base_eye_y[v] = proj->views[v].pose.position.y;
-                    base_tex[v] = sc->tex[sc->last_released];
+                    base_tex[v] = klxr_image_tex(sc, sc->last_released,
+                                      (int)proj->views[v].subImage.imageArrayIndex, NULL);
                     base_w[v] = (int)sc->width; base_h[v] = (int)sc->height;
                     base_stage_eye[v] = slot;
                 }
@@ -8267,6 +8905,17 @@ static XrResult klxr_EndFrame_inner(void *session, const XrFrameEndInfo *info) {
                     ? (sc->eye >= 0 && (sc->vk_pub & (1u << v)) && sc->said_eyes & (1u << v))
                     : sc->eye == (int)v)
                 continue;
+            // A direct-served array swapchain is both eyes', so `eye` changes
+            // with every view of every frame and the registration below would
+            // run each time: six notes and two log lines a frame (most of a
+            // device log on the Vivecraft line). Each view is registered once
+            // instead, which leaves the same end state. (Not for the copied
+            // array swapchains: theirs is left as it has always run.)
+            if (sc->direct) {
+                unsigned bit = 1u << v;
+                if (sc->noted_views & bit) { sc->eye = (int)v; continue; }
+                sc->noted_views |= bit;
+            }
             sc->eye = (int)v;
             sc->said_eyes |= 1u << v;
             // The capture path is GL's, and there are no GL names on the Vulkan
@@ -8274,7 +8923,9 @@ static XrResult klxr_EndFrame_inner(void *session, const XrFrameEndInfo *info) {
             // MTLTextures published above instead.
             if (!sc->session || sc->session->gfx != KLXR_GFX_VULKAN)
                 for (int k = 0; k < sc->count; k++)
-                    kl_glfb_note_eye_texture(sc->eye, k, sc->tex[k]);
+                    kl_glfb_note_eye_texture(sc->eye, k,
+                        klxr_image_tex(sc, k, (int)proj->views[v].subImage.imageArrayIndex,
+                                       NULL));
             const XrRect2Di *r = &proj->views[v].subImage.imageRect;
             char imgs[96];
             if (sc->session && sc->session->gfx == KLXR_GFX_VULKAN)

@@ -44,7 +44,17 @@ static void mono_resolve(void) {
     fprintf(stderr, "  [mono] pointer and keys go to the guest\n");
 }
 
+// See kl_mono.h. NULL, as they are for every guest but a Mach-O one, leaves
+// each function below exactly as it was.
+static kl_mono_pointer_hook g_hook_pointer;
+static kl_mono_key_hook     g_hook_key;
+void kl_mono_set_input_hooks(kl_mono_pointer_hook pointer, kl_mono_key_hook key) {
+    g_hook_pointer = pointer;
+    g_hook_key = key;
+}
+
 int kl_mono_input_available(void) {
+    if (g_hook_pointer) return 1;
     mono_resolve();
     return g_in.mouse != NULL;
 }
@@ -179,6 +189,7 @@ void kl_mono_commit_text(const char *utf8) {
 }
 
 void kl_mono_pointer(int state, int action, float x, float y) {
+    if (g_hook_pointer) { g_hook_pointer(state, action, x, y); return; }
     mono_resolve();
     if (!g_in.mouse) return;
     kl_jni_local_frame_push();
@@ -187,6 +198,7 @@ void kl_mono_pointer(int state, int action, float x, float y) {
 }
 
 void kl_mono_key(int down, int keycode) {
+    if (g_hook_key) { g_hook_key(down, keycode); return; }
     mono_resolve();
     kl_fn_key fn = down ? g_in.key_down : g_in.key_up;
     if (!fn || !keycode) return;

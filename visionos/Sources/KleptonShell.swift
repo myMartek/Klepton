@@ -228,7 +228,14 @@ struct ShellWindow: View {
 
     var body: some View {
         ShellSurface(box: box)
+            #if KL_MACHO_GUEST
+            // Minecraft in its window: the gamepad is the game's and the window
+            // takes the game's shape, so there is no letterbox to fit into
+            // (Minecraft/MCShellWindowing.swift).
+            .modifier(MCShellWindowing(box: box))
+            #else
             .aspectRatio(CGSize(width: 1280, height: 800), contentMode: .fit)
+            #endif
             // A drag with zero movement is still a tap here, which is what makes
             // one recogniser enough for both: visionOS delivers an indirect
             // pinch as a drag whose location is where the person was looking.

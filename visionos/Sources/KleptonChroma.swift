@@ -133,6 +133,13 @@ final class KleptonChroma: ObservableObject {
         if klIsAlyx(), ProcessInfo.processInfo.environment["KL_HAND_MATTING"] != "1" {
             return .hidden
         }
+        #if KL_MACHO_GUEST
+        // Minecraft asks for them outright: the wearer wants their real arms,
+        // hands and the controllers in them over the world, and `.automatic`
+        // leaves that to a system default a full space does not promise. The
+        // switch still takes them away.
+        if kl_app_target_is_macho() != 0, settings.handMatting { return .visible }
+        #endif
         return settings.handMatting ? .automatic : .hidden
     }
 

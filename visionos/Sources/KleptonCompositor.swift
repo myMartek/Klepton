@@ -46,7 +46,12 @@
 import SwiftUI
 import CompositorServices
 import Metal
+// (Not in the visionOS simulator's SDK. A simulator build of the Minecraft
+// target declares the few names used below itself, as a device without a
+// scaler: Minecraft/MetalFXSimulatorStandIn.swift.)
+#if canImport(MetalFX)
 import MetalFX
+#endif
 import simd
 import ARKit
 import AVFoundation
@@ -1638,6 +1643,56 @@ final class KleptonCompositor {
                 for i in eyeQualityX[e].indices { eyeQualityX[e][i] = max(eyeQualityX[e][i], rateFloor) }
             }
         }
+
+        // ---- The ramp: no zone may fall off faster than KL_VRR_RAMP per zone ----
+        //
+        // A floor bounds HOW FAR the LOD bias goes; it says nothing about how
+        // FAST it gets there. The display's curve falls 0.85 -> 0.74 -> 0.53 ->
+        // 0.42 across three zone rows above the fovea, so a floored map changes
+        // rate by up to half a mip level in ONE zone. A texture LOD step that
+        // sharp is a visible LINE that is fixed on the screen and moves over the
+        // world with the head — in Minecraft "a horizontal seam near the top …
+        // the line almost colours the trees a slightly darker green" (its
+        // alpha-tested leaves darken with each mip level; rebelancap,
+        // vivecraft-visionos, where this is from).
+        //
+        // KL_VRR_RAMP=r (0.5..0.99) replaces each curve with its smallest
+        // envelope that never falls by more than a factor r per zone:
+        // q'[i] = max_j q[j] * r^|i-j|. It only RAISES rates (never below the
+        // display's own need), keeps the floor, and turns the step into a
+        // gradient of log2(1/r) mip levels per zone (0.92 -> 0.12 per zone). Off
+        // (1.0) unless a target asks: every other game keeps its map, and its
+        // log, as they were.
+        let ramp = klEnvFloat("KL_VRR_RAMP", 1.0)
+        if ramp >= 0.5 && ramp < 0.999 {
+            func maxStep(_ q: [Float]) -> Double {
+                var m = 0.0
+                for i in q.indices.dropFirst() where q[i] > 0 && q[i - 1] > 0 {
+                    m = max(m, abs(log2(Double(q[i]) / Double(q[i - 1]))))
+                }
+                return m
+            }
+            func envelope(_ q: [Float]) -> [Float] {
+                var out = q
+                for i in q.indices {
+                    var best = q[i]
+                    for j in q.indices {
+                        let v = q[j] * powf(ramp, Float(abs(i - j)))
+                        if v > best { best = v }
+                    }
+                    out[i] = min(1.0, best)
+                }
+                return out
+            }
+            let stepBefore = max(maxStep(qx), maxStep(qy))
+            qx = envelope(qx); qy = envelope(qy)
+            for e in eyeQualityX.indices { eyeQualityX[e] = envelope(eyeQualityX[e]) }
+            NSLog("%@", "[cp] foveation RAMP \(String(format: "%.2f", ramp))/zone — "
+                  + "worst per-zone step \(String(format: "%.2f", stepBefore)) -> "
+                  + "\(String(format: "%.2f", max(maxStep(qx), maxStep(qy)))) mip level(s); "
+                  + "fragments now \(String(format: "%.1f", 100 * frac(qx, qy)))% "
+                  + "(KL_VRR_RAMP=1 is the A/B)")
+        }
         NSLog("%@", "[cp] foveation LOD: rate floor "
               + (rateFloor > 0.01 ? String(format: "%.2f", rateFloor) : "off")
               + " — worst mip bias x +\(String(format: "%.2f", rawBiasX)) -> "
@@ -2024,14 +2079,37 @@ final class KleptonCompositor {
         var nextReport = Date()
         var nextHapticsReport = Date().addingTimeInterval(10)
         NSLog("[cp] render loop entered (startup frame-trace on; build has fence content-gate + diag)")
+        #if KL_MACHO_GUEST
+        // Minecraft: from here until the loop ends, this layer — not the app's
+        // scene phase — says whether the game is heard and whether a
+        // backgrounded app may exit (KleptonScenePolicy, Minecraft/
+        // MCAudioSession.swift). A closed launcher window moves the phase; it
+        // does not stop this loop.
+        let machoLayer = kl_app_target_is_macho() != 0
+        if machoLayer { MCAudioSession.layerChanged(ObjectIdentifier(self), .running) }
+        #endif
         loop: while true {
             switch layerRenderer.state {
             case .invalidated:
                 break loop
             case .paused:
                 NSLog("[cp] layer paused at iteration \(iterations) — waiting")
+                #if KL_MACHO_GUEST
+                // Off screen (crown press, Home): silent until it runs again.
+                if machoLayer { MCAudioSession.layerChanged(ObjectIdentifier(self), .paused) }
+                #endif
                 layerRenderer.waitUntilRunning()
                 NSLog("[cp] layer running again")
+                #if KL_MACHO_GUEST
+                // Through the policy rather than kl_audio_resume() below alone:
+                // the pause silenced deliberately, and the policy lifts that and
+                // rebuilds on the main thread. Only if the layer really runs —
+                // waitUntilRunning also returns on invalidation, and a blip of
+                // sound before the end is wrong.
+                if machoLayer, layerRenderer.state == .running {
+                    MCAudioSession.layerChanged(ObjectIdentifier(self), .running)
+                }
+                #endif
                 // ...and the audio, which does NOT come back on its own.
                 //
                 // This transition is the immersive space being temporarily
@@ -2131,6 +2209,24 @@ final class KleptonCompositor {
         // gone, not when the OS gets to it; the guest may keep rendering until
         // the join below.
         KleptonAudio.setSilenced(true)
+        #if KL_MACHO_GUEST
+        if kl_app_target_is_macho() != 0 {
+            // Minecraft's own audio session takes the same cue, and with it the
+            // decision whether a backgrounded app now leaves (MCLifecycle).
+            MCAudioSession.layerChanged(ObjectIdentifier(self), .ended)
+            // This layer's ARKit session ends with it. For every other game the
+            // process ends with the layer; Minecraft can quit to its launcher
+            // and open a NEW layer with a new compositor, and an old session
+            // left running beside the new one stalled the new one's first
+            // device anchor past the system's 2 s no-frames limit (seen in the
+            // reference tree's simulator runs).
+            if arRunning {
+                arSession.stop()
+                arRunning = false
+                NSLog("[cp] ARKit session stopped with the layer")
+            }
+        }
+        #endif
         // Ends the guest's loop and joins it, so its report — which is the
         // lifecycle report, and belongs to the guest's end of the run rather than
         // to this one — has been written before this returns.
@@ -2786,6 +2882,11 @@ final class KleptonCompositor {
         } else if !loggedFirstPicture {
             loggedFirstPicture = true
             NSLog("[cp] first guest picture composited, after \(blackFrames) black frames")
+            #if KL_MACHO_GUEST
+            // Minecraft's launcher window has shown the load until here; with
+            // the game's picture in the space it closes (KleptonMCBoot.swift).
+            Task { @MainActor in BootSession.shared.pictureIsUp() }
+            #endif
         }
 
         // Did this command buffer actually RUN? "Presented" only means committed,

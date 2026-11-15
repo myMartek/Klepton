@@ -158,6 +158,17 @@ if ENTITLEMENTS and _dropped:
 ENTITLEMENTS_SETTING = (f"\t\t\t\tCODE_SIGN_ENTITLEMENTS = {ENTITLEMENTS_FILE};\n"
                         if ENTITLEMENTS else "")
 GUEST = KLT["libs"].split()
+# A Mach-O guest (targets.py kind "macho": Minecraft). Its libraries are Darwin
+# dylibs wrapped as LIBRARY xcframeworks by mkmacho.sh rather than klepton-ld
+# translations wrapped as frameworks: embedded and signed-on-copy the same way,
+# they land as Frameworks/<name>.dylib, which is the file name the game looks
+# for. Everything below that this kind adds is added for this kind only, so the
+# project written for any other target is the same text as before.
+MACHO = KLT["kind"] == "macho"
+# Its input folder (tools/vivecraft_seed.py), where this script looks too: for
+# the game's own icon and for the licence notices its archive carried.
+MACHO_PREBUILT = (os.path.abspath(os.environ.get("KLEPTON_VIVECRAFT_PREBUILT", "").strip()
+                                  or os.path.join(HERE, "prebuilt", KLT["name"])) if MACHO else "")
 ANGLE = ["ANGLE_libEGL", "ANGLE_libGLESv2"]
 # ...and the OTHER renderer, for a guest whose graphics API is Vulkan (BONELAB).
 # Same treatment as ANGLE for the same reasons: one driver for every guest that
@@ -393,8 +404,13 @@ _assets_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "Asset
 # second. KL_NO_STEAM_ART=1 skips the fetch (the build is then iconless, as a
 # target with no artwork always was).
 _steam_art_dir = _os.path.join(HERE, "build", "steamart", KLT['name'])
+# ...and a Mach-O guest (Minecraft) without one gets the game's own icon, out of
+# the files in its input folder (macho_art.py, into build/gameart/<target>).
+# Third in line and for that kind only: the installer's stack wins here too.
+_game_art_dir = _os.path.join(HERE, "build", "gameart", KLT['name'])
+_art_dirs = (_assets_dir, _steam_art_dir) + ((_game_art_dir,) if MACHO else ())
 def _art_path(n):
-    for d in (_assets_dir, _steam_art_dir):
+    for d in _art_dirs:
         p = _os.path.join(d, n)
         if _os.path.isdir(p):
             return p
@@ -404,6 +420,11 @@ if (KLT['steam_app'] and _os.environ.get("KL_NO_STEAM_ART", "") != "1"
     # On stderr: run.sh keeps this script's first stdout line, "wrote ...".
     subprocess.run([sys.executable, _os.path.join(HERE, "steam_art.py"),
                     KLT['steam_app'], KLT['name'], _steam_art_dir], stdout=sys.stderr)
+if MACHO and not _os.path.isdir(_os.path.join(_assets_dir, f"AppIcon-{KLT['name']}.solidimagestack")):
+    # On stderr, like steam_art.py. A payload without an icon removes a stack
+    # an earlier payload left: the build is then iconless, not wrongly dressed.
+    subprocess.run([sys.executable, _os.path.join(HERE, "macho_art.py"),
+                    KLT['name'], _os.path.join(MACHO_PREBUILT, "payload"), _game_art_dir], stdout=sys.stderr)
 def _stack_exists(n): return _art_path(n + ".solidimagestack") is not None
 # With the launcher on, a trademark-free monogram icon (AppIcon-<t>-launcher) replaces
 # the target's normal icon when one is present; otherwise the normal icon stands. Both
@@ -522,6 +543,11 @@ USAGE_DESCRIPTIONS = {
     "NSBluetoothAlwaysUsageDescription": "Klepton connects to spatial controllers that are not visible to the system as standard game controllers.",
     "NSLocalNetworkUsageDescription": "Steam Link finds the PCs on your network by broadcasting to them, and streams from the one you pair with.",
 }
+if MACHO:
+    # The one use the game has for it; the sentence the system shows when Simple
+    # Voice Chat first opens the microphone.
+    USAGE_DESCRIPTIONS["NSMicrophoneUsageDescription"] = (
+        "Voice chat: other players hear you through the game's voice chat.")
 _usage_settings = "".join(
     '\t\t\t\tINFOPLIST_KEY_%s = "%s";\n' % (k, v.replace("\\", "\\\\").replace('"', '\\"'))
     for k, v in USAGE_DESCRIPTIONS.items())
@@ -603,6 +629,17 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
 SWIFT += [f"../SteamCloudKit/Sources/SteamCloudKit/{n}.swift" for n in (
     "CMClient", "Transport", "Messages", "ProtoWire", "KeyValues", "Codec",
     "SteamAuth", "SteamApps", "SteamCloud", "CloudGame")]
+# The Mach-O guest's own app layer, Sources/Minecraft/: its launcher, the
+# Microsoft sign-in and the ownership gate, the profiles, the game's files, the
+# play modes. In a folder of its own and in this target's project only: the other
+# targets neither compile nor carry it (the shared files reach into it behind
+# `#if KL_MACHO_GUEST`, set below). Sorted, so the project file does not depend
+# on the order a directory is read in.
+import glob as _glob
+_macho_dir = os.path.join(HERE, "Sources", "Minecraft")
+MACHO_SWIFT = sorted(os.path.basename(f) for f in _glob.glob(os.path.join(_macho_dir, "*.swift"))) if MACHO else []
+MACHO_C = sorted(os.path.basename(f) for f in _glob.glob(os.path.join(_macho_dir, "*.c"))) if MACHO else []
+SWIFT += [f"Minecraft/{n}" for n in MACHO_SWIFT]
 swift = [{"name": s, "ref": oid(f"FS{i}"), "bld": oid(f"BS{i}")} for i, s in enumerate(SWIFT)]
 
 swift_buildfiles = "\n".join(
@@ -651,6 +688,65 @@ filerefs = "\n".join(
 embeds = "\n".join(f'\t\t\t\t{g["emb"]},' for g in guest)
 fwchildren = "\n".join(f'\t\t\t\t{g["ref"]},' for g in guest)
 
+# What only a Mach-O guest's project has, as strings that are empty for every
+# other target (the same shape as SVR_* above). Their ids are taken here, after
+# everything else has its own, so no other id moves.
+#
+#   its C sources      Sources/Minecraft/*.c, compiled into the app
+#   "Copy licence notices"   copy_licenses.sh: the licence texts of what is
+#                      compiled into the game go into the app, as its licences
+#                      require; a build without them stops
+#   "Bundle game payload"    bundle_payload.sh: the game's files, as they came
+#                      out of the release, to <app>/klepton-payload/
+macho_c = [{"name": c, "ref": oid(f"FMC{i}"), "bld": oid(f"BMC{i}")} for i, c in enumerate(MACHO_C)]
+MACHO_C_BUILDFILES = "".join(
+    f'\t\t{c["bld"]} /* {c["name"]} in Sources */ = {{isa = PBXBuildFile; fileRef = {c["ref"]}; }};\n'
+    for c in macho_c)
+MACHO_C_FILEREFS = "".join(
+    f'\t\t{c["ref"]} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; '
+    f'path = "Minecraft/{c["name"]}"; sourceTree = "<group>"; }};\n' for c in macho_c)
+MACHO_C_CHILDREN = "".join(f'\t\t\t\t{c["ref"]},\n' for c in macho_c)
+MACHO_C_SOURCES = "".join(f'\t\t\t\t{c["bld"]},\n' for c in macho_c)
+def _script_phase(ident, name, script):
+    return (f'\t\t{ident} /* {name} */ = {{\n'
+            '\t\t\tisa = PBXShellScriptBuildPhase;\n'
+            '\t\t\talwaysOutOfDate = 1;\n'
+            '\t\t\tbuildActionMask = 2147483647;\n'
+            '\t\t\tfiles = ();\n'
+            '\t\t\tinputFileListPaths = ();\n'
+            '\t\t\tinputPaths = ();\n'
+            f'\t\t\tname = "{name}";\n'
+            '\t\t\toutputFileListPaths = ();\n'
+            '\t\t\toutputPaths = ();\n'
+            '\t\t\trunOnlyForDeploymentPostprocessing = 0;\n'
+            '\t\t\tshellPath = /bin/sh;\n'
+            f'\t\t\tshellScript = "\\"$PROJECT_DIR/{script}\\"\\n";\n'
+            '\t\t};\n')
+if MACHO:
+    BP_LIC = oid("BPLIC"); BP_PAY = oid("BPPAY")
+    MACHO_SCRIPT_SECTION = ("\n/* Begin PBXShellScriptBuildPhase section */\n"
+                            + _script_phase(BP_LIC, "Copy licence notices", "copy_licenses.sh")
+                            + _script_phase(BP_PAY, "Bundle game payload", "bundle_payload.sh")
+                            + "/* End PBXShellScriptBuildPhase section */\n")
+    MACHO_PHASES = f"\t\t\t\t{BP_LIC},\n\t\t\t\t{BP_PAY},\n"
+    # KL_MACHO_GUEST for the C half of the door (kl_app.c), beside the Swift
+    # condition of the same name.
+    #
+    # The Minecraft ownership gate: do NOT add KL_OWNERSHIP_GATE_OFF here or to
+    # the Swift conditions. A Release build fails to compile if that condition
+    # is set (#error in Minecraft/KleptonMSA.swift), Debug does not set it
+    # either, run.sh does not pass it, and there is no switch at run time.
+    MACHO_DEFINE = '\t\t\t\t\t"KL_MACHO_GUEST=1",\n'
+    # What the two script phases read: which target they are run for, and the
+    # input folder if this build was pointed at another one. As build settings,
+    # because a script phase sees those and not the shell xcodebuild came from.
+    MACHO_SETTINGS = f'\t\t\t\tKLEPTON_TARGET = "{KLT["name"]}";\n'
+    if os.environ.get("KLEPTON_VIVECRAFT_PREBUILT", "").strip():
+        _pre = MACHO_PREBUILT.replace("\\", "\\\\").replace('"', '\\"')
+        MACHO_SETTINGS += f'\t\t\t\tKLEPTON_VIVECRAFT_PREBUILT = "{_pre}";\n'
+else:
+    MACHO_SCRIPT_SECTION = MACHO_PHASES = MACHO_DEFINE = MACHO_SETTINGS = ""
+
 # Compile-time opt-in for the custom "configure, then Start" launcher (hl1/hl2/
 # portal). Only when this project is generated with KL_CUSTOM_LAUNCHER set does the
 # build carry the KL_CUSTOM_LAUNCHER Swift active-compilation condition that
@@ -678,7 +774,10 @@ _display = _display.replace("\\", "\\\\").replace('"', '\\"')
 # the output and expands to nothing (no blank line) when the flag is off.
 # ...and KL_SURREAL_SDK, which is what lets KleptonSurrealSDK.swift call the SDK at all.
 _conds = ((["KL_CUSTOM_LAUNCHER"] if _launcher_on else []) + (["KL_SURREAL_SDK"] if SURREAL_SDK else [])
-          + (["KL_SCOTLAND2"] if SC2 else []))
+          + (["KL_SCOTLAND2"] if SC2 else [])
+          # ...and KL_MACHO_GUEST, behind which the shared sources reach into
+          # Sources/Minecraft/ (see MACHO above).
+          + (["KL_MACHO_GUEST"] if MACHO else []))
 LAUNCHER_COND = (f'\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "{" ".join(_conds)} $(inherited)";\n'
                  if _conds else "")
 
@@ -727,6 +826,28 @@ def _sc2_settings():
     return text
 SC2_SETTINGS = _sc2_settings()
 
+# Info.plist: the authored file for every target. A Mach-O guest gets a copy of
+# it under build/ with one more key, because the key is an array and has no
+# build setting to carry it:
+#
+#   UIBackgroundModes = [audio]   Minecraft's world keeps playing when its
+#       launcher window is closed, which takes the app's phase to background
+#       while the immersive space is still up; playback with no foreground
+#       window needs the declaration. It permits the sound, it does not keep it
+#       on: a Crown press or Home still pauses and ends it (KleptonAudio.swift).
+INFOPLIST_FILE = "Info.plist"
+if MACHO:
+    import plistlib as _plistlib
+    _info = _plistlib.loads(pathlib.Path(HERE, "Info.plist").read_bytes())
+    _modes = _info.get("UIBackgroundModes", [])
+    if "audio" not in _modes:
+        _modes = _modes + ["audio"]
+    _info["UIBackgroundModes"] = _modes
+    _out = pathlib.Path(HERE, "build", f"Info-{KLT['name']}.plist")
+    _out.parent.mkdir(parents=True, exist_ok=True)
+    _out.write_bytes(_plistlib.dumps(_info, sort_keys=False))
+    INFOPLIST_FILE = f"build/Info-{KLT['name']}.plist"
+
 COMMON = f"""
 {SC2_SETTINGS}				CLANG_ENABLE_MODULES = YES;
 {ENTITLEMENTS_SETTING}				CODE_SIGN_STYLE = Automatic;
@@ -734,7 +855,7 @@ COMMON = f"""
 				DEVELOPMENT_TEAM = {TEAM};
 				ENABLE_PREVIEWS = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-{ASSETCATALOG_SETTING}				INFOPLIST_FILE = Info.plist;
+{ASSETCATALOG_SETTING}				INFOPLIST_FILE = {INFOPLIST_FILE};
 				// One entry per runtime source directory: a runtime header is
 				// included by BARE NAME everywhere, including from
 				// Klepton-Bridging-Header.h, so each directory holding one has
@@ -770,7 +891,7 @@ COMMON = f"""
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"KL_TARGET_DEFAULT=\\\\\\"{KLT['name']}\\\\\\"",
-				);
+{MACHO_DEFINE}				);
 				INFOPLIST_KEY_CFBundleDisplayName = "{_display}";
 				INFOPLIST_KEY_GCSupportsControllerUserInteraction = YES;
 				// NOT UIApplicationSceneManifest_Generation. Setting it makes Xcode
@@ -800,7 +921,7 @@ COMMON = f"""
 				SDKROOT = xros;
 				SUPPORTED_PLATFORMS = "xros xrsimulator";
 				SWIFT_OBJC_BRIDGING_HEADER = "Sources/Klepton-Bridging-Header.h";
-{LAUNCHER_COND}				SWIFT_VERSION = 5.0;
+{LAUNCHER_COND}{MACHO_SETTINGS}				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
 				// visionOS 26, not 2.0. The device runs 27 and the SDK is 26, and an
 				// app declaring a 2.0 minimum is asking the system for five-major-
@@ -823,7 +944,7 @@ PBX = f"""// !$*UTF8*$!
 {sc2_buildfile}
 {swift_buildfiles}
 		{B_C} /* kl_app.c in Sources */ = {{isa = PBXBuildFile; fileRef = {F_C}; }};
-		{B_ASSETS} /* Assets.xcassets in Resources */ = {{isa = PBXBuildFile; fileRef = {F_ASSETS}; }};
+{MACHO_C_BUILDFILES}		{B_ASSETS} /* Assets.xcassets in Resources */ = {{isa = PBXBuildFile; fileRef = {F_ASSETS}; }};
 		{B_RT_LNK} /* Klepton.xcframework in Frameworks */ = {{isa = PBXBuildFile; fileRef = {F_RT}; }};
 {SVR_BUILDFILE}{buildfiles}
 /* End PBXBuildFile section */
@@ -833,7 +954,7 @@ PBX = f"""// !$*UTF8*$!
 		{PRODUCT} /* {NAME}.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = {NAME}.app; sourceTree = BUILT_PRODUCTS_DIR; }};
 {swift_filerefs}
 		{F_C} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = kl_app.c; sourceTree = "<group>"; }};
-		{F_H} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = kl_app.h; sourceTree = "<group>"; }};
+{MACHO_C_FILEREFS}		{F_H} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = kl_app.h; sourceTree = "<group>"; }};
 		{F_BRIDGE} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Klepton-Bridging-Header.h"; sourceTree = "<group>"; }};
 		{F_ASSETS} = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = {_appicon_catalog}; sourceTree = "<group>"; }};
 		{F_RT} = {{isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Klepton.xcframework; path = ../build/Klepton.xcframework; sourceTree = "<group>"; }};
@@ -882,7 +1003,7 @@ PBX = f"""// !$*UTF8*$!
 			children = (
 {swift_children}
 				{F_C},
-				{F_H},
+{MACHO_C_CHILDREN}				{F_H},
 				{F_BRIDGE},
 			);
 			path = Sources;
@@ -916,7 +1037,7 @@ PBX = f"""// !$*UTF8*$!
 				{BP_FRM},
 				{BP_RES},
 				{BP_EMB},
-			);
+{MACHO_PHASES}			);
 			buildRules = ();
 			dependencies = ();
 			name = {NAME};
@@ -963,7 +1084,7 @@ PBX = f"""// !$*UTF8*$!
 			runOnlyForDeploymentPostprocessing = 0;
 		}};
 /* End PBXResourcesBuildPhase section */
-
+{MACHO_SCRIPT_SECTION}
 /* Begin PBXSourcesBuildPhase section */
 		{BP_SRC} = {{
 			isa = PBXSourcesBuildPhase;
@@ -971,7 +1092,7 @@ PBX = f"""// !$*UTF8*$!
 			files = (
 {swift_sources}
 				{B_C},
-			);
+{MACHO_C_SOURCES}			);
 			runOnlyForDeploymentPostprocessing = 0;
 		}};
 /* End PBXSourcesBuildPhase section */
@@ -1044,7 +1165,22 @@ PBX = f"""// !$*UTF8*$!
 
 
 def main():
-    for g, d, how in [(g, GUEST_DIR, "visionos/mkguest.sh") for g in GUEST] + \
+    if MACHO:
+        # The licence folder is part of this app the way its icon is: a build
+        # that forgets it ships the compiled game with no notices.
+        # copy_licenses.sh stops the same way; this stops earlier.
+        # (The game's archive may have brought its own, which then go in:
+        # copy_licenses.sh, visionos/prebuilt/<target>/Licenses.)
+        if not any(os.path.isfile(os.path.join(d, "NOTICES.txt")) for d in (
+                os.path.join(MACHO_PREBUILT, "Licenses"), os.path.join(HERE, "Licenses", KLT["name"]))):
+            print(f"!! missing Licenses/{KLT['name']}/NOTICES.txt — the app ships the licence "
+                  "texts of what is compiled into the game", file=sys.stderr)
+            return 1
+        if not MACHO_SWIFT:
+            print("!! no Sources/Minecraft/*.swift — the Mach-O guest's app layer is missing",
+                  file=sys.stderr)
+            return 1
+    for g, d, how in [(g, GUEST_DIR, "visionos/mkmacho.sh" if MACHO else "visionos/mkguest.sh") for g in GUEST] + \
                      [(a, ANGLE_DIR, "visionos/mkangle.sh") for a in ANGLE]:
         p = os.path.join(HERE, d, f"{g}.xcframework")
         if not os.path.isdir(p):

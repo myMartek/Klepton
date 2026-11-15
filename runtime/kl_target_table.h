@@ -40,6 +40,7 @@ KL_TARGET_ROW("steamlink-vr", "steamlink-vr", "steamlink-vr.apk", "steamlink-vr/
 KL_TARGET_ROW("superhot", "superhot", "superhot.apk", "superhot/assets", "superhot/lib/arm64-v8a", "libmain", "superhot", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("vampire", "vampire", "vampire.apk", "vampire/assets", "vampire/lib/arm64-v8a", "libUE4", "vampire", "Android/obb/com.fasttravelgames.lollipop", KL_GUEST_UE4)
 KL_TARGET_ROW("vicecity", "vicecity", "vicecity.apk", "vicecity/assets", "vicecity/lib/arm64-v8a", "libmiamivr", "vicecity", "obb", KL_GUEST_NATIVE)
+KL_TARGET_ROW("vivecraft", "vivecraft", "", "", "", "libminecraft", "vivecraft", "obb", KL_GUEST_MACHO)
 KL_TARGET_ROW("vrchat", "vrchat", "vrchat.apk", "vrchat/assets", "vrchat/lib/arm64-v8a", "libmain", "vrchat", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("walkabout", "walkabout", "walkabout.apk", "walkabout/assets", "walkabout/lib/arm64-v8a", "libmain", "walkabout", "obb", KL_GUEST_UNITY)
 KL_TARGET_ROW("wrath2", "wrath2", "wrath2.apk", "wrath2/assets", "wrath2/lib/arm64-v8a", "libUE4", "wrath2", "Android/obb/com.Sanzaru.Wrath2", KL_GUEST_UE4)
