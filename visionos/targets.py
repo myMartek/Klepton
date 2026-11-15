@@ -1868,10 +1868,45 @@ def template_data():
     }
 
 
+def macho_data():
+    """The same for a Mach-O guest (kind "macho": Minecraft), whose app is a
+    template of its own (mktemplate.sh): built for that one target, so its
+    Info.plist already holds the row's values, with none of the game's
+    libraries and no payload in it. What a finisher has to add comes out of the
+    game's archive — a zip in the shape of an IPA, tools/vivecraft_seed.py says
+    what it must hold — and this is where each part goes. `from` is inside the
+    archive's one Payload/<Name>.app, `to` inside the template's app; {name} is
+    each of `names`."""
+    def row(name, t):
+        t = dict(t)
+        _settle(name, t)
+        return {"product": t["product"], "display": t["display"], "tree": t["tree"], "entry": t["entry"],
+                "libraries": {"names": t["libs"].split(),
+                              "from": "Frameworks/{name}.dylib", "to": "Frameworks/{name}.dylib",
+                              # What each must be to be loaded (mkmacho.sh renames one that is not).
+                              "installName": "@rpath/{name}.dylib",
+                              "platform": "visionOS", "architecture": "arm64"},
+                # As it is: payload-version is what an installed copy compares.
+                "payload": {"from": "klepton-payload", "to": "klepton-payload", "tree": t["tree"],
+                            "requires": ["launch.txt", "baked.cp", "payload-version", "tree", "root/inst-*"]},
+                # The notices of what is compiled into the game. The template
+                # carries a set; an archive that brings its own (a folder with
+                # the index) replaces it, as copy_licenses.sh does in a build.
+                "licenses": {"to": "Licenses", "index": "NOTICES.txt",
+                             "from": ["Licenses", "../../Licenses"]},
+                "info": info_values(t)}
+    return {"format": 1,
+            "targets": {name: row(name, t) for name, t in sorted(TARGETS.items()) if t["kind"] == "macho"}}
+
+
 def main(argv):
     if len(argv) > 1 and argv[1] == "--template-data":
         import json
         print(json.dumps(template_data(), indent=1, sort_keys=True))
+        return 0
+    if len(argv) > 1 and argv[1] == "--macho-data":
+        import json
+        print(json.dumps(macho_data(), indent=1, sort_keys=True))
         return 0
     if len(argv) > 1 and argv[1] == "--list":
         for k in sorted(TARGETS):

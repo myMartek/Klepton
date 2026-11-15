@@ -165,6 +165,14 @@ GUEST = KLT["libs"].split()
 # for. Everything below that this kind adds is added for this kind only, so the
 # project written for any other target is the same text as before.
 MACHO = KLT["kind"] == "macho"
+# ...and that app with no game in it (mktemplate.sh, KLEPTON_MACHO_TEMPLATE=1):
+# everything compiled, none of the game's libraries embedded and no payload
+# bundled, so the build needs no input folder. Whoever finishes it puts the
+# libraries into Frameworks/ and the payload beside them and signs — no
+# compiler (targets.py --macho-data says what goes where).
+MACHO_TEMPLATE = MACHO and os.environ.get("KLEPTON_MACHO_TEMPLATE") == "1"
+if MACHO_TEMPLATE:
+    GUEST = []
 # Its input folder (tools/vivecraft_seed.py), where this script looks too: for
 # the game's own icon and for the licence notices its archive carried.
 MACHO_PREBUILT = (os.path.abspath(os.environ.get("KLEPTON_VIVECRAFT_PREBUILT", "").strip()
@@ -724,11 +732,13 @@ def _script_phase(ident, name, script):
             '\t\t};\n')
 if MACHO:
     BP_LIC = oid("BPLIC"); BP_PAY = oid("BPPAY")
+    # (The template has no payload phase: the payload is the finisher's to add.)
     MACHO_SCRIPT_SECTION = ("\n/* Begin PBXShellScriptBuildPhase section */\n"
                             + _script_phase(BP_LIC, "Copy licence notices", "copy_licenses.sh")
-                            + _script_phase(BP_PAY, "Bundle game payload", "bundle_payload.sh")
+                            + ("" if MACHO_TEMPLATE else
+                               _script_phase(BP_PAY, "Bundle game payload", "bundle_payload.sh"))
                             + "/* End PBXShellScriptBuildPhase section */\n")
-    MACHO_PHASES = f"\t\t\t\t{BP_LIC},\n\t\t\t\t{BP_PAY},\n"
+    MACHO_PHASES = f"\t\t\t\t{BP_LIC},\n" + ("" if MACHO_TEMPLATE else f"\t\t\t\t{BP_PAY},\n")
     # KL_MACHO_GUEST for the C half of the door (kl_app.c), beside the Swift
     # condition of the same name.
     #
