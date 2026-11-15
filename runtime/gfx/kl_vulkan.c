@@ -4615,7 +4615,10 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
     // The 7th Guest VR (x5223884527630557, UE 5.2 mobile, 4x MSAA, a
     // subpass-input reader): from the first frame on, wrong colours and
     // scattered blocks, the picture in pieces (on device, 2026-11-12).
-    //   default 1 for those four titles, else 0
+    // Myst (x2719294624823942, UE 5.3 mobile, Vulkan multiview): right at the
+    // start, blocks and wrong colours, the left eye not showing what the right
+    // one does (on device, 2026-11-12).
+    //   default 1 for those five titles, else 0
     static int no_transient = -1;
     if (no_transient < 0) {
         extern const char *kl_driver_target_name(void);
@@ -4624,7 +4627,8 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
                                  t && (!strcmp(t, "x5767635983306831") ||
                                        !strcmp(t, "x6605328856182465") ||
                                        !strcmp(t, "x9269393463181825") ||
-                                       !strcmp(t, "x5223884527630557")));
+                                       !strcmp(t, "x5223884527630557") ||
+                                       !strcmp(t, "x2719294624823942")));
     }
     if (ci && (ci->usage & 0x40u) && no_transient) {
         mod = *ci;

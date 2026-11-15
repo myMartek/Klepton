@@ -457,6 +457,18 @@ void kl_glfb_overlay_eye_inset(int eye, int stage, uint32_t tex, int layer,
 // seam.
 int kl_glfb_eye_mtl_origin_top_left(int eye, int stage);
 
+// KL_XR_ARRAY_DIRECT (off unless a target asks: Minecraft with Vivecraft, whose
+// ONE eye swapchain is a 2-slice array it attaches a slice at a time): answer the
+// guest's glFramebufferTextureLayer(array_tex, layer) with
+// glFramebufferTexture2D(tex2d) — an array swapchain's slice served as a 2D
+// texture whose storage is the compositor's, so the guest draws where the
+// compositor samples and no per-eye mirror copy is made (see kl_glfb.c). tex2d 0
+// removes the entry. Returns 0 only when the table is full (said in the log).
+// With no entry, which is every other guest, the attach is forwarded untouched.
+int kl_glfb_array_redirect(uint32_t array_tex, int layer, uint32_t tex2d);
+// The GL name currently bound to (eye, stage)'s compositor storage, 0 if none.
+uint32_t kl_glfb_eye_gl_texture(int eye, int stage);
+
 // ---------------------------------------------------------------------------
 // The same seam for a layer that is NOT an eye.
 //

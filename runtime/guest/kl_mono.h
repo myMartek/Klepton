@@ -137,6 +137,14 @@ void kl_mono_commit_text(const char *utf8);
 // why. Safe to call more than once.
 void kl_mono_capture_start(void);
 
+// A guest with no SDLActivity behind its window (a Mach-O guest: Minecraft,
+// whose input seam is its SDL stand-in's event ring) takes the window's pointer
+// and keys through these instead. NULL (the default) keeps the SDLActivity path,
+// so every APK guest is unchanged. Set once, before the window can deliver input.
+typedef void (*kl_mono_pointer_hook)(int state, int action, float x, float y);
+typedef void (*kl_mono_key_hook)(int down, int keycode);
+void kl_mono_set_input_hooks(kl_mono_pointer_hook pointer, kl_mono_key_hook key);
+
 // Borrow the newest presented frame. Returns 0 and touches nothing when the
 // guest has not presented one yet.
 //

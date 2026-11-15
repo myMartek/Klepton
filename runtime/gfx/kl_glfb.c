@@ -2200,6 +2200,192 @@ static int klfb_flatten_interface_blocks(char *buf) {
     return changed;
 }
 
+// ---------------------------------------------------------------------------
+// KL_VRR for a guest whose scene target is SINGLE-sampled (Vivecraft).
+//
+// The size rule (kl_glfb_set_eye_rate_map) foveates render targets of the eye
+// size with at least KL_RATE_MIN_SAMPLES samples, and 2 is right for every
+// Unity guest: their scene is a multisampled renderbuffer resolved into the eye
+// texture by a blit ANGLE turns into a physical-to-physical copy. Vivecraft has
+// no MSAA. It draws the world into its own eye-sized single-sampled "3D Render"
+// texture and reaches the swapchain through ONE full-screen draw, its VR post
+// pass (core/postprocessing_vr.fsh). Under a floor of 2 samples only that copy
+// is foveated: the periphery softened, the world pass at full cost.
+//
+// KL_VRR_MIN_SAMPLES=1 lets the rule take single-sampled targets too, so the
+// 3D Render target and the swapchain share one map. That alone is NOT enough,
+// and the reason is the whole design:
+//
+//   Under an MTLRasterizationRateMap a fragment runs at a PHYSICAL position
+//   (gl_FragCoord is physical), but VARYINGS are interpolated at the SCREEN
+//   position that physical pixel stands for. The post shader samples its
+//   source with the vertex-interpolated 0..1 UV of a full-screen quad — a
+//   SCREEN UV. Reading a WARPED source at a screen UV fetches the texel whose
+//   physical position equals that screen position: a second warp, the
+//   magnified-centre picture. (ANGLE's own eye resolve hit the same thing and
+//   needed the `physicalPassthrough` blit.)
+//
+// The post pass is a 1:1 copy of an identically-warped, equally-sized source,
+// so the exact read is the texel at the fragment's own physical position:
+// UV = gl_FragCoord.xy / textureSize(source, 0). So this rule shadows the
+// shader's UV input in main() with exactly that, and no unwarp pass is needed —
+// the compositor unwarps the swapchain as for any foveated eye. Unfoveated (no
+// map after all: a GPU without rate maps, or eyes that end up on the mirror
+// copy, where kl_glfb_set_eye_rate_map drops it) the same expression is the
+// plain screen UV, because gl_FragCoord is then the screen position and the
+// two textures are the same size.
+//
+// What that costs: the radial effects in the same shader (FOV-reduction
+// vignette, pumpkin overlay, the portal/water wobble offsets) are evaluated in
+// physical rather than screen space — a vignette circle that is slightly wider
+// in the periphery after the unwarp. Cosmetic, and only while moving with FOV
+// reduction on or wearing a pumpkin.
+//
+// What it REQUIRES: the 3D Render target is the swapchain's size, i.e.
+// Vivecraft's renderScaleFactor 1.0 and useFsaa false. A size mismatch is
+// caught at the first post draws and named (klfb_vrr_post_check) rather than
+// trusted.
+//
+// Gated: KL_VRR_MIN_SAMPLES=1 (unset, the floor stays KL_RATE_MIN_SAMPLES and
+// nothing in this block or behind it runs for any guest), foveation wanted
+// (the setting or KL_VRR), and KL_VRR_POST not 0 (the A/B that leaves the
+// shader alone — expect a magnified centre with it).
+//
+// The value 2 below is KL_RATE_MIN_SAMPLES, which is defined with the rate map
+// further down; kl_glfb_set_eye_rate_map compares the two. Anything that is not
+// a sample count (0, a negative number, text) is the default as well, so only
+// a stated 1 opens the rule to single-sampled targets.
+static unsigned klfb_rate_min_samples(void) {
+    static int v = -1;
+    if (v < 0) {
+        int e = kl_env_int("KL_VRR_MIN_SAMPLES", 2);
+        if (e < 1) e = 2;
+        if (e > 64) e = 64;
+        v = e;
+    }
+    return (unsigned)v;
+}
+
+#define KLFB_VRPOST_MAX 16
+static uint32_t g_vrpost_sh[KLFB_VRPOST_MAX];     // shaders the rule rewrote
+static unsigned g_vrpost_nsh;
+static uint32_t g_vrpost_prog[KLFB_VRPOST_MAX];   // programs that linked one
+static unsigned g_vrpost_nprog;
+
+static int klfb_vrr_post_wanted(void) {
+    // The two knobs are fixed for the run. Whether foveation is wanted is not
+    // latched with them: the app hands its setting over before the guest boots
+    // (kl_glfb_set_foveation_default), and asking each time costs nothing a
+    // guest without the knob ever pays.
+    static int knobs = -1;
+    if (knobs < 0) knobs = klfb_rate_min_samples() == 1 && kl_env_on("KL_VRR_POST", 1);
+    return knobs && kl_glfb_foveation_wanted(NULL, NULL);
+}
+
+// The one global "<storage> [precision] <type> NAME;" in buf, or 0 when there
+// is none or more than one. Whole-token matches only; a local declaration has
+// no storage qualifier and a block member has none either, so neither counts.
+static int klfb_global_decl_name(const char *buf, const char *storage,
+                                 const char *type, char *out, size_t cap) {
+    size_t tl = strlen(type), sl = strlen(storage);
+    int found = 0;
+    for (const char *p = buf; (p = strstr(p, type)); p += tl) {
+        if (p > buf && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) continue;
+        const char *q = p + tl;
+        if (!isspace((unsigned char)*q)) continue;
+        // back over whitespace, an optional precision word, whitespace
+        const char *b = p;
+        while (b > buf && isspace((unsigned char)b[-1])) b--;
+        static const char *const prec[] = {"highp", "mediump", "lowp"};
+        for (unsigned i = 0; i < 3; i++) {
+            size_t pl = strlen(prec[i]);
+            if ((size_t)(b - buf) >= pl && !strncmp(b - pl, prec[i], pl) &&
+                (b - pl == buf || !(isalnum((unsigned char)b[-pl - 1]) || b[-pl - 1] == '_'))) {
+                b -= pl;
+                while (b > buf && isspace((unsigned char)b[-1])) b--;
+                break;
+            }
+        }
+        if ((size_t)(b - buf) < sl || strncmp(b - sl, storage, sl)) continue;
+        const char *st = b - sl;
+        if (st > buf && (isalnum((unsigned char)st[-1]) || st[-1] == '_')) continue;
+        // forward: the identifier and its ';'
+        while (isspace((unsigned char)*q)) q++;
+        const char *id = q;
+        while (isalnum((unsigned char)*q) || *q == '_') q++;
+        size_t il = (size_t)(q - id);
+        while (isspace((unsigned char)*q)) q++;
+        if (!il || *q != ';' || il + 1 > cap) continue;
+        if (found++) return 0;
+        memcpy(out, id, il);
+        out[il] = 0;
+    }
+    return found == 1;
+}
+
+static int klfb_rewrite_vr_post(char *buf, size_t cap, uint32_t shader) {
+    if (!klfb_vrr_post_wanted()) return 0;
+    // New source for a name the rule rewrote before: GL hands shader names out
+    // again, and whatever this source is, the old entry no longer describes it.
+    for (unsigned i = 0; i < g_vrpost_nsh; i++)
+        if (g_vrpost_sh[i] == shader) { g_vrpost_sh[i] = g_vrpost_sh[--g_vrpost_nsh]; break; }
+    if (strstr(buf, "gl_Position")) return 0;          // fragment stage only
+    // Vivecraft's post shader and nothing else: circle_radius is its
+    // FOV-reduction uniform (no other shader in the pack declares it), and the
+    // varying and sampler are the two names the rewrite works on.
+    if (!strstr(buf, "circle_radius")) return 0;
+    // Minecraft <= 26.2 hands the GLSL over as written, so the translator
+    // (ltw) sees Vivecraft's own names: texCoordinates and Sampler0. 26.3
+    // compiles every shader GLSL -> SPIR-V -> GLSL (shaderc + SPIRV-Cross),
+    // which renames the sampler to _uniform_00_01 and the varying to
+    // _interface_variable_00 (block MEMBER names such as circle_radius
+    // survive). Missing that leaves the rule silent on 26.3: the foveated 3D
+    // Render target is read at screen UVs, a second warp — a fishbowl picture
+    // squeezed into the physical rectangle, black above and to the right of
+    // it, eyes not fusing. So: Vivecraft's names when present, else the
+    // shader's one global `uniform sampler2D` and its one `in vec2`.
+    char samp[64], uv[64];
+    if (strstr(buf, "texCoordinates") && strstr(buf, "Sampler0")) {
+        strcpy(samp, "Sampler0");
+        strcpy(uv, "texCoordinates");
+    } else if (!klfb_global_decl_name(buf, "uniform", "sampler2D", samp, sizeof samp) ||
+               !klfb_global_decl_name(buf, "in", "vec2", uv, sizeof uv)) {
+        fprintf(stderr, "  [glfb] VR post shader %u: circle_radius found but not ONE "
+                        "sampler2D and ONE vec2 input — left alone, the foveated "
+                        "post copy will be WRONG (magnified centre)\n", shader);
+        return 0;
+    }
+    char *m = strstr(buf, "void main");
+    if (!m) return 0;
+    char *br = strchr(m, '{');
+    if (!br) return 0;
+    // highp: a 4608-wide position does not survive mediump (exact only up to
+    // 2048), and gl_FragCoord is highp in ESSL 3.00 anyway.
+    char ins[256];
+    snprintf(ins, sizeof ins,
+             "\n  highp vec2 %s = gl_FragCoord.xy / vec2(textureSize(%s, 0));",
+             uv, samp);
+    size_t add = strlen(ins);
+    size_t len = strlen(buf);
+    if (len + add + 1 > cap) {
+        fprintf(stderr, "  [glfb] VR post shader %u: no room for the "
+                        "physical-UV line — left alone, the foveated post copy "
+                        "will be WRONG (magnified centre)\n", shader);
+        return 0;
+    }
+    char *at = br + 1;
+    memmove(at + add, at, len - (size_t)(at - buf) + 1);
+    memcpy(at, ins, add);
+    if (g_vrpost_nsh < KLFB_VRPOST_MAX) g_vrpost_sh[g_vrpost_nsh++] = shader;
+    fprintf(stderr, "  [glfb] VR post shader %u rewritten: %s is "
+                    "gl_FragCoord.xy / textureSize(%s) — the foveated "
+                    "3D Render target is read at the fragment's own PHYSICAL "
+                    "position, so the copy into the identically-warped "
+                    "swapchain is texel-for-texel (KL_VRR_POST=0 is the A/B)\n",
+            shader, uv, samp);
+    return 1;
+}
+
 static char *klfb_rewrite_glsl(char *buf, size_t cap, uint32_t shader) {
     int changed = 0;
     klfb_pin_reset(shader);
@@ -2459,6 +2645,12 @@ static char *klfb_rewrite_glsl(char *buf, size_t cap, uint32_t shader) {
             changed = 1;
         }
     }
+
+    // Vivecraft's VR post copy, under KL_VRR_MIN_SAMPLES=1 — an insert, and
+    // independent of every rule above (it touches main()'s first line only).
+    // Last, so that it reads the declarations as those rules left them.
+    if (klfb_rewrite_vr_post(buf, cap, shader))
+        changed = 1;
 
     return changed ? buf : NULL;
 }
@@ -4474,6 +4666,33 @@ static void klfb_LinkProgram(uint32_t program) {
     // table here — this is the first moment a name has a location to translate
     // to. See the block above klfb_strip_uniform_layout.
     klfb_pins_link(program);
+    // KL_VRR_MIN_SAMPLES=1: remember which programs carry the rewritten VR
+    // post shader, so the first draws can check the sizes it assumes. The
+    // shader list is empty unless that rewrite has happened.
+    if (g_vrpost_nsh) {
+        static void (*r_GetAttached)(uint32_t, int32_t, int32_t *, uint32_t *);
+        if (!r_GetAttached) r_GetAttached = asym("glGetAttachedShaders");
+        if (r_GetAttached) {
+            uint32_t sh[8]; int32_t n = 0;
+            r_GetAttached(program, 8, &n, sh);
+            int hit = 0;
+            for (int32_t i = 0; i < n && i < 8 && !hit; i++)
+                for (unsigned j = 0; j < g_vrpost_nsh; j++)
+                    if (sh[i] == g_vrpost_sh[j]) hit = 1;
+            unsigned at = g_vrpost_nprog;
+            for (unsigned j = 0; j < g_vrpost_nprog; j++)
+                if (g_vrpost_prog[j] == program) at = j;
+            if (hit && at == g_vrpost_nprog && g_vrpost_nprog < KLFB_VRPOST_MAX) {
+                g_vrpost_prog[g_vrpost_nprog++] = program;
+                fprintf(stderr, "  [glfb] VR post program %u linked with the "
+                                "physical-UV shader\n", program);
+            } else if (!hit && at < g_vrpost_nprog) {
+                // The name was linked again without the shader: a program
+                // name handed out a second time, and no longer a post program.
+                g_vrpost_prog[at] = g_vrpost_prog[--g_vrpost_nprog];
+            }
+        }
+    }
 
     // Report a FAILED link with its info log and the shader sources. A program
     // whose shaders each compiled but that will not link is invisible otherwise
@@ -5224,9 +5443,98 @@ static void (*g_real_TexImage2D)(uint32_t, int32_t, int32_t, int32_t, int32_t,
 static void klfb_note_tex_storage(uint32_t name, uint32_t fmt, int32_t w,
                                   int32_t h);
 
+// ---------------------------------------------------------------------------
+// KL_GLFB_ANISO=<n> — anisotropic filtering the guest never asks for.
+//
+// Minecraft/Sodium set mipmapped MIN_FILTERs on the block atlas and never write
+// TEXTURE_MAX_ANISOTROPY, so oblique ground and walls blur toward the higher
+// mip. ANGLE's Metal backend has EXT_texture_filter_anisotropic, so this sets
+// MAX_ANISOTROPY = n (clamped to GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT) on the bound
+// TEXTURE_2D whenever the guest gives it a MIPMAPPED min filter — the one call
+// that identifies the textures that matter (the atlas) and not the GUI's
+// level-0-only ones. The guest's own filters are left exactly as set. Once per
+// texture object: a bitmap by name, cleared when the name is re-specified at
+// level 0 (a reused name is a new object).
+//
+// Default 0 = off, and then nothing below is reached: klfb_aniso_inject is
+// called only behind klfb_aniso_wanted() > 1, and klfb_aniso_forget returns at
+// its first test while no texture has been given a value.
+//
+// Two limits, both the reference's. It follows glTexParameteri/f on the
+// TEXTURE: a guest that sets its min filter on a SAMPLER object is not reached
+// (a sampler's anisotropy overrides the texture's while it is bound, so a value
+// on the texture would not show either). And unlike the line this came from,
+// this file forwards a guest's own TEXTURE_MAX_ANISOTROPY writes to ANGLE: a
+// guest that sets one later simply replaces ours, which is its right.
+#define KLFB_ANISO_NAMES 65536
+static uint8_t  g_aniso_done[KLFB_ANISO_NAMES / 8];
+static unsigned g_aniso_textures;
+static float    g_aniso_level;
+static uint64_t g_aniso_first;      // when the first one was set, uptime in ns
+
+static float klfb_aniso_wanted(void) {
+    static int v = -1;
+    if (v < 0) {
+        v = kl_env_int("KL_GLFB_ANISO", 0);
+        if (v < 0) v = 0;
+        if (v > 16) v = 16;
+        if (v > 1) {
+            float mx = 0;
+            void (*gf)(uint32_t, float *) = asym("glGetFloatv");
+            if (gf) gf(0x84FF /* MAX_TEXTURE_MAX_ANISOTROPY_EXT */, &mx);
+            if (mx < 1.0f) {
+                fprintf(stderr, "  [glfb] KL_GLFB_ANISO=%d: the driver reports no "
+                                "anisotropic filtering — off\n", v);
+                v = 0;
+            } else {
+                g_aniso_level = (float)v < mx ? (float)v : mx;
+            }
+        }
+    }
+    return v > 1 ? g_aniso_level : 0.0f;
+}
+
+static void klfb_aniso_forget(uint32_t target, int32_t level) {
+    if (level != 0 || target != 0x0DE1 || !g_aniso_textures || !a_glGetIntegerv) return;
+    int32_t bound = 0;
+    a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &bound);
+    if (bound > 0 && bound < KLFB_ANISO_NAMES)
+        g_aniso_done[bound >> 3] &= (uint8_t)~(1u << (bound & 7));
+}
+
+static void klfb_aniso_inject(uint32_t target, int32_t bound, int32_t minfilter) {
+    if (target != 0x0DE1 || bound <= 0 || bound >= KLFB_ANISO_NAMES) return;
+    if (minfilter < 0x2700 || minfilter > 0x2703) return;   // the *_MIPMAP_* four
+    float n = klfb_aniso_wanted();
+    if (n <= 1.0f) return;
+    uint8_t bit = (uint8_t)(1u << (bound & 7));
+    if (g_aniso_done[bound >> 3] & bit) return;
+    g_aniso_done[bound >> 3] |= bit;
+    static void (*tpf)(uint32_t, uint32_t, float);
+    if (!tpf) tpf = asym("glTexParameterf");
+    if (!tpf) return;
+    tpf(0x0DE1, 0x84FE /* TEXTURE_MAX_ANISOTROPY_EXT */, n);
+    g_aniso_textures++;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (g_aniso_first == 0) {
+        g_aniso_first = now ? now : 1;
+        fprintf(stderr, "  [glfb] anisotropic filtering: %.0fx on texture %d (first "
+                        "mipmapped min filter 0x%x) — KL_GLFB_ANISO\n",
+                (double)n, bound, minfilter);
+    }
+    static int said_minute;
+    if (!said_minute && now - g_aniso_first >= 60ull * 1000000000ull) {
+        said_minute = 1;
+        fprintf(stderr, "  [glfb] anisotropic filtering: %.0f x injected on %u "
+                        "mipmapped texture(s) (KL_GLFB_ANISO)\n",
+                (double)n, g_aniso_textures);
+    }
+}
+
 static void klfb_TexImage2D(uint32_t target, int32_t level, int32_t ifmt,
                             int32_t w, int32_t h, int32_t border, uint32_t fmt,
                             uint32_t type, const void *pixels) {
+    klfb_aniso_forget(target, level);   // KL_GLFB_ANISO: a re-specified name
     // An RGB texture fed four bytes a pixel. Desktop GL takes GL_RGB8 with
     // GL_RGBA data and drops the fourth byte, and so does a Quest's driver; ES 3
     // proper calls the pair INVALID_OPERATION, ANGLE with it, and the texture is
@@ -6305,6 +6613,212 @@ int kl_glfb_multiview_ms(uint32_t target, uint32_t attachment, uint32_t texture,
     }
     return 1;
 }
+
+// ---------------------------------------------------------------------------
+// KL_VRR_MIN_SAMPLES=1: make ANGLE re-read the rate-map registry for
+// framebuffers it has already synced.
+//
+// ANGLE decides whether a render pass is foveated when it syncs the
+// framebuffer's state, and keeps that decision, rate map included, in the pass
+// descriptor it caches for every later pass on that framebuffer (the same
+// caching klfb_resync_fbo answers for a mirrored guest's multiview
+// framebuffers). So a size rule registered AFTER a framebuffer's first sync
+// never reaches it, and a rule retired after it keeps foveating it with a map
+// nobody unwarps any more.
+//
+// A Unity guest never shows this: its multisampled scene renderbuffer is
+// created after the eye textures, which is when the map arrives. A guest whose
+// own single-sampled targets take the rule can: Vivecraft builds its eye-sized
+// "3D Render" framebuffer when it likes, and rebuilds its swapchain — and with
+// it the map — when the render size changes.
+//
+// The repair is the cheapest dirty bit there is: on the first bind of each
+// framebuffer after the rule changes (a generation counter), glDrawBuffers is
+// issued again with the framebuffer's own current values. ANGLE marks the draw
+// buffers dirty unconditionally, the next draw or clear syncs, and the pass is
+// built from the registry as it is now. State is unchanged. Once per
+// framebuffer per rule change (a handful per session).
+//
+// Only under the knob. g_vrr_gen stays 0, and klfb_vrr_touch returns at its
+// first test, unless kl_glfb_set_eye_rate_map installs or retires a rule while
+// KL_VRR_MIN_SAMPLES is below the default floor; klfb_vrr_post_check returns
+// at its first test while no post shader has been rewritten, which needs the
+// same knob. No other guest's binds or draws do anything here.
+//
+// The stamps are per framebuffer NAME and not per context, as g_fbo_rate_gen
+// is: a second context reusing a name bound here first would miss its
+// re-sync. The guest this is for draws from one context.
+static unsigned g_vrr_gen;          // bumped on every size-rule change
+static int      g_vrr_rule_w, g_vrr_rule_h;
+static unsigned g_vrr_rule_min;
+static void    *g_vrr_rule_map;
+#define KLFB_VRR_FBO_MAX 4096
+static unsigned g_vrr_fbo_gen[KLFB_VRR_FBO_MAX];
+static unsigned g_vrr_lines;
+static int klfb_eye_of_gl_tex(uint32_t tex);    // below, with the eye-texture table
+
+// A framebuffer's colour-0 texture as the attach thunks recorded it, 0 if
+// they never did (the ledger holds KLFB_FBO_COLOR framebuffers).
+static uint32_t klfb_color_of_fbo(uint32_t fbo) {
+    for (unsigned i = 0; i < g_nfbo_color; i++)
+        if (g_fbo_color[i].fbo == fbo) return g_fbo_color[i].tex;
+    return 0;
+}
+
+static void klfb_vrr_touch(uint32_t fb) {
+    unsigned gen = __atomic_load_n(&g_vrr_gen, __ATOMIC_ACQUIRE);
+    if (!gen || !fb) return;
+    if (fb >= KLFB_VRR_FBO_MAX) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [glfb] vrr: framebuffer name %u is past the %d this "
+                            "resync tracks — such FBOs keep whatever rate map "
+                            "ANGLE gave them when they were last synced\n",
+                    fb, KLFB_VRR_FBO_MAX);
+        return;
+    }
+    if (g_vrr_fbo_gen[fb] == gen) return;
+    g_vrr_fbo_gen[fb] = gen;
+    static void (*r_DrawBuffers)(int32_t, const uint32_t *);
+    if (!r_DrawBuffers) r_DrawBuffers = asym("glDrawBuffers");
+    if (!r_DrawBuffers || !a_glGetIntegerv) return;
+    static int32_t maxdb;
+    if (!maxdb) {
+        a_glGetIntegerv(0x8824 /* MAX_DRAW_BUFFERS */, &maxdb);
+        if (maxdb < 1) maxdb = 1;
+        if (maxdb > 8) maxdb = 8;
+    }
+    uint32_t bufs[8];
+    for (int32_t i = 0; i < maxdb; i++) {
+        int32_t v = 0;
+        a_glGetIntegerv(0x8825 + (uint32_t)i /* DRAW_BUFFERi */, &v);
+        bufs[i] = (uint32_t)v;
+    }
+    r_DrawBuffers(maxdb, bufs);
+
+    // The proof line: where the map lands, named by what this file knows about
+    // the framebuffer. Mirrors ANGLE's rule (identity first, then size and
+    // samples). Only a framebuffer that already HAD its colour texture when
+    // the rule changed is named — one bound for the first time under the rule
+    // has nothing attached yet, and needs no re-sync either.
+    uint32_t col = klfb_color_of_fbo(fb);
+    int32_t w = 0, h = 0;
+    if (!col || !klfb_tex_info(col, NULL, &w, &h)) return;
+    if (g_vrr_lines >= 48) return;
+    if (!g_vrr_rule_map) return;   // a retirement: nothing to name
+    int eye = klfb_eye_of_gl_tex(col) >= 0;
+    if (!eye && (w != g_vrr_rule_w || h != g_vrr_rule_h)) return;
+    g_vrr_lines++;
+    if (eye)
+        fprintf(stderr, "  [glfb] vrr: fb%u colour tex %u %dx%d (an EYE texture) -> "
+                        "FOVEATED by identity (map %p, rule #%u)\n",
+                fb, col, w, h, g_vrr_rule_map, gen);
+    else
+        fprintf(stderr, "  [glfb] vrr: fb%u colour tex %u %dx%d x1 -> FOVEATED by "
+                        "the size rule (map %p, rule #%u, min samples %u)\n",
+                fb, col, w, h, g_vrr_rule_map, gen, g_vrr_rule_min);
+}
+
+// The other half of the post rewrite's bargain: it assumes the texture it
+// samples is the size of the target it draws into, and that both are
+// rasterized under the one live map. Checked on the post draws this file
+// sees, so a mismatch (renderScaleFactor != 1, FSAA on) names itself instead
+// of being a cropped picture.
+//
+// Called from klfb_note_draw, so it sees only draws issued through the draw
+// thunks that call it; a guest whose post pass reaches ANGLE by another entry
+// point is not checked, and then the picture is the only witness.
+static void klfb_vrr_post_check(int32_t fb) {
+    if (!g_vrpost_nprog || !g_cur_prog || fb <= 0) return;
+    int hit = 0;
+    for (unsigned i = 0; i < g_vrpost_nprog; i++)
+        if (g_vrpost_prog[i] == g_cur_prog) hit = 1;
+    if (!hit) return;
+    if (!a_glGetIntegerv) return;
+    static void (*act)(uint32_t);
+    if (!act) act = asym("glActiveTexture");
+    if (!act) return;
+    unsigned gen = __atomic_load_n(&g_vrr_gen, __ATOMIC_ACQUIRE);
+    // Every post draw (two a frame): which texture it reads. Four GL calls, no
+    // sync — cheap against a full-screen pass over the whole eye.
+    int32_t unit = 0, src = 0;
+    a_glGetIntegerv(0x84E0 /* ACTIVE_TEXTURE */, &unit);
+    act(0x84C0 /* TEXTURE0 */);
+    a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &src);
+    act((uint32_t)unit);
+    uint32_t dst = klfb_color_of_fbo((uint32_t)fb);
+    int32_t sw = 0, sh = 0, dw = 0, dh = 0;
+    klfb_tex_info((uint32_t)src, NULL, &sw, &sh);
+    if (dst) klfb_tex_info(dst, NULL, &dw, &dh);
+
+    // THE ASSERTION: the copy is texel-for-texel only if the destination and
+    // the source are rasterized under the SAME live map. What this file can
+    // observe, per draw:
+    //   - the destination FBO went through klfb_vrr_touch under the live rule
+    //     (a bind that bypassed the hook leaves an old stamp, and ANGLE an old
+    //     cached descriptor);
+    //   - the destination carries the map: an eye texture of the rule's size
+    //     (by identity), or any target of that size (the size rule at one
+    //     sample — the guest's own per-eye texture, where it has one);
+    //   - the source is the rule's size with min samples 1 (the size rule).
+    // ANGLE's cached descriptor itself is not visible from GL.
+    // Counted always; the first 16 named, then one line per 4096.
+    static unsigned long post_draws, mismatches;
+    static unsigned said_ok_gen = ~0u;
+    static unsigned said_ok;
+    post_draws++;
+    if (gen && g_vrr_rule_map) {
+        const char *why = NULL;
+        if ((uint32_t)fb < KLFB_VRR_FBO_MAX && g_vrr_fbo_gen[fb] != gen)
+            why = "the destination FBO did not re-sync under the live rule";
+        else if (!dst)
+            why = "the destination's colour texture is not known here";
+        else if (dw != g_vrr_rule_w || dh != g_vrr_rule_h)
+            why = "the destination is not the rule's size (unfoveated)";
+        else if (sw != g_vrr_rule_w || sh != g_vrr_rule_h)
+            why = "the source is not foveated by the size rule";
+        if (why) {
+            mismatches++;
+            if (mismatches <= 16 || !(mismatches & 4095))
+                fprintf(stderr, "  [glfb] vrr post MISMATCH #%lu: program %u draws fb%d "
+                                "(tex %u %dx%d, stamp #%u) from tex %d %dx%d under live "
+                                "rule #%u %dx%d — %s (%lu post draws)\n",
+                        mismatches, g_cur_prog, fb, dst, dw, dh,
+                        (uint32_t)fb < KLFB_VRR_FBO_MAX ? g_vrr_fbo_gen[fb] : 0,
+                        src, sw, sh, gen, g_vrr_rule_w, g_vrr_rule_h, why, post_draws);
+        } else if (said_ok_gen != gen || said_ok < 6) {
+            // Each destination of the 3x2 swapchain ring, once per rule.
+            if (said_ok_gen != gen) { said_ok_gen = gen; said_ok = 0; }
+            said_ok++;
+            fprintf(stderr, "  [glfb] vrr post: fb%d (%s tex %u) <- tex %d, both "
+                            "under live rule #%u (map %p) — consistent\n",
+                    fb, klfb_eye_of_gl_tex(dst) >= 0 ? "eye" : "eye-sized", dst, src,
+                    gen, g_vrr_rule_map);
+        }
+    }
+
+    // The size assumption, which holds with or without a map: the first two
+    // post draws per rule, then every 4096th.
+    static unsigned long draws;
+    static unsigned checked_gen = ~0u;
+    static int checks;
+    draws++;
+    if (gen == checked_gen && checks >= 2 && (draws & 4095)) return;
+    if (gen != checked_gen) { checked_gen = gen; checks = 0; }
+    checks++;
+    int match = sw > 0 && sw == dw && sh == dh;
+    if (match && checks > 2) return;     // the periodic re-check stays quiet
+    fprintf(stderr, "  [glfb] vrr post: program %u draws fb%d (tex %u %dx%d) from "
+                    "tex %d %dx%d — %s (rule #%u, map %p %dx%d; %lu mismatch(es) "
+                    "so far)\n",
+            g_cur_prog, fb, dst, dw, dh, src, sw, sh,
+            match ? "sizes MATCH, the physical-UV read is texel-for-texel"
+                  : "sizes DIFFER: the physical-UV rewrite reads the WRONG texels "
+                    "(renderScaleFactor must be 1.0, useFsaa false; or leave "
+                    "KL_VRR_MIN_SAMPLES unset)",
+            gen, g_vrr_rule_map, g_vrr_rule_w, g_vrr_rule_h, mismatches);
+}
+
 static void klfb_BindFramebuffer(uint32_t target, uint32_t fb) {
     if (klfb_trace_fbo())
         fprintf(stderr, "  [glfb] t%llu glBindFramebuffer(0x%x, %u) <- %s\n",
@@ -6332,6 +6846,10 @@ static void klfb_BindFramebuffer(uint32_t target, uint32_t fb) {
     }
     if (g_real_BindFramebuffer) g_real_BindFramebuffer(target, fb);
     if (klfb_is_draw_target(target)) { klfb_rate_rule_for_fbo(fb); klfb_resync_fbo(fb); }
+    // KL_VRR_MIN_SAMPLES=1: a framebuffer ANGLE synced before the size rule
+    // changed re-reads it (once per framebuffer per change; a counter compare
+    // otherwise, and the counter is 0 for a guest without the knob).
+    if (klfb_is_draw_target(target)) klfb_vrr_touch(fb);
     // Did GL take the name? Only asked when ERRSCAN is already draining the
     // error queue every call — otherwise this would eat exactly the errors the
     // guest's own glGetError is looking for.
@@ -6882,9 +7400,79 @@ static void klfb_FramebufferTexture2D(uint32_t target, uint32_t attachment,
         g_real_FramebufferTexture2D(target, attachment, textarget, texture, level);
 }
 
+// KL_XR_ARRAY_DIRECT (kl_openxr.c; Minecraft with Vivecraft): an ARRAY swapchain
+// whose slices are served as 2D textures of their own. Vivecraft asks for ONE
+// arraySize-2 swapchain and only ever touches it through
+// glFramebufferTextureLayer(image, layer), so each (image, layer) attachment is
+// answered with a GL_TEXTURE_2D whose storage is the compositor's own
+// MTLTexture (kl_glfb_bind_eye_mtl_texture, the re-point a 2D swapchain gets).
+// What the guest draws or blits into that framebuffer then lands where the
+// compositor samples: the per-eye mirror copy (two full-size passes a frame) is
+// gone, and a blit into it is 2D -> 2D, the only kind the patched ANGLE copies
+// texel for texel between two foveated targets (see kl_glfb_mirror_eye_layer
+// for what an array-slice source does instead).
+//
+// The table is filled by kl_openxr.c for such a swapchain and by nobody else.
+// g_arr_redir_live counts its entries, so for every other guest the thunk below
+// pays one compare and forwards the attach as it always did.
+#define KLFB_ARRAY_REDIR 16
+static struct { uint32_t arr; int layer; uint32_t tex; } g_arr_redir[KLFB_ARRAY_REDIR];
+static int g_arr_redir_live;
+
+int kl_glfb_array_redirect(uint32_t array_tex, int layer, uint32_t tex2d) {
+    if (!array_tex) return 0;
+    for (int i = 0; i < KLFB_ARRAY_REDIR; i++)
+        if (g_arr_redir[i].arr == array_tex && g_arr_redir[i].layer == layer) {
+            if (tex2d) {
+                g_arr_redir[i].tex = tex2d;
+            } else {
+                g_arr_redir[i] = (__typeof__(g_arr_redir[0])){0};
+                g_arr_redir_live--;
+            }
+            return 1;
+        }
+    if (!tex2d) return 1;                // removing what was never there
+    for (int i = 0; i < KLFB_ARRAY_REDIR; i++)
+        if (!g_arr_redir[i].arr) {
+            g_arr_redir[i].arr = array_tex; g_arr_redir[i].layer = layer;
+            g_arr_redir[i].tex = tex2d;
+            g_arr_redir_live++;
+            return 1;
+        }
+    fprintf(stderr, "  [glfb] array redirect table full (%d) — array %u layer %d is "
+                    "NOT redirected\n", KLFB_ARRAY_REDIR, array_tex, layer);
+    return 0;
+}
+
+static uint32_t klfb_array_redirected(uint32_t array_tex, int layer) {
+    if (!g_arr_redir_live || !array_tex) return 0;
+    for (int i = 0; i < KLFB_ARRAY_REDIR; i++)
+        if (g_arr_redir[i].arr == array_tex && g_arr_redir[i].layer == layer)
+            return g_arr_redir[i].tex;
+    return 0;
+}
+
 static void klfb_FramebufferTextureLayer(uint32_t target, uint32_t attachment,
                                          uint32_t texture, int32_t level,
                                          int32_t layer) {
+    {
+        uint32_t t2 = klfb_array_redirected(texture, layer);
+        if (t2) {
+            static int said;
+            if (said < 6) {
+                said++;
+                fprintf(stderr, "  [glfb] array direct: fb%u attaches array %u layer %d "
+                                "-> 2D texture %u (the compositor's eye storage; no "
+                                "mirror copy — KL_XR_ARRAY_DIRECT=0 is the A/B)\n",
+                        klfb_fb_for_target(target), texture, layer, t2);
+            }
+            // Through the 2D thunk, not straight to ANGLE: the colour ledger,
+            // the stage map and the capture's eye-FBO hint all learn their
+            // texture from an attach, and it is the 2D name they must learn.
+            klfb_FramebufferTexture2D(target, attachment, 0x0DE1 /* TEXTURE_2D */, t2, level);
+            return;
+        }
+    }
     if (klfb_trace_fbo()) {
         uint32_t f = 0; int32_t tw = 0, th = 0;
         klfb_tex_info(texture, &f, &tw, &th);
@@ -7052,6 +7640,14 @@ static void klfb_TexParameterf(uint32_t target, uint32_t pname, float param) {
     if (pname == 0x2801) param = (float)klfb_nomip_filter(pname, (int32_t)param);
     if (param == (float)0x812D) param = (float)klfb_border_wrap(pname, 0x812D);   // other float parameters stay floats
     if (g_real_TexParameterf) g_real_TexParameterf(target, pname, param);
+    // KL_GLFB_ANISO, for a guest that spells MIN_FILTER as a float. Off (the
+    // default) this is one compare on a min-filter write and nothing else.
+    if (pname == 0x2801 && target == 0x0DE1 && klfb_aniso_wanted() > 1.0f &&
+        a_glGetIntegerv) {
+        int32_t bound = 0;
+        a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &bound);
+        klfb_aniso_inject(target, bound, (int32_t)param);
+    }
 }
 static void (*g_real_SamplerParameteri)(uint32_t, uint32_t, int32_t);
 static void klfb_SamplerParameteri(uint32_t sampler, uint32_t pname, int32_t param) {
@@ -7198,6 +7794,15 @@ static void klfb_TexParameteri(uint32_t target, uint32_t pname, int32_t param) {
         if (bound > 0) param = klfb_depth_filter_fix((uint32_t)bound, pname, param);
     }
     if (g_real_TexParameteri) g_real_TexParameteri(target, pname, param);
+    // KL_GLFB_ANISO: after the guest's own write, and on the filter that was
+    // really set (the two rewrites above may have changed it). Off (the
+    // default) this is one compare on a min-filter write and nothing else.
+    if (pname == 0x2801 /* MIN_FILTER */ && target == 0x0DE1 && g_real_TexParameteri &&
+        klfb_aniso_wanted() > 1.0f && a_glGetIntegerv) {
+        int32_t bound = 0;
+        a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &bound);
+        klfb_aniso_inject(target, bound, param);
+    }
     if (kl_env_on("KL_GLFB_ERRPROBE", 0) && a_glGetError) {
         uint32_t e = a_glGetError();
         if (e) fprintf(stderr, "  [glfb] glTexParameteri(0x%04x, 0x%04x) -> err 0x%x\n",
@@ -7356,6 +7961,7 @@ static void klfb_TexSubImage2D(uint32_t target, int32_t level, int32_t xoff,
 static void klfb_TexStorage2D(uint32_t target, int32_t levels, uint32_t fmt,
                               int32_t w, int32_t h) {
     klfb_note_format(fmt, w, h, 1, "glTexStorage2D");
+    klfb_aniso_forget(target, 0);       // KL_GLFB_ANISO: a re-specified name
     if (klfb_trace_tex()) {
         int32_t bound = -1;
         if (a_glGetIntegerv) a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &bound);
@@ -8115,7 +8721,10 @@ static int   g_eye_rate_zx, g_eye_rate_zy;
 
 // The multisampled scene target is the one the size rule is for; a
 // single-sampled target of the same size is a post-processing intermediate and
-// must NOT be foveated. See kl_glfb.h.
+// must NOT be foveated. See kl_glfb.h. This is the DEFAULT:
+// KL_VRR_MIN_SAMPLES=1 (klfb_rate_min_samples) is the per-target override for
+// a guest whose scene target is single-sampled and whose post copy reads it at
+// the physical position (Vivecraft — see klfb_rewrite_vr_post).
 #define KL_RATE_MIN_SAMPLES 2
 
 
@@ -8136,6 +8745,17 @@ static void *g_mtl_provider_ctx;
 static struct { void *tex; int slice; void *image; uint32_t gl_tex; int w, h;
                 int top_left; }
     g_eye_mtl[2][KL_MTL_MAX_STAGES];
+
+// The eye a GL name is the compositor-backed texture of, or -1. These are the
+// textures a rate map is registered on by identity (kl_glfb_bind_eye_mtl_texture
+// and kl_glfb_set_eye_rate_map), which is what klfb_vrr_touch reports.
+static int klfb_eye_of_gl_tex(uint32_t tex) {
+    if (!tex) return -1;
+    for (int e = 0; e < 2; e++)
+        for (int s = 0; s < KL_MTL_MAX_STAGES; s++)
+            if (g_eye_mtl[e][s].gl_tex == tex) return e;
+    return -1;
+}
 
 void kl_glfb_set_mtl_provider(kl_glfb_mtl_provider fn, void *ctx) {
     g_mtl_provider = fn;
@@ -8411,10 +9031,28 @@ void kl_glfb_set_eye_rate_map(int w, int h, int zones_x, int zones_y, void *rate
                         "foveation is unavailable (is it the patched build?)\n");
         return;
     }
+    // The size rule's sample floor: KL_RATE_MIN_SAMPLES, unless
+    // KL_VRR_MIN_SAMPLES says otherwise (klfb_rate_min_samples — unset, it
+    // answers that same 2), and 1 for a mirrored guest whose own swapchain
+    // takes the map.
+    int floor_samples = (int)klfb_rate_min_samples();
+    int min_samples = g_eye_mirroring && klfb_mirror_vrr() ? 1 : floor_samples;
+    if (floor_samples != KL_RATE_MIN_SAMPLES) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [glfb] KL_VRR_MIN_SAMPLES=%d — render targets of the "
+                            "eye size with >= %d sample(s) take the rate map (the "
+                            "default %d keeps it to multisampled scene targets)%s\n",
+                    floor_samples, floor_samples, KL_RATE_MIN_SAMPLES,
+                    klfb_vrr_post_wanted()
+                      ? "; the VR post shader reads its source at the physical "
+                        "position (KL_VRR_POST)" : "");
+    }
+    void *old_map = g_eye_rate_map;
+    int old_w = g_eye_rate_w, old_h = g_eye_rate_h, old_min = g_eye_rate_min;
     // Retire the previous size rule before installing another: the eye size
     // changes under us when Unity re-creates its swapchain, and a rule left
     // behind on the old size would foveate a target nothing unwarps.
-    int min_samples = g_eye_mirroring && klfb_mirror_vrr() ? 1 : KL_RATE_MIN_SAMPLES;
     if (g_eye_rate_w && (g_eye_rate_w != w || g_eye_rate_h != h || !rate_map ||
                          g_eye_rate_min != min_samples))
         a_SetRateMapForSize((uint32_t)g_eye_rate_w, (uint32_t)g_eye_rate_h,
@@ -8432,6 +9070,29 @@ void kl_glfb_set_eye_rate_map(int w, int h, int zones_x, int zones_y, void *rate
     g_rate_gen++;           // framebuffers drawn into before this must be re-synced
     if (rate_map)
         a_SetRateMapForSize((uint32_t)w, (uint32_t)h, (uint32_t)min_samples, rate_map);
+
+    // KL_VRR_MIN_SAMPLES=1: every framebuffer ANGLE has already synced cached
+    // its old answer — see klfb_vrr_touch. A changed rule (new map, new size,
+    // another floor, or retired) is a new generation, and each framebuffer
+    // re-syncs on its next bind. Only under the knob: without it the
+    // generation stays 0, so no bind or draw of any other guest changes.
+    if (floor_samples < KL_RATE_MIN_SAMPLES &&
+        (rate_map != old_map || g_eye_rate_w != old_w || g_eye_rate_h != old_h ||
+         (rate_map && min_samples != old_min))) {
+        g_vrr_rule_w   = g_eye_rate_w;
+        g_vrr_rule_h   = g_eye_rate_h;
+        g_vrr_rule_min = (unsigned)min_samples;
+        g_vrr_rule_map = rate_map;
+        unsigned gen = __atomic_add_fetch(&g_vrr_gen, 1, __ATOMIC_RELEASE);
+        if (rate_map)
+            fprintf(stderr, "  [glfb] vrr: size rule #%u — targets of %dx%d with >= %d "
+                            "sample(s) take map %p; framebuffers synced before it "
+                            "re-read the rule on their next bind\n",
+                    gen, w, h, min_samples, rate_map);
+        else
+            fprintf(stderr, "  [glfb] vrr: size rule #%u — retired; framebuffers that "
+                            "carried the map drop it on their next bind\n", gen);
+    }
 
     // Eye textures already bound do not come back through the bind path, so
     // re-register (or clear) each of them here — but only those the map was
@@ -8510,6 +9171,19 @@ int kl_glfb_share_eye_mtl_texture(int eye, int stage, int from_eye) {
 int kl_glfb_eye_mtl_origin_top_left(int eye, int stage) {
     if (eye < 0 || eye > 1 || stage < 0 || stage >= KL_MTL_MAX_STAGES) return 0;
     return g_eye_mtl[eye][stage].top_left;
+}
+
+// The GL name that owns (eye, stage)'s compositor storage: the one
+// kl_glfb_bind_eye_mtl_texture was last given for it, until
+// kl_glfb_release_eye_texture deletes it. 0 for an entry that has no name of
+// its own — nothing bound, a Vulkan image (kl_glfb_note_eye_mtl_texture) or a
+// DoubleWide partner (kl_glfb_share_eye_mtl_texture). KL_XR_ARRAY_DIRECT asks
+// so that it releases a slot only while its own texture still holds it: a
+// newer swapchain binding the same slot has already released, and deleted,
+// the older one's name (the replace backstop in the bind).
+uint32_t kl_glfb_eye_gl_texture(int eye, int stage) {
+    if (eye < 0 || eye > 1 || stage < 0 || stage >= KL_MTL_MAX_STAGES) return 0;
+    return g_eye_mtl[eye][stage].gl_tex;
 }
 
 // The teardown half, called from ovrp_DestroyEyeTexture — the only thing in the
@@ -11086,6 +11760,29 @@ static void klfb_BlitFramebuffer(int32_t sx0, int32_t sy0, int32_t sx1, int32_t 
                                  int32_t dx0, int32_t dy0, int32_t dx1, int32_t dy1,
                                  int64_t mask, int64_t filter) {
     klfb_errprobe("glBlitFramebuffer(before)", NULL);
+    // KL_VRR_MIN_SAMPLES=1 makes every eye-sized single-sampled target a
+    // foveated one. A COLOUR blit out of one into a differently-sized region
+    // copies warped texels into a target nothing unwarps (ANGLE's passthrough
+    // only covers same-map, same-size copies). Named, at most four times; not
+    // corrected. g_vrr_rule_map is NULL for a guest without the knob. A guest
+    // whose glBlitFramebuffer does not come through this thunk (a Darwin-ABI
+    // caller is handed ANGLE's own, see the note on stack arguments at the top
+    // of this file) is not seen here.
+    if (g_vrr_rule_map && ((uint32_t)mask & 0x4000)) {
+        int32_t sw = sx1 > sx0 ? sx1 - sx0 : sx0 - sx1;
+        int32_t sh = sy1 > sy0 ? sy1 - sy0 : sy0 - sy1;
+        int32_t dw = dx1 > dx0 ? dx1 - dx0 : dx0 - dx1;
+        int32_t dh = dy1 > dy0 ? dy1 - dy0 : dy0 - dy1;
+        static int said;
+        if (sw == g_vrr_rule_w && sh == g_vrr_rule_h &&
+            (dw != sw || dh != sh) && said < 4) {
+            said++;
+            fprintf(stderr, "  [glfb] vrr: a colour blit reads an eye-sized %dx%d "
+                            "region (foveated under KL_VRR_MIN_SAMPLES=1) into "
+                            "%dx%d — its picture is WARPED (fb%u -> fb%u)\n",
+                    sw, sh, dw, dh, g_read_fb, g_draw_fb);
+        }
+    }
     // The per-blit src/dst/status dump is a FIREHOSE (every blit, tens of thousands
     // a frame, plus a glGet + CheckFramebufferStatus per blit) — its own opt-in flag
     // so KL_FULL can arm the cheap error-only errprobe above without this overhead.
@@ -12047,6 +12744,7 @@ static void klfb_note_draw(void) {
     // this guest draws into one framebuffer and blits out of another.
     if (fb > 0) g_last_draw_fb = (uint32_t)fb;
     klfb_stn_draw(fb);
+    klfb_vrr_post_check(fb);      // KL_VRR_MIN_SAMPLES=1 only; a compare otherwise
     // KL_GLFB_ATTR_LOG=<n> [KL_GLFB_ATTR_LOG_FROM=<presented frame>]: for n draws,
     // the vertex attribute state ANGLE sees (pointer API, which Source's togl
     // uses): program, draw framebuffer, and per attribute enabled/size/type/

@@ -1999,7 +1999,9 @@ puts the camera on the ground with its hands underneath it.
   blocks of garbage, different per eye and per frame, without it) and
   `x9269393463181825` (Roboquest VR, Meta Store build: a black scene with
   glimpses of models under its UI) and `x5223884527630557` (The 7th Guest
-  VR: wrong colours and scattered blocks from the first frame), else 0.
+  VR: wrong colours and scattered blocks from the first frame) and
+  `x2719294624823942` (Myst: blocks, wrong colours and different pictures per
+  eye right at the start), else 0.
 - `KL_VK_PASS_BARRIERS=0|1|2` — what happens to a `vkCmdPipelineBarrier`
   recorded INSIDE a dynamic-rendering pass that only makes colour attachments
   readable as input attachments. MoltenVK answers one by ending the Metal pass
@@ -5002,3 +5004,70 @@ back, so tracking and poses need it even when the buttons work again.
   a scene, focus or controller change of any kind, so there is nothing to react
   to. That needs the progressive path.
 
+## Minecraft (the `vivecraft` target, kind `macho`)
+
+The door is `visionos/Sources/Minecraft/kl_app_macho.inc`, the app layer
+`visionos/Sources/Minecraft/*.swift`; both are in that target's app only. From
+rebelancap's vivecraft-visionos 1.0.3, whose `DEBUG_ENV_VARS.md` has the history
+of each. The target's own defaults are in `kl_driver_env_defaults`.
+
+- `<container>/klepton-env.txt` — `NAME=VALUE` lines, applied before everything
+  else and with overwrite, for this target only. The launcher keeps
+  `KL_IMMERSIVE` in it; anything else is a knob put there by hand.
+- `KL_IMMERSIVE=0|1` — the game in a visionOS window, or around the player
+  (Vivecraft, OpenXR). Set by the launcher's play mode at Play; fixed for the
+  process once a game has started.
+- `KL_NATIVE_SIZE=<w>x<h>` (1280x720) — the windowed game's surface.
+- `KL_NATIVE_STACK_MB` (8), `KL_NATIVE_ENTRY` (`klmc_main`) — the entry thread.
+- `KL_GUEST_QOS=off|background|utility|default|initiated|interactive`
+  (`initiated`) — the class of the threads the game starts itself. Here the
+  variable names a class; for an ELF guest it is the runtime's on/off switch.
+- `KL_MC_XMX` (3G), `KL_MC_USER` (Player), `KL_MC_JVM_ARGS`, `KL_MC_ARGS` — into
+  the game's command line (`launch.txt`).
+- `KL_MC_LAUNCH_ARGV`, `KL_MC_GAMEDIR`, `KL_MC_PROFILE_NOTE` — set by the
+  launcher at Play (play target, the account's game dir); not for hand use.
+- `KL_MSA=0` — keep the offline profile (no Microsoft session is asked for).
+  This does NOT open the ownership gate; nothing in the environment does.
+- `KL_MC_RERUN=1` — default 0: when a game ends (Quit Game, a crash exit, the
+  quit grace) the app leaves, as every other game of this tree does, and the
+  next tap on its icon starts at the launcher. 1 = the launcher is back and its
+  Play runs the game again in the same process (the reference tree's habit). On
+  the headset (2026-11-15) that worked once after a clean return and failed
+  after a quit-grace cut: the parked isolate kept its heap and the new one could
+  not reserve its address space ("Failed to create the main Isolate. (code
+  801)", the app vanished); a cut run therefore never allows a re-run.
+  With it: `KL_MC_RERUN_MIN_MB` (4300; less available memory than that and the
+  app leaves instead), `KL_MC_TEARDOWN=0` (park the finished isolate instead of
+  destroying it), `KL_MC_TEARDOWN_SECS` (20).
+- `KL_KEEP_START_WINDOW=1` — the tree's own switch: the launcher window stays
+  open in front of the immersive game. Default: it closes once the picture is
+  up and is opened again when the game ends (`[launcher] …` lines). Windowed
+  play never closes it; there the window is the game.
+- `KL_MC_QUIT_GRACE_MS` (2500) — how long a game whose window has closed gets to
+  return before the run is ended anyway; `KL_MC_EXIT_TO_LAUNCHER=0` — an
+  `exit()` during a run ends the process.
+- `KL_XR_ARRAY_DIRECT=1` (target default) — an arraySize-2 GLES eye swapchain's
+  slices are the compositor's own eye textures; no per-eye mirror copy.
+  `runtime/xr/kl_openxr.c`, `kl_glfb_array_redirect`. Off for every other guest.
+- `KL_VRR_MIN_SAMPLES=1` (target default; 2 elsewhere) — eye-sized
+  single-sampled render targets take the rate map too, and Vivecraft's VR post
+  shader is rewritten to read its source at the physical position
+  (`KL_VRR_POST=0` leaves the shader alone). `runtime/gfx/kl_glfb.c`.
+- `KL_VRR_FLOOR=0.40`, `KL_VRR_RAMP=0.92` (target defaults; off and 1.0
+  elsewhere) — the floor of the guest's rate map, and the most a zone may fall
+  below its neighbour. `KleptonCompositor.swift`.
+- `KL_GLFB_ANISO=<n>` (8 for this target, 0 elsewhere) — anisotropic filtering
+  on mipmapped textures the guest did not ask it for. `runtime/gfx/kl_glfb.c`.
+- `KL_XR_PATH_SHORTHAND`, `KL_XR_BOOL_THRESHOLD`, `KL_XR_ACTIVE_SETS`,
+  `KL_XR_HANDS_TOUCH` — the spec-strict input rules and the hands-as-Touch
+  mapping, on for a guest that came through `kl_openxr_set_spec_input(1)` (this
+  one), off for every other; 0 or 1 decides either way. `runtime/xr/kl_openxr.c`.
+- `KL_XR_BOOT_GATE=1`, `KL_XR_HONEST_HEAD=1` — existing switches, on by default
+  for this target.
+- `KL_XR_STAGE_DROP=<metres>` (0) — a simulator aid: STAGE's floor that far
+  below the tracking origin (the simulator's head is at height 0).
+- Not here: `KL_PERF` (the performance panel, `KL_STATS_CARD`, takes its place),
+  `KL_GLFB_LAZY_UNBIND` (his row had it off), `KL_VRR_MIRROR` (it means another
+  thing in this tree and must stay unset for this game), `KL_OVRP_EYE_MAX` as a
+  target default (the eye size is the title's cap, 4864 with foveated rendering
+  and 3072 without, under "Max resolution per eye").

@@ -210,4 +210,58 @@ const char *kl_app_status(void);
 // other time.
 int kl_app_prepare_progress(unsigned *done, unsigned *total);
 
+// ---- a Mach-O guest (KL_GUEST_MACHO: Minecraft with Vivecraft) ----------------
+//
+// Declared for every app; DEFINED only in one built for such a target
+// (KL_MACHO_GUEST, Minecraft/kl_app_macho.inc), and called only from the Swift
+// sources of that target (Sources/Minecraft/, and the shared ones behind
+// `#if KL_MACHO_GUEST`).
+
+// Whether this app's guest is one. Safe before kl_app_configure: it resolves the
+// target from KL_TARGET or the name compiled in, as configure does.
+int  kl_app_target_is_macho(void);
+
+// Quit to the launcher. _runs counts the game's returns (the window polls it to
+// dismiss the immersive space), _rc is the last return value. _rerun_ok says the
+// last run's isolate was torn down and another Play can run in this process
+// (KL_MC_RERUN=0 forces no); _rerun re-applies the env file and rebuilds the
+// command line (launch.txt, KL_MC_LAUNCH_ARGV, the Microsoft session) for that
+// next run, after which the immersive space is opened again and the compositor
+// starts the game as on the first Play. Non-zero = refused; kl_app_status() says
+// why.
+int  kl_app_macho_runs(void);
+int  kl_app_macho_closing(void);   // this run's game closed its window; the run has not ended yet
+int  kl_app_macho_rc(void);
+int  kl_app_macho_rerun_ok(void);
+int  kl_app_macho_rerun(void);
+
+// A gamepad's input for the game in its WINDOW, into the game's own event ring.
+// Main thread only. New presses and motion need a running windowed game;
+// releases are accepted after it or the focus is lost. Cursor moves are deltas:
+// unbounded while the game holds the cursor, clamped to the surface in menus,
+// and they follow the game when it moves the cursor itself.
+int  kl_app_macho_windowed_ready(void);
+int  kl_app_macho_windowed_cursor_mode(void);
+void kl_app_macho_windowed_key(int key, int down);
+void kl_app_macho_windowed_button(int button, int down);
+void kl_app_macho_windowed_move(double dx, double dy);
+void kl_app_macho_windowed_scroll(double y);
+void kl_app_macho_windowed_release_all(void);
+
+// A Minecraft session, filled by Minecraft/KleptonMSA.swift's
+// `kl_msa_session(tree, &s)` (exported with @_cdecl; the door declares it).
+// 0 = signed in; non-zero = offline, `note` says why. `token` is a secret:
+// never print it.
+typedef struct {
+    char   name[64];
+    char   uuid[48];
+    char   xuid[32];
+    char   token[4096];
+    char   note[256];
+    char   summary[160];   // "N (default <name>)" — the account list, for the log
+    double hours;          // token lifetime left
+    int    free_account;   // 1 = no Java Edition: name + OFFLINE uuid, no token —
+                           // the boot stays offline under that name
+} kl_msa_session_t;
+
 #endif

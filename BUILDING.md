@@ -130,6 +130,157 @@ reads the OBB out of the guest's userdata directory:
 
 ---
 
+## Minecraft (the `vivecraft` target)
+
+Minecraft: Java Edition with Vivecraft is the one target that is not made from
+an APK. The game is rebelancap's `vivecraft-visionos`: Minecraft, its mods and
+Vivecraft compiled ahead of time into `libminecraft.dylib`, with seventeen more
+Darwin libraries beside it (LWJGL, OpenAL, the GL translator, the OpenXR loader
+shim, the voice codecs). In `visionos/targets.py` its kind is `macho`; the kind
+`native` is an Android NativeActivity and has nothing to do with it.
+
+None of that is built here. The compiled game and its files (jars, Minecraft's
+assets, the Fabric game dir; about 0.9 GB) are inputs, taken out of an archive
+of the game: a zip in the shape of an IPA. A release IPA of `vivecraft-visionos`
+is one; so is what a build of that project on one's own Mac leaves, the game's
+parts with nothing around them:
+
+```
+Payload/<Name>.app/Frameworks/<name>.dylib   the libraries the target's row names, and no others
+Payload/<Name>.app/klepton-payload/          launch.txt baked.cp payload-version tree root/inst-<version>/
+Payload/<Name>.app/Licenses/  or  Licenses/  optional: the notices of what is compiled in (NOTICES.txt + texts)
+```
+
+```bash
+python3 tools/vivecraft_seed.py /path/to/vivecraft-visionos-1.0.3.ipa   # or a parts archive, or an unpacked .app
+```
+
+A locally built archive is another file on every Mac, so an archive is taken on
+what is in it and not on its hash: exactly the row's libraries, each an arm64
+dynamic library built for visionOS devices; the payload's five parts, laid out
+for this target, with no account in `launch.txt` and no loose class or Mach-O
+file; licence files that are texts. Each check that fails is one line, and then
+nothing is taken. (The script's table of sha256 values only gives a published
+archive its name.) It fills `visionos/prebuilt/vivecraft/` (git-ignored;
+`KLEPTON_VIVECRAFT_PREBUILT=<folder>` names another one, for the script and for
+the build):
+
+```
+visionos/prebuilt/vivecraft/Frameworks/<name>.dylib   the 18 libraries, device slices
+visionos/prebuilt/vivecraft/payload/                  launch.txt baked.cp root/ tree payload-version
+visionos/prebuilt/vivecraft/Licenses/                 the archive's notices, when it carried them
+visionos/prebuilt/vivecraft/SOURCE.txt                which archive they came from (name or sha256)
+```
+
+Then the app, for a headset only (an archive has no simulator build of the game):
+
+```bash
+KLEPTON_TARGET=vivecraft KLEPTON_TEAM=<team id> KL_NO_INSTALL=1 visionos/run.sh device
+```
+
+An installer does both in one step by handing the build its archive:
+
+```bash
+KLEPTON_MACHO_IPA=/absolute/path/to/the/archive KLEPTON_TARGET=vivecraft ... visionos/run.sh device
+```
+
+`run.sh` then calls the script with `--if-changed` before it builds: a folder
+that already holds what came out of that file (same sha256) is left alone,
+another file fills it anew, and an archive that fails a check stops the build
+with the script's lines. The path must be absolute. Without the variable the
+folder is used as it is. The variable is the build's alone: `run.sh` forwards
+`KL_*`, `MTL_*` and `METAL_*` into the app, and this name is none of them.
+
+`KL_NO_INSTALL=1` builds the signed `.app` and stops without looking for a
+headset; without it the app is installed and launched as for any target.
+`visionos/mkmacho.sh` wraps the libraries for embedding, the "Bundle game
+payload" build phase copies the payload into the app as it is (with the
+archive's own `payload-version`, so an update that carries the same game leaves
+a player's container alone), and "Copy licence notices" puts the notices into
+the app as `Licenses/`: the archive's when it carried them, else
+`visionos/Licenses/vivecraft/`. The build is the
+Release configuration unless `KL_XCODE_CONFIG=Debug`: the game does not start
+until an account that owns Minecraft: Java Edition has signed in on the device,
+the only way to compile that gate out is the Swift condition
+`KL_OWNERSHIP_GATE_OFF`, and a build without `DEBUG` that defines it does not
+compile. No environment variable switches the gate off.
+
+Because the payload goes in unchanged, what a new player starts with is set by
+the app, whatever the archive ships, at the moment it makes that player's
+`options.txt` (`MCOptionDefaults` in
+`visionos/Sources/Minecraft/KleptonMCProfiles.swift`): render distance 5 and
+simulation distance 8 (the 1.0.3 release ships 12 and 12), and
+`graphicsPreset:"custom"` where the file names another preset, because the game
+puts a preset's own distances back at its first start. An `options.txt` that
+exists is never opened for it, and no other line is touched.
+
+The icon is the installer's when it left one in `visionos/Assets.xcassets`
+(`AppIcon-vivecraft.solidimagestack`, as for every target). Without one the
+build takes the game's own: Minecraft's icon is an asset object the payload's
+index names (`icons/minecraft.icns`, 1024 px), and `visionos/macho_art.py`
+makes the visionOS icon from it at project-generation time, into
+`visionos/build/gameart/vivecraft/` (the game's picture over a plain ground;
+nothing of it is part of this tree). No payload seeded and no stack: iconless.
+
+`make swiftcheck-macho` typechecks this target's Swift (the shared sources with
+`KL_MACHO_GUEST`, plus `visionos/Sources/Minecraft/`) without Xcode.
+
+### Installing it without a compiler
+
+`visionos/mktemplate.sh` (its head describes the archives) builds a third one
+for this kind, `visionos/build/klepton-macho-vivecraft-<version>-<commit>.zip`:
+the vivecraft app, unsigned, Release, with everything compiled in and nothing
+of the game — no library of its eighteen in `Frameworks/`, no `klepton-payload/`.
+The plain template cannot become this app (other sources, another
+configuration), and it is built exactly as before. `KLEPTON_TEMPLATE_MACHO=0`
+leaves the new archive out.
+
+```
+Payload/KleptonVivecraft.app   the app without the game
+Klepton.entitlements           what an app built here is signed with
+template.json                  which toolchain this is; "macho": "vivecraft"
+macho.json                     what to add, and where
+```
+
+Finishing it takes the game's archive (the same file `KLEPTON_MACHO_IPA`
+names) and no compiler. `macho.json` (`visionos/targets.py --macho-data` plus
+what the build knows) says, with `from` inside the archive's one
+`Payload/<Name>.app` and `to` inside the template's app:
+
+- `libraries`: `names` (the eighteen), each from `Frameworks/{name}.dylib` to
+  `Frameworks/{name}.dylib`; arm64, built for visionOS devices, install name
+  `@rpath/{name}.dylib` (an archive's libraries have it).
+- `payload`: the folder `klepton-payload`, to `klepton-payload`, as it is; it
+  must hold the names in `requires` and be laid out for `tree`.
+- `licenses`: the template carries a set (`inTemplate` files). An archive with
+  its own (`from`, a folder that has the `index`) replaces the folder `to`.
+- `info.write`: the four Info.plist values that say whose app it is —
+  `CFBundleIdentifier`, `KLSharedKeychainGroup` (`{team}.avpplay.shared`),
+  `CFBundleShortVersionString`, `CFBundleVersion`. Every other value is in the
+  template already; `info.row` lists the row's, to check against.
+- `entitlements`: the file to sign the app with, `$(AppIdentifierPrefix)` and
+  `$(PRODUCT_BUNDLE_IDENTIFIER)` filled in, plus the application and team
+  identifiers every signed app has.
+- `sign`: what to sign, inside out — the added libraries, the frameworks, the
+  app.
+- `icon`: `compiled` says whether the template has one (it has when an
+  installer's stack or a seeded payload was there at build time; set
+  `KLEPTON_MACHO_IPA` for `mktemplate.sh` as for `run.sh`). Without one, `game`
+  says where the game's own is in the payload: an asset index, the names to look
+  for in it, and the object file by its hash (`{hash:2}` is the hash's first two
+  characters).
+- `archive.published`: sha256 → name of the published archives, for display
+  only. An archive is taken on what is in it (the checks `tools/vivecraft_seed.py`
+  makes), never on its hash.
+
+A template finished that way from the 1.0.3 IPA on a Mac and the device build
+with the same options (`KLEPTON_START_SCREEN=1 KLEPTON_SURREAL_SUPPORT=0`) had
+the same list of files, the same Info.plist, the same entitlements and the same
+signed libraries (equal code hashes), and both verified. The two program files
+are two builds of the same sources: equal in size once their debug symbols are
+stripped, different in the debug map's paths, the UUID and the order of the
+Objective-C message stubs.
+
 ## ANGLE
 
 ```bash

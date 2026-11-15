@@ -1877,6 +1877,17 @@ static int klovrp_title_cap(const char *t) {
         // this game was first tuned against. "Resolution" in the start window
         // scales it down.
         if (t && strcmp(t, "doom3quest") == 0 && kl_glfb_mirror_foveation_wanted()) cap_dflt = 5200;
+        // Minecraft with Vivecraft, where its eyes are drawn through the
+        // display's own map (KL_VRR with KL_VRR_MIN_SAMPLES=1, kl_driver.c): 4864,
+        // the size rebelancap's release settled on for exactly that path
+        // (targets.py of vivecraft-visionos 1.0.3: 4608 measured 9.4 ms of GPU a
+        // frame at a steady 90 Hz, 5088 was GPU-bound; the map keeps about half
+        // the fragments). With foveated rendering switched off the scene is
+        // drawn in full and the default 3072 stands: 4608 unfoveated ran at 38
+        // frames a second there. "Max resolution per eye" and "Resolution" in the
+        // start window still decide.
+        extern int kl_glfb_foveation_wanted(int *zones, float *edge);
+        if (t && strcmp(t, "vivecraft") == 0 && kl_glfb_foveation_wanted(NULL, NULL)) cap_dflt = 4864;
     }
     return cap_dflt;
 }

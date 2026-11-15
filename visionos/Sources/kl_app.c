@@ -113,6 +113,16 @@ static int           g_vr_loaded;
 // exactly that.
 static volatile int  g_guest_quit;
 
+#if KL_MACHO_GUEST
+// A Mach-O guest (Minecraft) has a door of its own, Minecraft/kl_app_macho.inc,
+// which is the end of this file in an app built for one and absent from every
+// other. These are what the code above that point calls into it by.
+static int target_is_macho(void) { return g_target && g_target->kind == KL_GUEST_MACHO; }
+static int macho_configure(const char *resources, const char *container);
+static int macho_boot(void);
+static int macho_run(void);
+#endif
+
 const char *kl_app_target_name(void) { return g_target ? g_target->name : "(unconfigured)"; }
 // See kl_app.h: the target name even before configure sets g_target, so the
 // launcher UI knows which game it is on the first render. Same source configure
@@ -518,6 +528,11 @@ int kl_app_configure(const char *resources, const char *container) {
     g_target = kl_target_lookup(want);
     if (!g_target) g_target = target_from_info(want);
     if (!g_target) return missing("guest target (KL_TARGET)", want);
+#if KL_MACHO_GUEST
+    // A Mach-O guest has no APK, no translations and no ELF tree, so none of
+    // the checks below apply to it: its own configure, and back.
+    if (target_is_macho()) return macho_configure(resources, container);
+#endif
 
     // The veneers' TSD slot is claimed HERE rather than wherever the first guest
     // library happens to load. The slot number is a constant baked into every
@@ -1323,7 +1338,11 @@ int kl_app_boot(void) {
                kl_env_str("KL_SLINK_SARGS", NULL) ? "carried" : "UNSET",
                kl_env_on("KL_SLINK_VR", 0) ? "on" : "off",
                kl_env_on("KL_SLINK_SHELL", 0) ? "ON, which overrides the others" : "off");
-    if (target_is_linux()) {
+    if (target_is_linux()
+#if KL_MACHO_GUEST
+        || target_is_macho()     // its libraries are the dylibs there, and that is all of it
+#endif
+        ) {
         printf("  frameworks: %s\n\n", g_dylibs);
     } else {
     printf("  libraries : %s\n", g_libdir);
@@ -1334,6 +1353,16 @@ int kl_app_boot(void) {
     printf("  files     : %s\n\n", g_files);
     }
     fflush(NULL);
+
+#if KL_MACHO_GUEST
+    // A Mach-O guest has its own boot (macho_boot): no driver, no JNI tables,
+    // no pipeline list to prepare.
+    if (target_is_macho()) {
+        if (macho_boot() != 0) return 1;
+        app_phase("boot done");
+        return 0;
+    }
+#endif
 
     // Before the chain runs, so nothing it starts reads a default we meant to
     // replace.
@@ -1472,6 +1501,10 @@ void kl_app_lifecycle_report(void) {
 }
 
 int kl_app_lifecycle(unsigned frames) {
+#if KL_MACHO_GUEST
+    // A Mach-O guest's loop is its own main(); this call is the whole run.
+    if (target_is_macho()) { (void)frames; return macho_run(); }
+#endif
     int rc = kl_app_lifecycle_begin();
     if (rc) return rc;
 
@@ -1785,6 +1818,16 @@ static void *guest_thread(void *unused) {
     kl_thread_init();
     pthread_setname_np("Klepton Guest");
 
+#if KL_MACHO_GUEST
+    // A Mach-O guest: the same blocking run as the window path's.
+    if (target_is_macho()) {
+        guest_set_state(1);
+        macho_run();
+        guest_finished();
+        return NULL;
+    }
+#endif
+
     // Two ways in, and which one this is depends on what the WINDOW already
     // did. On a plain launch this thread is the first thing to run a guest, and
     // kl_app_lifecycle_begin is that. After a 2D->VR handoff the window path has
@@ -1957,6 +2000,19 @@ int kl_app_guest_start(void) {
         return fail("kl_app_guest_start was already run in this process");
     }
     g_guest.limit = kl_env_uint("KL_FRAMES", 0);
+#if KL_MACHO_GUEST
+    if (target_is_macho() && g_guest.finished) {
+        // A second run in this process (Minecraft's quit to its launcher, then
+        // Play again: kl_app_macho_rerun). The last one left stop/quit set and
+        // its pose counters behind. Fresh, as if it were the first.
+        g_guest.stop = 0;
+        g_guest_quit = 0;
+        g_guest.finished = 0;
+        g_guest.asked_quit = 0;
+        g_guest.published = g_guest.consumed = 0;
+        g_guest.published_ns = 0;
+    }
+#endif
     g_guest.running = 1;
     g_guest.state = 0;
     pthread_mutex_unlock(&g_guest.mu);
@@ -1999,6 +2055,12 @@ int kl_app_guest_start(void) {
         (g_target->name && strncmp(g_target->name, "sourcevr-", 9) == 0) ||
         (g_target->kind == KL_GUEST_UE4 && kl_steamapi_shipped()))
         kl_openxr_set_frame_pacer(guest_pace_wait);
+#if KL_MACHO_GUEST
+    // ...and Minecraft with Vivecraft: Mobile OpenXR through the loader shim, so
+    // its clock is xrWaitFrame too. Only reached on the immersive path — this
+    // function is the compositor's.
+    if (target_is_macho()) kl_openxr_set_frame_pacer(guest_pace_wait);
+#endif
     // ...and the same clock on the OVRPlugin side, for the other guest that
     // owns its loop. ovrp_WaitToBeginFrame is this API's xrWaitFrame. It is
     // installed ONLY here: every Unity guest reaches that call from inside a
@@ -2081,3 +2143,9 @@ void kl_app_guest_stop(void) {
         fflush(NULL);
     }
 }
+
+#if KL_MACHO_GUEST
+// The door of a Mach-O guest (Minecraft): the rest of this file, for an app
+// built for one. Last, because it reads the guest thread's state above.
+#include "Minecraft/kl_app_macho.inc"
+#endif

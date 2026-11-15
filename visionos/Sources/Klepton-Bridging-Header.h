@@ -60,3 +60,7 @@ int kl_ovrplat_user_id_per_install(const char *target);
 #import "kl_surreal_sdk.h"
 
 #import "kl_mprobe.h"
+
+// The Mach-O guest's (Minecraft's) OpenAL helper, for Sources/Minecraft/. Three
+// constants and one function; the definition is in that target's app only.
+#import "Minecraft/MCAudioOpenAL.h"

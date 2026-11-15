@@ -10,8 +10,12 @@
 #   KLEPTON_TEAM=<teamid>   override signing team
 #   KLEPTON_BUNDLE_ID=...   override bundle id
 #   KL_SKIP_STAGE=1         never stage, even on a target that has never had it
-#   KL_SKIP_LAUNCH=1        device: build, install and stage, but do not launch
+#   KL_SKIP_LAUNCH=1        build, install and stage, but do not launch
+#   KL_NO_INSTALL=1         device: build the signed .app and stop. No headset is
+#                           looked for, asked or touched; the app's path is printed.
 #   KL_STAGE=1              always stage, whatever the stamp says
+#   KLEPTON_MACHO_IPA=<abs> a Mach-O guest (vivecraft): the archive its
+#                           libraries and files are taken from before the build
 #
 # Everything downstream of the target — the product name, and with it the
 # .xcodeproj, the scheme, the .app and the derived-data directory — comes from
@@ -167,7 +171,7 @@ stage_if_needed() {
 # it, the app never did, and the run took the window path while looking like the
 # compositor had failed to come up. A knob that is set and not delivered is worse
 # than one that does not exist, so the default is now "forward it".
-FORWARD_SKIP="KL_LX_PHASE KL_LX_SYSROOT KL_LX_GAME KL_LX_XRIZER KL_LX_MIRROR KL_ANGLE_DIR KL_SKIP_STAGE KL_STAGE KL_SKIP_INSTALL KL_SKIP_LAUNCH KL_LOG_OUT KL_WATCH KL_QUIET KL_KEEP_LONGEST"
+FORWARD_SKIP="KL_LX_PHASE KL_LX_SYSROOT KL_LX_GAME KL_LX_XRIZER KL_LX_MIRROR KL_ANGLE_DIR KL_SKIP_STAGE KL_STAGE KL_SKIP_INSTALL KL_SKIP_LAUNCH KL_NO_INSTALL KL_XCODE_CONFIG KL_LOG_OUT KL_WATCH KL_QUIET KL_KEEP_LONGEST"
 FORWARD=""
 for K in $(env | sed -n -e 's/^\(KL_[A-Za-z0-9_]*\)=.*/\1/p' \
                         -e 's/^\(MTL_[A-Za-z0-9_]*\)=.*/\1/p' \
@@ -175,6 +179,31 @@ for K in $(env | sed -n -e 's/^\(KL_[A-Za-z0-9_]*\)=.*/\1/p' \
   case " $FORWARD_SKIP " in *" $K "*) continue ;; esac
   FORWARD="$FORWARD $K"
 done
+
+# A Mach-O guest's inputs, when the caller hands over where they come from:
+#
+#   KLEPTON_MACHO_IPA=<absolute path of the game's archive>
+#
+# (AVP Play sets it when it builds this target.) The archive is a zip in the
+# shape of an IPA — a release of vivecraft-visionos, or the game's parts alone
+# as a build of that project on this Mac leaves them: Payload/<Name>.app/
+# Frameworks/<the row's libraries>, Payload/<Name>.app/klepton-payload/ and,
+# when it has them, the licence notices. The input folder is filled from it
+# before anything looks into it — tools/vivecraft_seed.py --if-changed: nothing
+# is done when the folder already holds what came out of the same file (by
+# sha256), another file fills it anew, and an archive that is not what this
+# target is made of stops the build here, one line per thing that is wrong with
+# it. Unset: the folder is used as it is, as before.
+# The name does not start with KL_ on purpose: it is a path on this Mac and is
+# never forwarded into the app (the list above takes KL_*, MTL_* and METAL_*).
+if [ "$KLT_KIND" = macho ] && [ -n "${KLEPTON_MACHO_IPA:-}" ]; then
+  case "$KLEPTON_MACHO_IPA" in
+    /*) ;;
+    *) echo "!! KLEPTON_MACHO_IPA must be an absolute path (got: $KLEPTON_MACHO_IPA)" >&2; exit 1 ;;
+  esac
+  [ -f "$KLEPTON_MACHO_IPA" ] || { echo "!! KLEPTON_MACHO_IPA: no such file: $KLEPTON_MACHO_IPA" >&2; exit 1; }
+  python3 ../tools/vivecraft_seed.py --if-changed "$KLEPTON_MACHO_IPA" | sed 's/^/  /'
+fi
 
 echo "[1/5] runtime + guest translations ($KLT_NAME)…"
 # klepton-ld as well as the runtime, and not for tidiness: the translator bakes
@@ -187,7 +216,10 @@ echo "[1/5] runtime + guest translations ($KLT_NAME)…"
 # there: this must not turn `run.sh` into a surprise 12 GB clone. Without it,
 # mkangle.sh below stops and names the bootstrap command instead.
 if [ -d ../vendor/.git ]; then (cd .. && make -s angle-xros angle-xrsim); fi
-./mkguest.sh | tail -1
+# A Mach-O guest (Minecraft) has Darwin dylibs to wrap rather than ELF to
+# translate: mkmacho.sh is its mkguest.sh, and takes them from the input folder
+# tools/vivecraft_seed.py fills.
+if [ "$KLT_KIND" = macho ]; then ./mkmacho.sh; else ./mkguest.sh | tail -1; fi
 if [ "${KLEPTON_SCOTLAND2:-0}" = 1 ]; then
   # After mkguest.sh: it writes the game's own frameworks, and the mods replace
   # libil2cpp and libunity with copies whose hook gates are prepared before signing.
@@ -205,6 +237,17 @@ fi
 
 echo "[2/5] project…  custom launcher: $([ -n "$DD_SUFFIX" ] && echo "ON (HL*VR name + monogram icon + Boot button)" || echo "off (normal build; set KL_CUSTOM_LAUNCHER=1 to enable)")"
 python3 gen_xcodeproj.py | head -1
+
+# Which Xcode configuration. Debug for every guest, as it always was — except a
+# Mach-O guest (Minecraft), whose device build is Release unless
+# KL_XCODE_CONFIG=Debug says otherwise. The reason is its ownership gate: the one
+# way to compile the gate out is the Swift condition KL_OWNERSHIP_GATE_OFF, and a
+# build that defines it without DEBUG does not compile (#error in
+# Sources/Minecraft/KleptonMSA.swift). Release is the configuration without
+# DEBUG, so what is put on a headset by default cannot carry the bypass. Nothing
+# here passes that condition, and no variable switches the gate off at run time.
+CONFIG=Debug
+if [ "$KLT_KIND" = macho ]; then CONFIG="${KL_XCODE_CONFIG:-Release}"; fi
 
 if [ "$MODE" = "device" ]; then
   # Device discovery goes through JSON: device names contain non-breaking
@@ -228,14 +271,21 @@ print(phys[0]["identifier"])
 ' "$json"
     rm -f "$json"
   }
-  DEVID="${KLEPTON_DEVICE:-$(find_device || true)}"
-  [ -n "$DEVID" ] || { echo "!! no physical Vision Pro — pair it in Xcode, or set KLEPTON_DEVICE"; exit 1; }
-
-  echo "[3/5] building for device ${DEVID}…"
+  if [ -n "${KL_NO_INSTALL:-}" ]; then
+    # A build and nothing else: no headset is looked for. The generic
+    # destination below needs none, and the second build "for this device"
+    # (registering it with the team) is not reachable without one.
+    DEVID=""
+    echo "[3/5] building for device (KL_NO_INSTALL=1: no headset is looked for)…"
+  else
+    DEVID="${KLEPTON_DEVICE:-$(find_device || true)}"
+    [ -n "$DEVID" ] || { echo "!! no physical Vision Pro — pair it in Xcode, or set KLEPTON_DEVICE"; exit 1; }
+    echo "[3/5] building for device ${DEVID}…"
+  fi
   # generic/platform, not id= : the build must not depend on the device being awake
   BUILD_LOG="$(mktemp)"
   set +e
-  xcodebuild -project "$PRODUCT.xcodeproj" -scheme "$PRODUCT" -configuration Debug \
+  xcodebuild -project "$PRODUCT.xcodeproj" -scheme "$PRODUCT" -configuration "$CONFIG" \
     -destination 'generic/platform=visionOS' -derivedDataPath "build/dd-device-$KLT_NAME$DD_SUFFIX" \
     -allowProvisioningUpdates build 2>&1 | grep -E 'error:|Signing Identity|\*\* BUILD' | tee "$BUILD_LOG"
   # xcodebuild's status, through the pipe. Testing for the .app is NOT enough: a
@@ -251,9 +301,9 @@ print(phys[0]["identifier"])
   # knows how to register a headset is ever reached. Build once more FOR this
   # device: that is the one form in which Xcode may register it with the team.
   # It needs the headset awake and reachable, which the generic build does not.
-  if [ "$BUILD_RC" != 0 ] && grep -qiE 'no devices from which to generate a provisioning profile|no devices registered' "$BUILD_LOG"; then
+  if [ "$BUILD_RC" != 0 ] && [ -n "$DEVID" ] && grep -qiE 'no devices from which to generate a provisioning profile|no devices registered' "$BUILD_LOG"; then
     echo "  the Apple team has no device registered yet — registering this headset and building again…"
-    xcodebuild -project "$PRODUCT.xcodeproj" -scheme "$PRODUCT" -configuration Debug \
+    xcodebuild -project "$PRODUCT.xcodeproj" -scheme "$PRODUCT" -configuration "$CONFIG" \
       -destination "id=$DEVID" -derivedDataPath "build/dd-device-$KLT_NAME$DD_SUFFIX" \
       -allowProvisioningUpdates -allowProvisioningDeviceRegistration build 2>&1 | grep -E 'error:|Signing Identity|\*\* BUILD' | tee "$BUILD_LOG"
     BUILD_RC=${PIPESTATUS[0]}
@@ -263,7 +313,7 @@ print(phys[0]["identifier"])
   fi
   rm -f "$BUILD_LOG"
   set -e
-  APP="build/dd-device-$KLT_NAME$DD_SUFFIX/Build/Products/Debug-xros/$PRODUCT.app"
+  APP="build/dd-device-$KLT_NAME$DD_SUFFIX/Build/Products/$CONFIG-xros/$PRODUCT.app"
   [ "$BUILD_RC" = 0 ] || { echo "!! build FAILED (see errors above) — not installing a stale app"; exit 1; }
   [ -f "$APP/Info.plist" ] || { echo "!! no usable .app at $APP"; exit 1; }
   # A product without this string does not fail to build, sign or install: it
@@ -273,6 +323,28 @@ print(phys[0]["identifier"])
     echo "!! $APP has no NSAccessoryTrackingUsageDescription — it would be killed at launch."
     echo "!! (Xcode moves the usage descriptions out of Info.plist; gen_xcodeproj.py emits them.)"
     exit 1; }
+
+  if [ "$KLT_KIND" = macho ]; then
+    # What a Mach-O guest's app must hold to start at all, checked where the
+    # cause can still be named: every library the row lists, signed, and the
+    # game's files with their licences. On the headset a missing one is a
+    # dlopen that fails or a launcher that reports "missing".
+    for NAME in $KLT_LIBS; do
+      [ -f "$APP/Frameworks/$NAME.dylib" ] || { echo "!! $APP has no Frameworks/$NAME.dylib"; exit 1; }
+      codesign --verify --strict "$APP/Frameworks/$NAME.dylib" 2>/dev/null \
+        || { echo "!! $APP/Frameworks/$NAME.dylib is not signed"; exit 1; }
+    done
+    [ -f "$APP/klepton-payload/payload-version" ] || { echo "!! $APP has no klepton-payload (the game's files)"; exit 1; }
+    [ -f "$APP/Licenses/NOTICES.txt" ] || { echo "!! $APP has no Licenses/NOTICES.txt"; exit 1; }
+    echo "  $KLT_NAME: $(echo $KLT_LIBS | wc -w | tr -d ' ') libraries signed, payload $(cut -c1-12 "$APP/klepton-payload/payload-version"), licences in ($CONFIG)"
+  fi
+
+  if [ -n "${KL_NO_INSTALL:-}" ]; then
+    codesign --verify --deep --strict "$APP" || { echo "!! $APP does not verify"; exit 1; }
+    echo "[4/5] NOT installing (KL_NO_INSTALL=1) — nothing was sent to a headset."
+    echo "      app: $(cd "$(dirname "$APP")" && pwd)/$PRODUCT.app"
+    exit 0
+  fi
 
   if [ -n "${KL_SKIP_INSTALL:-}" ]; then
     # Every install observed on this device ROTATES the data container, which
@@ -307,7 +379,7 @@ print(phys[0]["identifier"])
     install_app; INSTALL_RC=$?
     if [ $INSTALL_RC -ne 0 ] && grep -qiE 'provisioning profile|not registered|0xe8008015|0xe8008012' "$INSTALL_LOG"; then
       echo "  this headset is not in the signing profile yet — registering it and signing again…"
-      xcodebuild -project "$PRODUCT.xcodeproj" -scheme "$PRODUCT" -configuration Debug \
+      xcodebuild -project "$PRODUCT.xcodeproj" -scheme "$PRODUCT" -configuration "$CONFIG" \
         -destination "id=$DEVID" -derivedDataPath "build/dd-device-$KLT_NAME$DD_SUFFIX" \
         -allowProvisioningUpdates -allowProvisioningDeviceRegistration build 2>&1 | grep -E 'error:|\*\* BUILD'
       install_app; INSTALL_RC=$?
@@ -325,7 +397,9 @@ print(phys[0]["identifier"])
     rm -f "$INSTALL_LOG"
   fi
   # Installing can rotate the data container, so assets are staged *after*.
-  stage_if_needed "$DEVID" "$DEVID"
+  # (A Mach-O guest has nothing to stage: its files ride in the bundle and the
+  # app lays its container out from them on first launch.)
+  if [ "$KLT_KIND" != macho ]; then stage_if_needed "$DEVID" "$DEVID"; fi
 
   # Install-only: the app and its assets are on the device and nothing is
   # started — for a headset someone is wearing, or a target that is not the one
@@ -541,14 +615,28 @@ for F in "$APP"/Frameworks/*.framework; do
   [ -d "$F" ] || continue
   codesign -dv "$F" >/dev/null 2>&1 || codesign -f -s - "$F" >/dev/null 2>&1 || true
 done
+# ...and a Mach-O guest's libraries are plain dylibs beside them, embedded with
+# the build's signing switched off like everything else here.
+if [ "$KLT_KIND" = macho ]; then
+  for F in "$APP"/Frameworks/*.dylib; do
+    [ -f "$F" ] || continue
+    codesign -f -s - "$F" >/dev/null 2>&1 || echo "!! could not ad-hoc sign $F"
+  done
+fi
 
 echo "[4/5] installing + staging…"
 xcrun simctl install "$UDID" "$APP"
 # After install, not before: simctl rotates the data container on reinstall, so
 # assets staged earlier end up in an orphaned one and the app reports them
 # missing. Cost a confusing run once.
-stage_if_needed "sim-$UDID"
+# (A Mach-O guest has no APK to stage; its files go into the container from the
+# input folder, stage_macho.sh.)
+if [ "$KLT_KIND" = macho ]; then ./stage_macho.sh "$UDID"; else stage_if_needed "sim-$UDID"; fi
 
+if [ -n "${KL_SKIP_LAUNCH:-}" ]; then
+  echo "[5/5] launch skipped (KL_SKIP_LAUNCH=1)"
+  exit 0
+fi
 echo "[5/5] launching…"
 # `env`, not a bare prefix: bash only treats NAME=value as an assignment when it
 # is literally there before expansion, so ${KL_FRAMES:+SIMCTL_CHILD_KL_FRAMES=…}

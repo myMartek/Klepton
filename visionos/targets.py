@@ -1145,6 +1145,70 @@ TARGETS = {
         "product": "KleptonSourceVREntropyzero",
         "display": "Entropy : Zero",
     },
+    "vivecraft": {
+        # Minecraft: Java Edition 26.3 with Vivecraft, from rebelancap's
+        # vivecraft-visionos (release 1.0.3). The first row of the kind "macho":
+        # no APK, no klepton-ld and no ELF at all. The game is a GraalVM
+        # native-image of the baked Fabric classpath, libminecraft.dylib, and it
+        # is entered by calling `klmc_main(argc, argv)` on a pthread with a big
+        # stack (visionos/Sources/Minecraft/kl_app_macho.inc). Everything it
+        # loads is a plain Darwin dylib in the app's Frameworks/: LWJGL looks
+        # them up by FILE name through -Dorg.lwjgl.librarypath, so they are
+        # embedded as library xcframeworks and not as .framework bundles.
+        #
+        #   libminecraft      the image (~211 MB)
+        #   liblwjgl*         LWJGL 3.4.3's natives (core, opengl, stb, tinyfd)
+        #   libfreetype       FreeType 2.14.3, which 26.x loads at start
+        #   libshaderc, libspirv-cross
+        #                     26.3 turns every shader GLSL -> SPIR-V -> GLSL
+        #   libopenal         OpenAL Soft 1.25.2 (CoreAudio)
+        #   libltw            Pojav's desktop-GL-on-GLES translator, over ANGLE
+        #   libklegl          ltw's "libEGL": every name goes to the app's
+        #                     kl_egl gateway, so the game's context lives in
+        #                     kl_glfb's ANGLE share group, where kl_openxr makes
+        #                     its swapchains
+        #   libklsdl          the SDL3 stand-in's native half (26.3 has no GLFW)
+        #   libvloader        Vivecraft's VLoader natives
+        #   libopenxr_loader  LWJGL-OpenXR's loader -> kl_openxr_sym
+        #   libopus4j, librnnoise4j, libspeex4j, liblame4j
+        #                     Simple Voice Chat's codecs
+        #
+        # None of them is built here. They and the game's files (jars, the
+        # Fabric game dir, Minecraft's assets; ~0.6 GB) are INPUTS, taken from a
+        # release of vivecraft-visionos by tools/vivecraft_seed.py and kept in
+        # visionos/prebuilt/vivecraft/ (git-ignored; KLEPTON_VIVECRAFT_PREBUILT
+        # names another folder). mkmacho.sh wraps the dylibs, the "Bundle game
+        # payload" build phase puts the files into the app as they are.
+        #
+        # tree is the folder in the app's Documents the game's files are laid
+        # out under; srcdir, apk and assets are empty because there is no APK.
+        "libs":    "libminecraft liblwjgl liblwjgl_opengl liblwjgl_stb liblwjgl_tinyfd "
+                   "libfreetype libshaderc libspirv-cross libopenal libltw libklegl "
+                   "libklsdl libvloader libopenxr_loader "
+                   "libopus4j librnnoise4j libspeex4j liblame4j",
+        "srcdir":  "",
+        "tree":    "vivecraft",
+        "apk":     "",
+        "assets":  "",
+        "qtplugins": "",
+        "obb":     "obb",
+        "entry":   "libminecraft",
+        "kind":    "macho",
+        "product": "KleptonVivecraft",
+        "display": "Minecraft",
+        # The game starts from its own launcher's Play button and never by
+        # itself: which account, which world and whether it plays in a window
+        # or around the player are chosen there, every session.
+        "autoboot": False,
+        # Vivecraft draws the player's hands only as far as the controllers
+        # reach; the reference build asked the system for the real arms over
+        # the world, and that stays the start here ("Your hands" still decides).
+        "hand_matting": True,
+        # The game renders at the size the display is offered at, through the
+        # display's own foveation map, so the compositor's pass keeps the full
+        # picture (see _settle, "output").
+        "output": "full",
+    },
 }
 
 DEFAULT = "beatsaber"
@@ -1786,8 +1850,10 @@ def template_data():
     return {
         "format": 1,
         # Rows the runtime has compiled in: KLTarget alone is enough for these.
+        # (Not a Linux process and not a Mach-O guest: neither is made of an
+        # APK's libraries, which is all the template can be finished with.)
         "targets": {name: row(name, t) for name, t in sorted(TARGETS.items())
-                    if name != TEMPLATE and t["kind"] != "linux"},
+                    if name != TEMPLATE and t["kind"] not in ("linux", "macho")},
         # A store title outside the table, x<app id>: its row is worked out from
         # its files (see _generic_row for the rule these three lists belong to)...
         "generic": {
@@ -1802,10 +1868,45 @@ def template_data():
     }
 
 
+def macho_data():
+    """The same for a Mach-O guest (kind "macho": Minecraft), whose app is a
+    template of its own (mktemplate.sh): built for that one target, so its
+    Info.plist already holds the row's values, with none of the game's
+    libraries and no payload in it. What a finisher has to add comes out of the
+    game's archive — a zip in the shape of an IPA, tools/vivecraft_seed.py says
+    what it must hold — and this is where each part goes. `from` is inside the
+    archive's one Payload/<Name>.app, `to` inside the template's app; {name} is
+    each of `names`."""
+    def row(name, t):
+        t = dict(t)
+        _settle(name, t)
+        return {"product": t["product"], "display": t["display"], "tree": t["tree"], "entry": t["entry"],
+                "libraries": {"names": t["libs"].split(),
+                              "from": "Frameworks/{name}.dylib", "to": "Frameworks/{name}.dylib",
+                              # What each must be to be loaded (mkmacho.sh renames one that is not).
+                              "installName": "@rpath/{name}.dylib",
+                              "platform": "visionOS", "architecture": "arm64"},
+                # As it is: payload-version is what an installed copy compares.
+                "payload": {"from": "klepton-payload", "to": "klepton-payload", "tree": t["tree"],
+                            "requires": ["launch.txt", "baked.cp", "payload-version", "tree", "root/inst-*"]},
+                # The notices of what is compiled into the game. The template
+                # carries a set; an archive that brings its own (a folder with
+                # the index) replaces it, as copy_licenses.sh does in a build.
+                "licenses": {"to": "Licenses", "index": "NOTICES.txt",
+                             "from": ["Licenses", "../../Licenses"]},
+                "info": info_values(t)}
+    return {"format": 1,
+            "targets": {name: row(name, t) for name, t in sorted(TARGETS.items()) if t["kind"] == "macho"}}
+
+
 def main(argv):
     if len(argv) > 1 and argv[1] == "--template-data":
         import json
         print(json.dumps(template_data(), indent=1, sort_keys=True))
+        return 0
+    if len(argv) > 1 and argv[1] == "--macho-data":
+        import json
+        print(json.dumps(macho_data(), indent=1, sort_keys=True))
         return 0
     if len(argv) > 1 and argv[1] == "--list":
         for k in sorted(TARGETS):

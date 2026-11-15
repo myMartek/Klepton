@@ -148,6 +148,43 @@ void kl_openxr_set_dominant_hand(int left);
 // when set, still pins one index and overrides this.
 void kl_openxr_set_capture_topmost_layer(int on);
 
+// Spec-strict input, for a guest that relies on parts of the action model every
+// guest so far either did not use or tolerated loosely. Minecraft with Vivecraft
+// is that guest (taken over from the Vivecraft line, refs/vivecraft/1.0.3):
+//   KL_XR_PATH_SHORTHAND  a binding to a component's PARENT path
+//                         (`.../input/squeeze`, `.../input/a`) resolves to its
+//                         value (else click) component, as the spec says; off,
+//                         such a binding stays unbound (the old answer).
+//   KL_XR_BOOL_THRESHOLD  a BOOLEAN action bound to an analog source reads
+//                         pressed through a 0.6/0.4 hysteresis, not "!= 0".
+//   KL_XR_ACTIVE_SETS     xrSyncActions honours activeActionSets: an action in
+//                         a set the guest did not sync is inactive.
+//   KL_XR_HANDS_TOUCH     a tracked hand's pinches are the whole Touch
+//                         controller (kl_openxr_set_hand_fingers, below).
+// ...and the action and path pools take 2048 and 1024 entries instead of 256
+// and 512 (that guest makes about 790 actions).
+// Each env var wins when set. Unset, each takes the value given here, which is
+// 0 until a driver says otherwise — and the one driver that does is the app's
+// door for a Mach-O guest, whose loader shim hands this function on
+// (klxr_shim_set). No guest that comes through the Android or Linux doors is
+// answered differently.
+void kl_openxr_set_spec_input(int on);
+
+// The fingers the Touch profile has no input for, from the frontend
+// (KleptonControllers.swift), once per frame per hand. `tracked` is 1 when this
+// hand's input comes from the hand alone (no controller on it, no gamepad laid
+// over it) and 0 otherwise; `ring` and `little` are thumb-to-fingertip pinch
+// values, 0 (open) .. 1 (touching). The index and middle pinches are read from
+// what the frontend publishes as this hand's index and hand trigger
+// (kl_ovrp_set_controller_input), so a tracked hand's hand trigger has to be
+// its thumb-to-middle pinch, 0..1, for the middle finger to do anything.
+// Read only under KL_XR_HANDS_TOUCH, which turns a tracked hand's four pinches
+// into Touch's trigger, squeeze, thumbstick, face buttons and menu — the table
+// is in kl_openxr.c under that name. A report older than a quarter of a second
+// counts as no hand. Harmless to call for any guest: with the switch off it is
+// stored and never read. Any thread.
+void kl_openxr_set_hand_fingers(int hand, int tracked, float ring, float little);
+
 // The controller correction, pushed LIVE instead of read once from the
 // environment — see the KL_XR_GRIP_* knobs in DEBUG_ENV_VARS.md for what each
 // term means.

@@ -36,6 +36,7 @@ const kl_target *kl_target_define(const char *name, const char *entry_lib,
         { "ue4", KL_GUEST_UE4 },       { "jkxr", KL_GUEST_JKXR },
         { "native", KL_GUEST_NATIVE }, { "sdl2", KL_GUEST_SDL2 },
         { "gles3jni", KL_GUEST_GLES3JNI }, { "linux", KL_GUEST_LINUX },
+        { "macho", KL_GUEST_MACHO },
     };
     static char s_name[128], s_apk[160], s_assets[160], s_libdir[192],
                 s_entry[128], s_obb[512];
