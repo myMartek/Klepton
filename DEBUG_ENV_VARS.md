@@ -1999,7 +1999,9 @@ puts the camera on the ground with its hands underneath it.
   blocks of garbage, different per eye and per frame, without it) and
   `x9269393463181825` (Roboquest VR, Meta Store build: a black scene with
   glimpses of models under its UI) and `x5223884527630557` (The 7th Guest
-  VR: wrong colours and scattered blocks from the first frame), else 0.
+  VR: wrong colours and scattered blocks from the first frame) and
+  `x2719294624823942` (Myst: blocks, wrong colours and different pictures per
+  eye right at the start), else 0.
 - `KL_VK_PASS_BARRIERS=0|1|2` — what happens to a `vkCmdPipelineBarrier`
   recorded INSIDE a dynamic-rendering pass that only makes colour attachments
   readable as input attachments. MoltenVK answers one by ending the Metal pass
