@@ -5028,10 +5028,14 @@ of each. The target's own defaults are in `kl_driver_env_defaults`.
   launcher at Play (play target, the account's game dir); not for hand use.
 - `KL_MSA=0` — keep the offline profile (no Microsoft session is asked for).
   This does NOT open the ownership gate; nothing in the environment does.
-- `KL_MC_RERUN=0` — default 1, as in his tree: after Quit Game the launcher is
-  back and its Play runs the game again in the same process. 0 = the app leaves
-  when a game ends (what every other game of this tree does). A second
-  immersive space in one process is seen in the simulator only.
+- `KL_MC_RERUN=1` — default 0: when a game ends (Quit Game, a crash exit, the
+  quit grace) the app leaves, as every other game of this tree does, and the
+  next tap on its icon starts at the launcher. 1 = the launcher is back and its
+  Play runs the game again in the same process (the reference tree's habit). On
+  the headset (2026-11-15) that worked once after a clean return and failed
+  after a quit-grace cut: the parked isolate kept its heap and the new one could
+  not reserve its address space ("Failed to create the main Isolate. (code
+  801)", the app vanished); a cut run therefore never allows a re-run.
   With it: `KL_MC_RERUN_MIN_MB` (4300; less available memory than that and the
   app leaves instead), `KL_MC_TEARDOWN=0` (park the finished isolate instead of
   destroying it), `KL_MC_TEARDOWN_SECS` (20).

@@ -303,14 +303,13 @@ final class BootSession: ObservableObject {
         await actions?.dismissImmersiveSpace()
     }
 
-    /// The game returned from its main: Quit Game. The immersive space goes
-    /// away, the launcher is back to idle — accounts, play target and settings
-    /// editable, its Play runs the game again in this process
-    /// (kl_app_macho_rerun) — and, if it was closed for the game, its window
-    /// has been opened again (showLauncher). Where a second run cannot share the process
-    /// (kl_app_macho_rerun_ok: the isolate could not be torn down, too little
-    /// memory, KL_MC_RERUN=0) the app leaves instead, so the next tap on the
-    /// icon lands on the launcher rather than on a window that cannot play.
+    /// The game ended: Quit Game, a crash exit or the quit grace. By default
+    /// (KL_MC_RERUN off) the immersive space goes away and the app leaves, as
+    /// every other game of this tree does; the next tap on the icon starts
+    /// fresh at the launcher. With KL_MC_RERUN=1 and a run that could share the
+    /// process (kl_app_macho_rerun_ok: a clean teardown, enough memory, no run
+    /// cut by the quit grace) the launcher is back to idle instead and its Play
+    /// runs the game again in this process (kl_app_macho_rerun).
     private func gameEnded() async {
         let launcher = MCLauncherModel.shared
         let rc = kl_app_macho_rc()

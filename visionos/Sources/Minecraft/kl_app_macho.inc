@@ -1082,6 +1082,7 @@ static int macho_boot(void) {
 // — is rebuilt by kl_app_macho_rerun().
 static volatile int g_macho_runs;           // guest returns so far
 static volatile int g_macho_rerun_ok = 1;   // 0 once a teardown failed / timed out
+static volatile int g_macho_cut_runs;       // runs the quit grace ended while main had not returned
 static volatile int g_macho_teardown_busy;  // DestroyJavaVM in flight: quit-grace must not cut the run
 static double g_macho_teardown_ms;
 
@@ -1109,6 +1110,14 @@ static void macho_isolate_teardown(void) {
     }
     void *const *fns = *(void *const *const *)vm;   // JNIInvokeInterface_: reserved0 = SVM's Isolate
     void *iso = fns[0];
+    if (!kl_env_on("KL_MC_RERUN", 0)) {
+        // No second Play in this process (the default): the app leaves when
+        // this run has ended, so freeing the heap first would only delay that.
+        macho_mark_dead(iso);
+        printf("[macho] the finished game's isolate %p is left as it is: the app leaves now (KL_MC_RERUN=0)\n", iso);
+        fflush(NULL);
+        return;
+    }
     if (!kl_env_on("KL_MC_TEARDOWN", 1)) {
         // Opt-out: the finished isolate is LEFT. Its heap stays mapped and its
         // daemon threads stay parked (Netty's local event loop, the sound
@@ -1407,6 +1416,7 @@ static int macho_run(void) {
                 macho_mark_dead(iso);
                 g_macho_rc = 0;
                 g_nrun_done = 3;
+                g_macho_cut_runs++;
                 printf("[macho] the game closed its window %.1f s ago and its main has not returned (run_main is still "
                        "joining a Java thread) — the run ends HERE: isolate %p parked, its entry thread left behind, the "
                        "launcher comes back (KL_MC_QUIT_GRACE_MS=%u; 0 = wait for the return)\n", el / 1e3, iso, grace_ms);
@@ -1438,18 +1448,19 @@ int kl_app_macho_runs(void) { return __atomic_load_n(&g_macho_runs, __ATOMIC_SEQ
 int kl_app_macho_rc(void) { return g_macho_rc; }
 // Whether another Play can run in this process.
 //
-// KL_MC_RERUN is on unless set to 0, as in the reference tree: Quit Game hands
-// the player back to the launcher, and its Play starts the game again in this
-// process. That is the one place where this target leaves the tree's habit —
-// every other game here boots once and leaves when its picture is gone, so this
-// tree's compositor, controllers and picture settings had only ever seen one
-// immersive space per process. What a second run needs is ported and was seen
-// working in the simulator (the isolate's teardown, the exit hook, the rebuilt
-// command line, kl_openxr's reset for a second instance, a second
-// CompositorLayer closure with the start settings applied again); on a headset
-// it is unseen. KL_MC_RERUN=0 is the way back to the tree's habit if it
-// misbehaves there: the app then leaves when a game ends, and the next tap on
-// its icon lands on the launcher.
+// KL_MC_RERUN is OFF unless set to 1: when a game ends (Quit Game, a crash
+// exit, the quit grace) the app leaves, as every other game of this tree does,
+// and the next tap on its icon starts fresh at the launcher. Seen on the headset
+// 2026-11-15 (toolchain 895): Quit Game, run_main still joining a Java thread
+// past the quit grace, the run cut and its isolate parked with its heap mapped,
+// then the launcher's Play failed in klmc_main with "Failed to create the main
+// Isolate. (code 801)" — the new isolate could not reserve its address space —
+// and the app vanished without a word. A second run only works after a clean
+// return and teardown. KL_MC_RERUN=1 brings the second Play in this process back
+// (the reference tree's habit; what it needs is ported: the isolate's teardown,
+// the exit hook, the rebuilt command line, kl_openxr's reset for a second
+// instance, a second CompositorLayer closure with the start settings applied
+// again; one clean second Play was seen on the headset with 894).
 //
 // Memory: a parked isolate is not freed, and even a torn-down one
 // leaves the process larger than it started. A run that would not fit is refused
@@ -1458,7 +1469,11 @@ int kl_app_macho_rc(void) { return g_macho_rc; }
 // about the first run's peak) is the available memory a re-run needs; 0 = no
 // check.
 int kl_app_macho_rerun_ok(void) {
-    if (!(target_is_macho() && g_macho_main && g_macho_rerun_ok && kl_env_on("KL_MC_RERUN", 1))) return 0;
+    if (!(target_is_macho() && g_macho_main && g_macho_rerun_ok && kl_env_on("KL_MC_RERUN", 0))) return 0;
+    // Even with KL_MC_RERUN=1: a run cut by the quit grace left its isolate
+    // parked with its heap mapped, and a new isolate then cannot reserve its
+    // address space (code 801). Leave instead.
+    if (g_macho_cut_runs) return 0;
     unsigned need = kl_env_uint("KL_MC_RERUN_MIN_MB", 4300);
     long long avail = kl_avail_memory();   // -1 = unknown (simulator, macOS)
     if (need && avail > 0 && avail < (long long)need << 20) {
