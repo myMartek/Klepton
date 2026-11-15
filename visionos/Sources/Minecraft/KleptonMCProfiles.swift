@@ -52,6 +52,12 @@ import Foundation
 // customized HUD is never touched. The outcome is one log line and never
 // stops the launch.
 //
+// Play mode (MCSeatedGuard.swift): at EVERY launch, last of the config edits,
+// a stored `"seated": "true"` in the game dir this start will use — the
+// profile's, or the shared one when profiles are off or could not be
+// prepared — is put back to "false". Seated mode reads keyboard and mouse
+// only; in the space that leaves the player without any input.
+//
 // A fresh IPA (KleptonPayload marker "bundle") ships no world. If a world is
 // in that game dir anyway, the first profile inherits it, Offline included,
 // because there is no owning account yet. A devicectl-staged container
@@ -362,7 +368,9 @@ enum MCProfiles {
         unsetenv("KL_MC_GAMEDIR"); unsetenv("KL_MC_PROFILE_NOTE")
         guard enabled else {
             NSLog("[profiles] off (KL_MC_PROFILES=0 or KL_MSA=0): the shared game dir")
-            setenv("KL_MC_PROFILE_NOTE", "profiles off", 1)
+            var note = "profiles off"
+            if let (_, gd) = dirs(), standUp(gameDir: gd, who: "shared game dir") { note += "; play mode put back to standing" }
+            setenv("KL_MC_PROFILE_NOTE", note, 1)
             return
         }
         guard let (inst, gd) = dirs() else { NSLog("[profiles] no launch.txt game dir"); return }
@@ -395,13 +403,26 @@ enum MCProfiles {
             let turned = MCTurning.apply(turning, profileDir: r.path)
             NSLog("[turning] %@: %@ -> %@", name, turning.rawValue, turned.summary)
             if case .applied = turned { note += "; turning \(turning.rawValue)" }
+            // Play mode (MCSeatedGuard.swift): never start in Vivecraft's
+            // seated mode. Every launch, after the other edits of this file.
+            if standUp(gameDir: r.path, who: name) { note += "; play mode put back to standing" }
             setenv("KL_MC_GAMEDIR", r.path, 1)
             setenv("KL_MC_PROFILE_NOTE", "\(name): \(note)", 1)
             NSLog("[profiles] %@ -> %@ (%@)", name, r.path, note)
         } catch {
             setenv("KL_MC_PROFILE_NOTE", "profile \(key) FAILED (\(error.localizedDescription)) — shared dir", 1)
             NSLog("[profiles] %@: preparing %@ failed: %@ — the shared game dir", name, key, error.localizedDescription)
+            // The game then runs in the shared dir: its config gets the guard.
+            _ = standUp(gameDir: gd, who: "shared game dir")
         }
+    }
+
+    /// MCSeatedGuard on the game dir this start uses; true when it had to act.
+    /// Never throws: a failure is one log line and the launch goes on.
+    private static func standUp(gameDir: String, who: String) -> Bool {
+        let outcome = MCSeatedGuard.apply(gameDir: gameDir)
+        NSLog("[seated-guard] %@: %@", who, outcome.summary)
+        return outcome == .applied
     }
 
     /// The launcher's world list for the selected card (no dir is created).
