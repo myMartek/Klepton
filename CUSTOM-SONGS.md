@@ -97,6 +97,15 @@ translates the libraries and prepares the hook gates in the game's own
 A game version without a profile builds without mods (AVP Play greys the
 switch out and says so).
 
+The prebuilt folder is not in git (`.gitignore`: `/ports/scotland2/prebuilt/`):
+`avpplay toolchain pack` copies it from the checkout it packs, and a checkout
+without it gives a package without mods, without a word. Toolchain 896 was
+packed that way, and with it Beat Saber was built without mods in AVP Play
+1.10.17 and 1.10.18; 897 carries them again (the 1.45.3 profile, unchanged
+since 891). Before publishing a package, count its mod files:
+`tar -tzf klepton-toolchain-N-*.tar.gz | grep -c ports/scotland2/prebuilt/3237`
+(43 for the 1.45.3 profile).
+
 Making a profile is developer work: build the mod workspace with the official
 NDK r29 (`prepare_1453_ndk.py`, `link_1453_workspace.py`,
 `build_1453_support.py`, `build_1453_flamingo.py`, `build_1453_stack.py`),
