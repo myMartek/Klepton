@@ -485,17 +485,29 @@ struct KLSection<Content: View>: View {
     }
 }
 
-/// One setting: its name on the left, the control on the right, explained in the column.
+/// One setting, explained in the column: its name above the control (a row of choices gets the
+/// page's whole width, so long names are not cut), or beside it with `inline` (a menu, a switch).
 struct KLRow<Control: View>: View {
     let title: String
     let help: String
+    var inline = false
     @ViewBuilder let control: Control
     var body: some View {
-        HStack(alignment: .center, spacing: 16) {
-            Text(title)
-            Spacer(minLength: 12)
-            control
+        Group {
+            if inline {
+                HStack(alignment: .center, spacing: 16) {
+                    Text(title)
+                    Spacer(minLength: 12)
+                    control
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(title)
+                    control
+                }
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .klHelp(help)
     }
 }
@@ -517,7 +529,10 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
     @ObservedObject private var state = KLSettingsState.shared
     @ObservedObject private var rendering = KleptonRendering.shared
     @ObservedObject private var metalfx = KleptonMetalFX.shared
-    @State private var selection: KLSettingsPageID? = .presets
+    /// A scripted launch can open a page and an explanation (KL_SETTINGS_PAGE=<page>, KL_SETTINGS_HELP=<key>; with
+    /// KL_START_SETTINGS=1), to photograph them without a hand to tap.
+    @State private var selection: KLSettingsPageID? =
+        ProcessInfo.processInfo.environment["KL_SETTINGS_PAGE"].flatMap(KLSettingsPageID.init(rawValue:)) ?? .presets
 
     private var isAlyx: Bool { klIsAlyx() }
 
@@ -553,7 +568,7 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
         } detail: {
             page(selection ?? .presets)
                 .id(selection)
-                .onAppear { focus.key = nil }
+                .onAppear { focus.key = ProcessInfo.processInfo.environment["KL_SETTINGS_HELP"] }
         }
         .environmentObject(focus)
         .toolbar {
@@ -815,7 +830,7 @@ struct KLPicturePage: View {
                 MetalFXSwitch(title: klT("MetalFX upscaling", "MetalFX-Hochskalieren"), hintFont: .footnote)
                     .klHelp("metalfx")
             }
-            KLRow(title: klT("Max resolution per eye", "Maximale Auflösung je Auge"), help: "eyeMax") {
+            KLRow(title: klT("Max resolution per eye", "Maximale Auflösung je Auge"), help: "eyeMax", inline: true) {
                 Picker(klT("Max resolution per eye", "Maximale Auflösung je Auge"), selection: $eyeMax) {
                     ForEach(KleptonEyeMax.options, id: \.self) { Text(eyeLabel($0)).tag($0) }
                 }
@@ -840,7 +855,7 @@ struct KLPicturePage: View {
                         Text(klT("Strong", "Stark")).tag("high")
                         Text(klT("Very strong", "Sehr stark")).tag("ultra")
                     }
-                    .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 460)
+                    .pickerStyle(.segmented).labelsHidden()
                 }
             } else {
                 Toggle("Foveated Rendering", isOn: $rendering.foveation).klHelp("foveation")
@@ -850,7 +865,7 @@ struct KLPicturePage: View {
                     Picker(klT("Edge smoothing", "Kantenglättung"), selection: $rendering.msaa) {
                         Text(klT("Off", "Aus")).tag(0); Text("2×").tag(2); Text("4×").tag(4)
                     }
-                    .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 300)
+                    .pickerStyle(.segmented).labelsHidden()
                 }
             }
             if rendering.offersVkMsaa {
@@ -859,14 +874,14 @@ struct KLPicturePage: View {
                         Text(klT("As the game (\(KleptonRendering.vkGuestSamples)×)", "Wie das Spiel (\(KleptonRendering.vkGuestSamples)×)")).tag(0)
                         Text("4×").tag(4)
                     }
-                    .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 360)
+                    .pickerStyle(.segmented).labelsHidden()
                 }
             }
             KLRow(title: klT("Display output", "Ausgabe aufs Display"), help: "output") {
                 Picker(klT("Display output", "Ausgabe aufs Display"), selection: $rendering.output) {
                     ForEach(AlyxOutput.ordered) { Text($0.name).tag($0.rawValue) }
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 360)
+                .pickerStyle(.segmented).labelsHidden()
             }
         }
     }
@@ -884,7 +899,7 @@ struct KLFrameRateRow: View {
                 Text(klT("Up to \(r.mixed)", "Bis \(r.mixed)")).tag(100)
                 Text(klT("Up to \(r.full)", "Bis \(r.full)")).tag(120)
             }
-            .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 300)
+            .pickerStyle(.segmented).labelsHidden()
         }
     }
 }
@@ -900,7 +915,7 @@ struct KLFrameGenRow: View {
                     Text(klT("Ahead", "Vorausberechnet")).tag(KleptonFrameGen.Mode.ahead.rawValue)
                     Text(klT("In between", "Dazwischen")).tag(KleptonFrameGen.Mode.between.rawValue)
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 420)
+                .pickerStyle(.segmented).labelsHidden()
             }
             if rendering.frameGen != KleptonFrameGen.Mode.off.rawValue, metalfx.enabled {
                 Text(klT("While MetalFX upscaling is on, no in-between pictures are made – choose one of the two.",

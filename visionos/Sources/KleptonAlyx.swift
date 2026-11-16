@@ -1188,7 +1188,7 @@ struct AlyxPicturePage: View {
             Picker(title, selection: selection) {
                 ForEach(cases) { c in Text(name(c)).tag(tag(c)) }
             }
-            .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 440)
+            .pickerStyle(.segmented).labelsHidden()
         }
     }
 
@@ -1250,7 +1250,7 @@ struct AlyxControlsView: View {
                 Picker(klT("Walking speed", "Laufgeschwindigkeit"), selection: $pace) {
                     ForEach(AlyxPace.allCases) { p in Text(p.name).tag(p.rawValue) }
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 440)
+                .pickerStyle(.segmented).labelsHidden()
             }
             Toggle(klT("Wait for the trigger after loading", "Nach dem Laden auf den Trigger warten"), isOn: $loadingScreens)
                 .klHelp("alyx.controls")
