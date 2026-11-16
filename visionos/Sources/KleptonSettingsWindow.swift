@@ -507,6 +507,7 @@ struct KLHelpLarge: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .frame(maxWidth: 520)
+                    .frame(maxWidth: .infinity)
                 }
             }
             KLHelpText(entry: entry)
