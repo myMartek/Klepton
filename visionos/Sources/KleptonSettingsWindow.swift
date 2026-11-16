@@ -193,16 +193,16 @@ enum KLHelp {
                                noteEN: "A preset sets the picture only. Frame rate and frame generation stay as you chose them. " + nextStartEN,
                                noteDE: "Ein Preset setzt nur das Bild. Bildrate und Zwischenbilder bleiben, wie du sie gewählt hast. " + nextStartDE)
         case "preset.m5.performance":
-            return KLHelpEntry(en: "M5 Performance", de: "M5 Leistung",
+            return KLHelpEntry(en: "Performance", de: "Leistung",
                                textEN: "The game draws its picture at 75 % and MetalFX enlarges it to full size. The graphics chip has a good third less to do, so the frame rate holds better and the headset stays cooler; the picture is a little softer.",
                                textDE: "Das Spiel zeichnet sein Bild mit 75 %, und MetalFX vergrößert es auf volle Größe. Der Grafikchip hat gut ein Drittel weniger zu tun, die Bildrate hält besser und das Headset bleibt kühler; das Bild ist etwas weicher.",
                                pictures: pair("metalfx", "75 % without MetalFX", "75 % ohne MetalFX", "75 % with MetalFX", "75 % mit MetalFX"),
                                noteEN: nextStartEN, noteDE: nextStartDE)
         case "preset.m5.quality":
-            return KLHelpEntry(en: "M5 Quality", de: "M5 Qualität",
+            return KLHelpEntry(en: "Quality", de: "Qualität",
                                textEN: "The next larger picture per eye (unless it is the largest already), drawn at 100 %, over the whole display and put on it at the finest output. Sharper, especially text and distant detail – and more work: a game that already runs at its limit may halve its frame rate.",
                                textDE: "Das nächstgrößere Bild je Auge (wenn es nicht schon das größte ist), mit 100 % gezeichnet, übers ganze Display und in der feinsten Ausgabe darauf gebracht. Schärfer, vor allem Schrift und Details in der Ferne – und mehr Arbeit: Ein Spiel, das schon an der Grenze läuft, kann seine Bildrate halbieren.",
-                               pictures: pair("resolution", "Vision Pro M5", "Vision Pro M5", "M5 Quality", "M5 Qualität"),
+                               pictures: pair("resolution", "Vision Pro M5", "Vision Pro M5", "Quality", "Qualität"),
                                noteEN: nextStartEN, noteDE: nextStartDE)
         case "preset.own":
             return KLHelpEntry(en: "Your own presets", de: "Eigene Presets",
@@ -211,10 +211,10 @@ enum KLHelp {
         case "device":
             return KLHelpEntry(en: "Your Vision Pro", de: "Deine Vision Pro",
                                textEN: KLDevice.kind == .m2
-                               ? "This is a Vision Pro with the M2 chip. Its display runs at up to 100 Hz, so the frame rate choices are 90 and 100. The presets that come with the game were tuned on an M5 and may be too demanding here – start from \"M5 Performance\" and save what works as a preset of your own."
+                               ? "This is a Vision Pro with the M2 chip. Its display runs at up to 100 Hz, so the frame rate choices are 90 and 100. The presets that come with the game were tuned on an M5 and may be too demanding here – start from \"Performance\" and save what works as a preset of your own."
                                : "This is a Vision Pro with the M5 chip, the one the presets were tuned on. Its display runs at up to 120 Hz.",
                                textDE: KLDevice.kind == .m2
-                               ? "Das ist eine Vision Pro mit M2-Chip. Ihr Display läuft mit bis zu 100 Hz, deshalb stehen bei der Bildrate 90 und 100 zur Wahl. Die mitgelieferten Presets sind auf einer M5 abgestimmt und können hier zu anspruchsvoll sein – fang mit „M5 Leistung“ an und speichere, was gut läuft, als eigenes Preset."
+                               ? "Das ist eine Vision Pro mit M2-Chip. Ihr Display läuft mit bis zu 100 Hz, deshalb stehen bei der Bildrate 90 und 100 zur Wahl. Die mitgelieferten Presets sind auf einer M5 abgestimmt und können hier zu anspruchsvoll sein – fang mit „Leistung“ an und speichere, was gut läuft, als eigenes Preset."
                                : "Das ist eine Vision Pro mit M5-Chip, auf der die Presets abgestimmt wurden. Ihr Display läuft mit bis zu 120 Hz.")
         // Picture
         case "resolution":
@@ -387,46 +387,136 @@ enum KLHelp {
 struct KLHelpPane: View {
     @EnvironmentObject private var focus: KLSettingsFocus
     let pageKey: String
-    @State private var shown = 1
+    /// The explanation shown large (the owner's wish, 2026-11-16: "Wenn man drauf klickt kommt ein größeres
+    /// Bild ebenfalls mit der Beschreibung, wo man dann gern wechseln kann zwischen beiden Varianten").
+    /// KL_SETTINGS_ZOOM=1 opens it from the start, for a scripted photograph.
+    @State private var enlarged: String? = klEnvOn("KL_SETTINGS_ZOOM", default: false)
+        ? ProcessInfo.processInfo.environment["KL_SETTINGS_HELP"] : nil
 
     var body: some View {
         let key = focus.key ?? pageKey
-        if let e = KLHelp.entry(key) ?? KLHelp.entry(pageKey) {
+        let shownKey = KLHelp.entry(key) != nil ? key : pageKey
+        if let e = KLHelp.entry(shownKey) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if !e.pictures.isEmpty {
-                        let i = min(shown, e.pictures.count - 1)
-                        KLHelpImage(asset: e.pictures[i].asset)
-                            .id(e.pictures[i].asset)
-                            .transition(.opacity)
-                        if e.pictures.count > 1 {
-                            Picker(klT("Compare", "Vergleich"), selection: $shown) {
-                                ForEach(e.pictures.indices, id: \.self) { Text(e.pictures[$0].label).tag($0) }
+                        Button { enlarged = shownKey } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                KLHelpPictures(pictures: e.pictures)
+                                Label(klT("Tap to enlarge", "Zum Vergrößern antippen"), systemImage: "arrow.up.left.and.arrow.down.right")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
                         }
+                        .buttonStyle(.plain)
+                        .hoverEffect()
                     }
-                    Text(e.title).font(.title3.weight(.semibold))
-                    Text(e.text)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let note = e.note {
-                        Label(note, systemImage: "arrow.clockwise")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+                    KLHelpText(entry: e)
                 }
                 .padding(20)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .animation(.easeInOut(duration: 0.2), value: shown)
             }
-            .onChange(of: key) { _, _ in shown = 1 }
+            .sheet(isPresented: Binding(get: { enlarged != nil }, set: { if !$0 { enlarged = nil } })) {
+                if let k = enlarged, let big = KLHelp.entry(k) {
+                    KLHelpLarge(entry: big) { enlarged = nil }
+                }
+            }
         } else {
             ContentUnavailableView(klT("Look at a setting", "Schau auf eine Einstellung"), systemImage: "eye",
                                    description: Text(klT("What it does appears here.", "Hier steht, was sie bewirkt.")))
         }
+    }
+}
+
+/// Title, explanation and when it applies – in the column and in the large view.
+struct KLHelpText: View {
+    let entry: KLHelpEntry
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(entry.title).font(.title3.weight(.semibold))
+            Text(entry.text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let note = entry.note {
+                Label(note, systemImage: "arrow.clockwise")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// One picture, or two as a split picture: the first variant on the left half, the second on the right,
+/// a line between them and each half named in its corner.
+struct KLHelpPictures: View {
+    let pictures: [KLHelpPicture]
+    var body: some View {
+        if pictures.count >= 2 {
+            KLHelpImage(asset: pictures[1].asset)
+                .overlay {
+                    KLHelpImage(asset: pictures[0].asset)
+                        .mask {
+                            GeometryReader { g in
+                                Rectangle().frame(width: g.size.width / 2).frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                }
+                .overlay { Rectangle().fill(.white.opacity(0.9)).frame(width: 2) }
+                .overlay(alignment: .bottomLeading) { KLHelpTag(text: pictures[0].label) }
+                .overlay(alignment: .bottomTrailing) { KLHelpTag(text: pictures[1].label) }
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+        } else if let p = pictures.first {
+            KLHelpImage(asset: p.asset)
+        }
+    }
+}
+
+struct KLHelpTag: View {
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(.black.opacity(0.55), in: Capsule())
+            .foregroundStyle(.white)
+            .padding(10)
+    }
+}
+
+/// The large view of an explanation: the picture big, a switch between its variants, the same words.
+struct KLHelpLarge: View {
+    let entry: KLHelpEntry
+    let close: () -> Void
+    @State private var shown = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if !entry.pictures.isEmpty {
+                let i = min(shown, entry.pictures.count - 1)
+                KLHelpImage(asset: entry.pictures[i].asset)
+                    .id(entry.pictures[i].asset)
+                    .transition(.opacity)
+                    .overlay(alignment: .bottomLeading) { KLHelpTag(text: entry.pictures[i].label) }
+                    .frame(maxWidth: 880)
+                if entry.pictures.count > 1 {
+                    Picker(klT("Variant", "Variante"), selection: $shown) {
+                        ForEach(entry.pictures.indices, id: \.self) { Text(entry.pictures[$0].label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 520)
+                }
+            }
+            KLHelpText(entry: entry)
+                .frame(maxWidth: 880, alignment: .leading)
+            HStack {
+                Spacer()
+                Button(klT("Close", "Schließen"), action: close)
+            }
+        }
+        .padding(28)
+        .frame(width: 940)
+        .animation(.easeInOut(duration: 0.2), value: shown)
     }
 }
 
@@ -759,8 +849,8 @@ struct KLPresetsPage: View {
                 Text(klT("This Vision Pro: \(KLDevice.kind.rawValue)", "Diese Vision Pro: \(KLDevice.kind.rawValue)"))
                     .font(.headline)
                 Text(KLDevice.kind == .m2
-                     ? klT("The presets that come with the game were tuned on an M5. Start from \"M5 Performance\", save what runs well as a preset of your own and share it – M2 presets are very welcome.",
-                           "Die mitgelieferten Presets sind auf einer M5 abgestimmt. Fang mit „M5 Leistung“ an, speichere, was gut läuft, als eigenes Preset und teile es – M2-Presets sind ausdrücklich erwünscht.")
+                     ? klT("The presets that come with the game were tuned on an M5. Start from \"Performance\", save what runs well as a preset of your own and share it – M2 presets are very welcome.",
+                           "Die mitgelieferten Presets sind auf einer M5 abgestimmt. Fang mit „Leistung“ an, speichere, was gut läuft, als eigenes Preset und teile es – M2-Presets sind ausdrücklich erwünscht.")
                      : klT("The presets that come with the game were tuned on this kind of Vision Pro.",
                            "Die mitgelieferten Presets wurden auf dieser Art Vision Pro abgestimmt."))
                     .font(.callout).foregroundStyle(.secondary)

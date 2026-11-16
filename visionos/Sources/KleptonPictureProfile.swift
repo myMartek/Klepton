@@ -71,24 +71,25 @@ struct KLPicture: Codable, Equatable {
 }
 
 /// The presets that come with every game.
+/// In the window's order (the owner's, 2026-11-16): Quality on top, then the standard, then Performance.
 enum KLBuiltInPreset: String, CaseIterable, Identifiable {
+    case quality = "m5.quality"
     case standard = "m5"
     case performance = "m5.performance"
-    case quality = "m5.quality"
     var id: String { rawValue }
 
     var nameEN: String {
         switch self {
         case .standard:    return "Vision Pro M5"
-        case .performance: return "M5 Performance"
-        case .quality:     return "M5 Quality"
+        case .performance: return "Performance"
+        case .quality:     return "Quality"
         }
     }
     var nameDE: String {
         switch self {
         case .standard:    return "Vision Pro M5"
-        case .performance: return "M5 Leistung"
-        case .quality:     return "M5 Qualität"
+        case .performance: return "Leistung"
+        case .quality:     return "Qualität"
         }
     }
 }

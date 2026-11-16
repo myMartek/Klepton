@@ -1148,8 +1148,8 @@ enum AlyxPreset: Int, CaseIterable, Identifiable {
 
 /// Alyx's picture, on the settings window's Picture page: resolution and MetalFX,
 /// then its nine dials. Which preset they make is the Presets page's business
-/// (KleptonPictureProfile: "Vision Pro M5" is Balanced, "M5 Quality" Sharp with
-/// the whole field of view, "M5 Performance" Balanced at 75 % with MetalFX).
+/// (KleptonPictureProfile: "Vision Pro M5" is Balanced, "Quality" Sharp with
+/// the whole field of view, "Performance" Balanced at 75 % with MetalFX).
 /// What each dial does is in the column on the right (KLHelp, "alyx.*").
 struct AlyxPicturePage: View {
     @AppStorage(AlyxQuality.storageKey) private var quality = AlyxPreset.balanced.dials.quality.rawValue
