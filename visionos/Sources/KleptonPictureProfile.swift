@@ -261,3 +261,63 @@ enum KLDeviceKind: String {
     /// has no 120 Hz – 90 Hz is its usual rate and 100 Hz its highest.
     var rates: (mixed: Int, full: Int) { self == .m2 ? (90, 100) : (100, 120) }
 }
+
+/// One dial of a preset, for "what has changed since the preset" (the presets page's right column, after the
+/// LambdaVision Half-Life window, which shows it there – the owner's wish, 2026-11-16).
+enum KLPictureField: String, CaseIterable {
+    case renderScale, metalFX, eyeMax, foveation, vkFoveation, msaa, vkMsaa, output
+    case alyxQuality, alyxEdges, alyxView, alyxFoveation, alyxOutput, alyxCadence, alyxEffects, alyxTexturePool, alyxTextureCap
+
+    /// The field's value in `p`, as a number or name the window formats (nil: the picture has no such field).
+    func value(in p: KLPicture) -> String? {
+        switch self {
+        case .renderScale: return String(Int((p.renderScale * 100).rounded()))
+        case .metalFX:     return p.metalFX ? "1" : "0"
+        case .eyeMax:      return String(p.eyeMax)
+        case .foveation:   return p.foveation ? "1" : "0"
+        case .vkFoveation: return p.vkFoveation
+        case .msaa:        return String(p.msaa)
+        case .vkMsaa:      return String(p.vkMsaa)
+        case .output:      return String(p.output)
+        case .alyxQuality:     return p.alyx.map { String($0.quality) }
+        case .alyxEdges:       return p.alyx.map { String($0.edges) }
+        case .alyxView:        return p.alyx.map { String($0.view) }
+        case .alyxFoveation:   return p.alyx.map { String($0.foveation) }
+        case .alyxOutput:      return p.alyx.map { String($0.output) }
+        case .alyxCadence:     return p.alyx.map { String($0.cadence) }
+        case .alyxEffects:     return p.alyx.map { String($0.effects) }
+        case .alyxTexturePool: return p.alyx.map { String($0.texturePool) }
+        case .alyxTextureCap:  return p.alyx.map { String($0.textureCap) }
+        }
+    }
+}
+
+enum KLPictureDiff {
+    /// The dials in which `now` differs from `preset`, in the window's order.
+    static func changes(from preset: KLPicture, to now: KLPicture) -> [KLPictureField] {
+        KLPictureField.allCases.filter { $0.value(in: preset) != $0.value(in: now) }
+    }
+}
+
+/// Which preset was chosen last ("b:<built-in id>" or "c:<UUID>"), so the presets page can say what has changed since.
+struct KLLastPreset {
+    static let key = "klepton.presets.last"
+    let defaults: UserDefaults
+    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+
+    var id: KLPresetID? {
+        get {
+            guard let s = defaults.string(forKey: Self.key) else { return nil }
+            if s.hasPrefix("b:") { return KLBuiltInPreset(rawValue: String(s.dropFirst(2))).map { .builtIn($0) } }
+            if s.hasPrefix("c:") { return UUID(uuidString: String(s.dropFirst(2))).map { .custom($0) } }
+            return nil
+        }
+        nonmutating set {
+            switch newValue {
+            case .builtIn(let k)?: defaults.set("b:" + k.rawValue, forKey: Self.key)
+            case .custom(let u)?:  defaults.set("c:" + u.uuidString, forKey: Self.key)
+            case nil:              defaults.removeObject(forKey: Self.key)
+            }
+        }
+    }
+}

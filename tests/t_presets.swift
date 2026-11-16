@@ -105,6 +105,20 @@ struct PresetsCheck {
         store.delete(saved.id)
         expect("deleted", store.presets.count, 0)
 
+        print("=== What changed since a preset ===")
+        expect("no change", KLPictureDiff.changes(from: standard, to: standard).map(\.rawValue), [String]())
+        var changed = standard; changed.renderScale = 0.8; changed.output = 0
+        expect("resolution and output", KLPictureDiff.changes(from: standard, to: changed).map(\.rawValue), ["renderScale", "output"])
+        expect("from performance", KLPictureDiff.changes(from: perf, to: standard).map(\.rawValue), ["renderScale", "metalFX"])
+        var a2 = aStd; a2.alyx?.view = 0
+        expect("alyx view", KLPictureDiff.changes(from: aStd, to: a2).map(\.rawValue), ["alyxView"])
+        let last = KLLastPreset(defaults: freshStore())
+        expect("no last preset", last.id, nil)
+        last.id = .builtIn(.quality)
+        expect("last built-in", last.id, .builtIn(.quality))
+        let u = UUID(); last.id = .custom(u)
+        expect("last own", last.id, .custom(u))
+
         print("=== Which Vision Pro ===")
         expect("RealityDevice14,1", KLDeviceKind.from(model: "RealityDevice14,1"), .m2)
         expect("RealityDevice17,1", KLDeviceKind.from(model: "RealityDevice17,1"), .m5)

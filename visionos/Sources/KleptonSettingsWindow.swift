@@ -138,17 +138,54 @@ final class KLSettingsFocus: ObservableObject {
 private struct KLHelpModifier: ViewModifier {
     @EnvironmentObject private var focus: KLSettingsFocus
     let key: String
+    /// With the ⓘ button beside it (a row puts it beside its title instead).
+    let info: Bool
     func body(content: Content) -> some View {
-        content
-            .contentShape(Rectangle())
-            .onHover { if $0 { focus.key = key } }
-            .simultaneousGesture(TapGesture().onEnded { focus.key = key })
+        Group {
+            if info {
+                HStack(alignment: .top, spacing: 8) {
+                    content.frame(maxWidth: .infinity, alignment: .leading)
+                    KLInfoButton(key: key)
+                }
+            } else {
+                content
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { if $0 { focus.key = key } }
+        .simultaneousGesture(TapGesture().onEnded { focus.key = key })
+    }
+}
+
+/// The ⓘ beside a setting: shows its explanation on the right. A tap, so it works by touch as well as by
+/// looking or with a mouse (the owner's finding, 2026-11-16: by touch the column did not always follow).
+struct KLInfoButton: View {
+    @EnvironmentObject private var focus: KLSettingsFocus
+    let key: String
+    var body: some View {
+        Button { focus.key = key } label: {
+            Image(systemName: focus.key == key ? "info.circle.fill" : "info.circle")
+                .foregroundStyle(focus.key == key ? Color.accentColor : .secondary)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(klT("What this does", "Was das bewirkt"))
+    }
+}
+
+private struct KLFollowModifier<V: Equatable>: ViewModifier {
+    @EnvironmentObject private var focus: KLSettingsFocus
+    let key: String
+    let value: V
+    func body(content: Content) -> some View {
+        content.onChange(of: value) { _, _ in focus.key = key }
     }
 }
 
 extension View {
-    /// Shows `key`'s explanation on the right while this is looked at or touched.
-    func klHelp(_ key: String) -> some View { modifier(KLHelpModifier(key: key)) }
+    /// Shows `key`'s explanation on the right while this is looked at or touched, with an ⓘ button beside it.
+    func klHelp(_ key: String, info: Bool = true) -> some View { modifier(KLHelpModifier(key: key, info: info)) }
+    /// Shows `key`'s explanation on the right whenever `value` changes – however it was changed.
+    func klFollow<V: Equatable>(_ key: String, _ value: V) -> some View { modifier(KLFollowModifier(key: key, value: value)) }
 }
 
 struct KLHelpPicture: Hashable {
@@ -549,6 +586,8 @@ struct KLHelpImage: View {
 struct KLSettingsPage<Content: View>: View {
     let title: String
     let help: String
+    /// Above the explanation in the right column (the presets page: what has changed since the preset).
+    var side: AnyView? = nil
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -559,8 +598,13 @@ struct KLSettingsPage<Content: View>: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider()
-            KLHelpPane(pageKey: help)
-                .frame(width: 380)
+            VStack(spacing: 0) {
+                if let side {
+                    side.padding(.horizontal, 20).padding(.top, 20)
+                }
+                KLHelpPane(pageKey: help)
+            }
+            .frame(width: 380)
         }
         .navigationTitle(title)
     }
@@ -595,13 +639,30 @@ struct KLRow<Control: View>: View {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(title)
+                    HStack(spacing: 8) { Text(title); KLInfoButton(key: help) }
                     control
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .klHelp(help)
+        .klHelp(help, info: inline)
+    }
+}
+
+/// A switch with its name, the ⓘ beside the name and the switch on the right.
+struct KLToggleRow: View {
+    let title: String
+    let help: String
+    @Binding var isOn: Bool
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+            KLInfoButton(key: help)
+            Spacer(minLength: 12)
+            Toggle(title, isOn: $isOn).labelsHidden()
+        }
+        .klHelp(help, info: false)
+        .klFollow(help, isOn)
     }
 }
 
@@ -662,6 +723,7 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
             page(selection ?? .presets)
                 .id(selection)
                 .onAppear { focus.key = ProcessInfo.processInfo.environment["KL_SETTINGS_HELP"] }
+                .background { KLFollowChanges(active: selection != .presets) }
         }
         .environmentObject(focus)
         .toolbar {
@@ -697,7 +759,9 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
     private func page(_ id: KLSettingsPageID) -> some View {
         switch id {
         case .presets:
-            KLSettingsPage(title: klT("Presets", "Presets"), help: "presets") { KLPresetsPage(started: started) }
+            KLSettingsPage(title: klT("Presets", "Presets"), help: "presets", side: AnyView(KLPresetChanges())) {
+                KLPresetsPage(started: started)
+            }
         case .picture:
             KLSettingsPage(title: klT("Picture", "Bild"), help: isAlyx ? "alyx.size" : "resolution") {
                 if isAlyx { AlyxPicturePage() } else { KLPicturePage() }
@@ -742,7 +806,186 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
     }
 }
 
+// MARK: - The explanation follows every change
+
+/// Watches the settings the pages show and, when one changes – by touch, by looking and pinching, with a
+/// controller –, shows its explanation on the right. Not on the presets page, where applying a preset changes
+/// many at once and the column says what has changed since the preset instead.
+struct KLFollowChanges: View {
+    let active: Bool
+    @EnvironmentObject private var focus: KLSettingsFocus
+    @ObservedObject private var rendering = KleptonRendering.shared
+    @ObservedObject private var metalfx = KleptonMetalFX.shared
+    @ObservedObject private var chroma = KleptonChroma.shared
+    @ObservedObject private var state = KLSettingsState.shared
+    @ObservedObject private var language = KleptonLanguage.shared
+    @AppStorage(KleptonHandPinch.key) private var pinch = true
+    @AppStorage(KleptonControllerMode.preferenceKey) private var controllerMode = KleptonControllerMode.selected().rawValue
+    @AppStorage(AlyxQuality.storageKey) private var aQuality = -1
+    @AppStorage(AlyxEdges.storageKey) private var aEdges = -1
+    @AppStorage(AlyxView.storageKey) private var aView = -1
+    @AppStorage(AlyxFoveation.storageKey) private var aFoveation = -1
+    @AppStorage(AlyxOutput.storageKey) private var aOutput = -1
+    @AppStorage(AlyxCadence.storageKey) private var aCadence = -1
+    @AppStorage(AlyxEffects.storageKey) private var aEffects = -1
+    @AppStorage(AlyxTexturePool.storageKey) private var aPool = -1
+    @AppStorage(AlyxTextureCap.storageKey) private var aCap = -1
+    @AppStorage(AlyxPace.storageKey) private var aPace = -1
+    @AppStorage(klAlyxLoadingKey) private var aLoading = true
+    @AppStorage(AlyxLanguage.storageKey) private var aLanguage = -1
+    @AppStorage(AlyxLanguage.voicesKey) private var aVoices = true
+
+    private func show(_ key: String) { if active { focus.key = key } }
+
+    var body: some View {
+        Color.clear
+            .onChange(of: rendering.renderScale) { _, _ in show("resolution") }
+            .onChange(of: metalfx.enabled) { _, _ in show("metalfx") }
+            .onChange(of: state.generation) { _, _ in show("eyeMax") }
+            .onChange(of: rendering.foveation) { _, _ in show("foveation") }
+            .onChange(of: rendering.vkFoveation) { _, _ in show("foveation") }
+            .onChange(of: rendering.msaa) { _, _ in show("msaa") }
+            .onChange(of: rendering.vkMsaa) { _, _ in show("msaa") }
+            .onChange(of: rendering.output) { _, _ in show("output") }
+            .onChange(of: rendering.video) { _, _ in show("video") }
+            .onChange(of: rendering.maxRate) { _, _ in show("frameRate") }
+            .onChange(of: rendering.frameGen) { _, _ in show("frameGen") }
+            .onChange(of: rendering.crownImmersion) { _, _ in show("progressive") }
+            .onChange(of: chroma.settings.handMatting) { _, _ in show("hands") }
+            .onChange(of: pinch) { _, _ in show("pinch") }
+            .onChange(of: controllerMode) { _, _ in show(klIsAlyx() ? "alyx.controls" : "controllers") }
+            .onChange(of: language.choice) { _, _ in show("language") }
+            .onChange(of: aQuality) { _, _ in show("alyx.size") }
+            .onChange(of: aEdges) { _, _ in show("alyx.edges") }
+            .onChange(of: aView) { _, _ in show("alyx.view") }
+            .onChange(of: aFoveation) { _, _ in show("alyx.foveation") }
+            .onChange(of: aOutput) { _, _ in show("alyx.output") }
+            .onChange(of: aCadence) { _, _ in show("alyx.cadence") }
+            .onChange(of: aEffects) { _, _ in show("alyx.effects") }
+            .onChange(of: aPool) { _, _ in show("alyx.pool") }
+            .onChange(of: aCap) { _, _ in show("alyx.cap") }
+            .onChange(of: aPace) { _, _ in show("alyx.controls") }
+            .onChange(of: aLoading) { _, _ in show("alyx.controls") }
+            .onChange(of: aLanguage) { _, _ in show("alyx.language") }
+            .onChange(of: aVoices) { _, _ in show("alyx.language") }
+            .accessibilityHidden(true)
+    }
+}
+
 // MARK: - Presets
+
+/// The presets page's right column, on top: which preset the picture comes from and what has changed since,
+/// dial by dial – as LambdaVision's Half-Life shows it. Only the picture: the play area, the controls, the
+/// language and the frame rate are never part of a preset and so never shown here as a change (the owner's
+/// word, 2026-11-16, for the play area).
+struct KLPresetChanges: View {
+    @ObservedObject private var state = KLSettingsState.shared
+    @ObservedObject private var rendering = KleptonRendering.shared
+    @ObservedObject private var metalfx = KleptonMetalFX.shared
+
+    private func value(_ f: KLPictureField, _ p: KLPicture) -> String {
+        let onOff = { (b: Bool) in b ? klT("On", "An") : klT("Off", "Aus") }
+        let cap = KLPictureNow.titleCap
+        switch f {
+        case .renderScale: return String(format: "%.0f %%", p.renderScale * 100)
+        case .metalFX: return onOff(p.metalFX)
+        case .eyeMax:
+            switch p.eyeMax {
+            case KleptonEyeMax.byTitle: return cap > 0 ? klT("Default (\(cap))", "Standard (\(cap))") : klT("Default", "Standard")
+            case KleptonEyeMax.native: return klT("Native", "Nativ")
+            default: return String(p.eyeMax)
+            }
+        case .foveation: return onOff(p.foveation)
+        case .vkFoveation:
+            return ["off": klT("Off", "Aus"), "low": klT("Light", "Leicht"), "medium": klT("Medium", "Mittel"),
+                    "high": klT("Strong", "Stark"), "ultra": klT("Very strong", "Sehr stark")][p.vkFoveation] ?? p.vkFoveation
+        case .msaa: return p.msaa == 0 ? klT("Off", "Aus") : "\(p.msaa)×"
+        case .vkMsaa: return p.vkMsaa == 0 ? klT("As the game", "Wie das Spiel") : "\(p.vkMsaa)×"
+        case .output: return AlyxOutput(rawValue: p.output)?.name ?? "–"
+        case .alyxQuality: return p.alyx.flatMap { AlyxQuality(rawValue: $0.quality)?.name } ?? "–"
+        case .alyxEdges: return p.alyx.map { "\($0.edges)×" } ?? "–"
+        case .alyxView: return p.alyx.flatMap { AlyxView(rawValue: $0.view)?.name } ?? "–"
+        case .alyxFoveation: return p.alyx.flatMap { AlyxFoveation(rawValue: $0.foveation)?.name } ?? "–"
+        case .alyxOutput: return p.alyx.flatMap { AlyxOutput(rawValue: $0.output)?.name } ?? "–"
+        case .alyxCadence: return p.alyx.flatMap { AlyxCadence(rawValue: $0.cadence)?.name } ?? "–"
+        case .alyxEffects: return p.alyx.flatMap { AlyxEffects(rawValue: $0.effects)?.name } ?? "–"
+        case .alyxTexturePool: return p.alyx.flatMap { AlyxTexturePool(rawValue: $0.texturePool)?.name } ?? "–"
+        case .alyxTextureCap: return p.alyx.map { String($0.textureCap) } ?? "–"
+        }
+    }
+
+    private func title(_ f: KLPictureField) -> String {
+        switch f {
+        case .renderScale: return klT("Resolution", "Auflösung")
+        case .metalFX: return klT("MetalFX upscaling", "MetalFX-Hochskalieren")
+        case .eyeMax: return klT("Max resolution per eye", "Maximale Auflösung je Auge")
+        case .foveation, .vkFoveation, .alyxFoveation: return "Foveated Rendering"
+        case .msaa, .vkMsaa, .alyxEdges: return klT("Edge smoothing", "Kantenglättung")
+        case .output, .alyxOutput: return klT("Display output", "Ausgabe aufs Display")
+        case .alyxQuality: return klT("Picture size", "Bildgröße")
+        case .alyxView: return klT("Field of view", "Sichtfeld")
+        case .alyxCadence: return klT("Frame cadence", "Bildtakt")
+        case .alyxEffects: return klT("Effects", "Effekte")
+        case .alyxTexturePool: return klT("Texture memory", "Texturspeicher")
+        case .alyxTextureCap: return klT("Finest texture", "Feinste Textur")
+        }
+    }
+
+    var body: some View {
+        _ = state.generation
+        let now = KLPictureNow.read()
+        let store = KLPresetStore()
+        let standard = KLPictureNow.standard
+        let active = KLPictureRules.matching(now, standard: standard, titleCap: KLPictureNow.titleCap, custom: store.presets)
+        // The preset the picture comes from: the one chosen last (if it still exists), else what the game started with.
+        var refName = klT(KLBuiltInPreset.standard.nameEN, KLBuiltInPreset.standard.nameDE)
+        var refPicture = standard
+        switch KLLastPreset().id {
+        case .builtIn(let k)?:
+            refName = klT(k.nameEN, k.nameDE); refPicture = KLPictureNow.builtIn(k)
+        case .custom(let u)?:
+            if let p = store.presets.first(where: { $0.id == u }) { refName = p.name; refPicture = p.picture }
+        case nil: break
+        }
+        let changes = KLPictureDiff.changes(from: refPicture, to: now)
+        return VStack(alignment: .leading, spacing: 10) {
+            if let active, changes.isEmpty || KLPictureDiff.changes(from: picture(of: active, store), to: now).isEmpty {
+                Label(klT("Set: \(name(of: active, store))", "Eingestellt: \(name(of: active, store))"), systemImage: "checkmark.circle.fill")
+                    .font(.headline).foregroundStyle(.green)
+                Text(klT("Nothing changed since the preset.", "Seit dem Preset nichts geändert."))
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                Label(klT("Changed since \"\(refName)\"", "Geändert seit „\(refName)“"), systemImage: "slider.horizontal.below.square.filled.and.square")
+                    .font(.headline)
+                ForEach(changes, id: \.self) { f in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title(f)).font(.callout.weight(.semibold))
+                        Text("\(value(f, refPicture))  →  \(value(f, now))")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+                Text(klT("Save it as a preset of your own on the left, or choose a preset to go back.",
+                         "Links als eigenes Preset speichern oder ein Preset wählen, um zurückzukehren."))
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Divider().padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func name(of id: KLPresetID, _ store: KLPresetStore) -> String {
+        switch id {
+        case .builtIn(let k): return klT(k.nameEN, k.nameDE)
+        case .custom(let u): return store.presets.first { $0.id == u }?.name ?? ""
+        }
+    }
+    private func picture(of id: KLPresetID, _ store: KLPresetStore) -> KLPicture {
+        switch id {
+        case .builtIn(let k): return KLPictureNow.builtIn(k)
+        case .custom(let u): return store.presets.first { $0.id == u }?.picture ?? KLPictureNow.standard
+        }
+    }
+}
 
 struct KLPresetsPage: View {
     let started: Bool
@@ -769,6 +1012,7 @@ struct KLPresetsPage: View {
                     presetRow(name: klT(kind.nameEN, kind.nameDE), detail: detail(kind),
                               active: active == .builtIn(kind), help: "preset.\(kind.rawValue)") {
                         KLPictureNow.apply(KLPictureNow.builtIn(kind))
+                        KLLastPreset().id = .builtIn(kind)
                     }
                     if kind != KLBuiltInPreset.allCases.last { Divider() }
                 }
@@ -784,6 +1028,7 @@ struct KLPresetsPage: View {
                         presetRow(name: p.name, detail: p.device.isEmpty ? "" : "Vision Pro \(p.device)",
                                   active: active == .custom(p.id), help: "preset.own") {
                             KLPictureNow.apply(p.picture.clamped(minScale: KleptonRendering.minRenderScale))
+                            KLLastPreset().id = .custom(p.id)
                         }
                         ShareLink(item: KLPresetStore.shareText(p, game: klLauncherTitle() ?? klTargetName())) {
                             Image(systemName: "square.and.arrow.up")
@@ -805,7 +1050,8 @@ struct KLPresetsPage: View {
                     TextField(klT("Name for the current picture", "Name für das aktuelle Bild"), text: $newName)
                         .textFieldStyle(.roundedBorder)
                     Button(klT("Save", "Speichern")) {
-                        store.save(name: newName, picture: now, device: KLDevice.kind.rawValue)
+                        let saved = store.save(name: newName, picture: now, device: KLDevice.kind.rawValue)
+                        KLLastPreset().id = .custom(saved.id)
                         newName = ""
                         state.changed()
                     }
@@ -951,7 +1197,7 @@ struct KLPicturePage: View {
                     .pickerStyle(.segmented).labelsHidden()
                 }
             } else {
-                Toggle("Foveated Rendering", isOn: $rendering.foveation).klHelp("foveation")
+                KLToggleRow(title: "Foveated Rendering", help: "foveation", isOn: $rendering.foveation)
             }
             if KleptonRendering.targetHasMSAA {
                 KLRow(title: klT("Edge smoothing", "Kantenglättung"), help: "msaa") {
@@ -1042,14 +1288,13 @@ struct KLImmersionPage: View {
     var body: some View {
         if Immersive.wanted, !KleptonRendering.targetIsMixedReality {
             KLSection(title: klT("Digital Crown", "Digital Crown")) {
-                Toggle(klT("Progressive immersion", "Progressive Immersion"), isOn: $rendering.crownImmersion)
-                    .klHelp("progressive")
+                KLToggleRow(title: klT("Progressive immersion", "Progressive Immersion"), help: "progressive",
+                            isOn: $rendering.crownImmersion)
             }
         }
         KLSection(title: klT("Your hands", "Deine Hände")) {
-            Toggle(klT("Show my real hands over the game", "Meine echten Hände über dem Spiel zeigen"),
-                   isOn: $chroma.settings.handMatting)
-                .klHelp("hands")
+            KLToggleRow(title: klT("Show my real hands over the game", "Meine echten Hände über dem Spiel zeigen"),
+                        help: "hands", isOn: $chroma.settings.handMatting)
             HandPinchView().klHelp("pinch")
         }
         KLSection(title: klT("Passthrough and chroma key", "Durchsicht und Chroma-Key")) {
@@ -1103,7 +1348,7 @@ struct KLAdvancedPage: View {
             KLSection(title: klT("Memory", "Speicher")) { AlyxLeanDepthView() }
         } else {
             KLSection(title: klT("Picture, in detail", "Bild, im Einzelnen")) {
-                Toggle(klT("In-game videos", "Videos im Spiel"), isOn: $rendering.video).klHelp("video")
+                KLToggleRow(title: klT("In-game videos", "Videos im Spiel"), help: "video", isOn: $rendering.video)
             }
         }
         if KLRealityPresentSetting.offered {

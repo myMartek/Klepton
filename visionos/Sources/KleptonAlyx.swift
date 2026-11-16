@@ -1226,7 +1226,7 @@ struct AlyxPicturePage: View {
             dial(klT("Texture memory", "Texturspeicher"), "alyx.pool", $texturePool, AlyxTexturePool.allCases,
                  name: { $0.name }, tag: { $0.rawValue })
             if let memoryNote {
-                Text(memoryNote).font(.footnote).foregroundStyle(.secondary).klHelp("alyx.pool")
+                Text(memoryNote).font(.footnote).foregroundStyle(.secondary).klHelp("alyx.pool", info: false)
             }
             dial(klT("Finest texture", "Feinste Textur"), "alyx.cap", $textureCap, AlyxTextureCap.allCases,
                  name: { $0.name }, tag: { $0.rawValue })
