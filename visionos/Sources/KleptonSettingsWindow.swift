@@ -399,7 +399,9 @@ struct KLHelpPane: View {
         if let e = KLHelp.entry(shownKey) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    if !e.pictures.isEmpty {
+                    // A picture only where there is something to compare (the owner's word: where there is
+                    // no comparison, no picture).
+                    if e.pictures.count >= 2 {
                         Button { enlarged = shownKey } label: {
                             VStack(alignment: .leading, spacing: 6) {
                                 KLHelpPictures(pictures: e.pictures)
@@ -491,7 +493,7 @@ struct KLHelpLarge: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            if !entry.pictures.isEmpty {
+            if entry.pictures.count >= 2 {
                 let i = min(shown, entry.pictures.count - 1)
                 KLHelpImage(asset: entry.pictures[i].asset)
                     .id(entry.pictures[i].asset)
