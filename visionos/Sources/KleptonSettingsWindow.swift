@@ -305,6 +305,13 @@ enum KLHelp {
                                + (KLDevice.kind == .m2 ? " Diese Vision Pro hat den M2: Ihr Display kann keine 120 Hz." : ""),
                                pictures: [KLHelpPicture(en: "Frame rate", de: "Bildrate", asset: "KLHelp-framerate")],
                                noteEN: nextStartEN, noteDE: nextStartDE)
+        case "cadence":
+            return KLHelpEntry(en: "Frame cadence", de: "Bildtakt",
+                               textEN: "Every second refresh: the game draws an even half of the display's pictures – \(rates.mixed / 2) of \(rates.mixed), or \(rates.full / 2) of \(rates.full) – and your head's movement is still corrected at the full rate. For a game that does not quite hold the full rate and stutters unevenly; the graphics chip also gets time to cool. Every refresh: as many as the game manages, which is uneven when a picture takes a little too long.",
+                               textDE: "Jedes zweite Bild: Das Spiel zeichnet gleichmäßig die Hälfte der Bilder des Displays – \(rates.mixed / 2) von \(rates.mixed) oder \(rates.full / 2) von \(rates.full) –, und deine Kopfbewegung wird weiter mit voller Rate ausgeglichen. Für ein Spiel, das die volle Rate nicht ganz hält und ungleichmäßig ruckelt; der Grafikchip bekommt außerdem Zeit zum Abkühlen. Jedes Bild: so viele, wie das Spiel schafft – ungleichmäßig, wenn ein Bild etwas zu lange braucht.",
+                               noteEN: nextStartEN, noteDE: nextStartDE)
+        case "alyx.cadence":
+            return entry("cadence")
         case "frameGen":
             return KLHelpEntry(en: "Frame generation", de: "Zwischenbilder",
                                textEN: "For a game that draws fewer pictures than the display shows. Ahead: where the game has no new picture, one is made from its last two, moved on to the moment it is shown. In between: the middle between the game's last two pictures – smoother, and what the game draws comes 10 ms later; your head's movement stays as quick. Not together with MetalFX.",
@@ -384,11 +391,6 @@ enum KLHelp {
                                pictures: pair("foveation", "Off", "Aus", "Strongest", "Sehr stark"), noteEN: nextStartEN, noteDE: nextStartDE)
         case "alyx.output":
             return entry("output")
-        case "alyx.cadence":
-            return KLHelpEntry(en: "Frame cadence", de: "Bildtakt",
-                               textEN: "\"Every second refresh\" draws an even 50 pictures a second and leaves the graphics chip time to cool; \"Every refresh\" draws as many as it manages, which is uneven when a picture takes a little too long.",
-                               textDE: "„Jedes zweite Bild“ zeichnet gleichmäßig 50 Bilder pro Sekunde und lässt dem Grafikchip Zeit zum Abkühlen; „Jedes Bild“ zeichnet so viele, wie es schafft – ungleichmäßig, wenn ein Bild etwas zu lange braucht.",
-                               noteEN: nextStartEN, noteDE: nextStartDE)
         case "alyx.effects":
             return KLHelpEntry(en: "Effects", de: "Effekte",
                                textEN: "\"Fewer\" leaves out bloom and ambient occlusion, the two effects that are passes of their own.",
@@ -820,6 +822,7 @@ struct KLFollowChanges: View {
     @ObservedObject private var state = KLSettingsState.shared
     @ObservedObject private var language = KleptonLanguage.shared
     @AppStorage(KleptonHandPinch.key) private var pinch = true
+    @AppStorage("klepton.test." + KLCadence.env) private var paceDiv = false
     @AppStorage(KleptonControllerMode.preferenceKey) private var controllerMode = KleptonControllerMode.selected().rawValue
     @AppStorage(AlyxQuality.storageKey) private var aQuality = -1
     @AppStorage(AlyxEdges.storageKey) private var aEdges = -1
@@ -853,6 +856,7 @@ struct KLFollowChanges: View {
             .onChange(of: rendering.crownImmersion) { _, _ in show("progressive") }
             .onChange(of: chroma.settings.handMatting) { _, _ in show("hands") }
             .onChange(of: pinch) { _, _ in show("pinch") }
+            .onChange(of: paceDiv) { _, _ in show("cadence") }
             .onChange(of: controllerMode) { _, _ in show(klIsAlyx() ? "alyx.controls" : "controllers") }
             .onChange(of: language.choice) { _, _ in show("language") }
             .onChange(of: aQuality) { _, _ in show("alyx.size") }
@@ -860,7 +864,7 @@ struct KLFollowChanges: View {
             .onChange(of: aView) { _, _ in show("alyx.view") }
             .onChange(of: aFoveation) { _, _ in show("alyx.foveation") }
             .onChange(of: aOutput) { _, _ in show("alyx.output") }
-            .onChange(of: aCadence) { _, _ in show("alyx.cadence") }
+            .onChange(of: aCadence) { _, _ in show("cadence") }
             .onChange(of: aEffects) { _, _ in show("alyx.effects") }
             .onChange(of: aPool) { _, _ in show("alyx.pool") }
             .onChange(of: aCap) { _, _ in show("alyx.cap") }
@@ -1265,10 +1269,46 @@ struct KLFrameGenRow: View {
     }
 }
 
+/// The game's frame cadence (the owner's wish, 2026-11-16: "Bildtakt will ich auch in jedem Spiel sehen können, nicht nur
+/// bei Alyx"): every refresh, or every second one – the runtime's KL_GUEST_PACE_DIV, which was a Test switch until then and
+/// is stored the same way (KleptonTestSwitches), so a choice made there and a game's own start value (targets.py
+/// "test_on") stay. Alyx keeps its own dial (AlyxCadence), which its presets set.
+enum KLCadence {
+    static let env = "KL_GUEST_PACE_DIV"
+    static var entry: KleptonTestSwitches.Entry? { KleptonTestSwitches.entries.first { $0.env == env } }
+    /// Every second refresh, as stored.
+    static var everySecond: Bool { entry.map(KleptonTestSwitches.isOn) ?? false }
+    static func set(everySecond on: Bool) { if let e = entry { KleptonTestSwitches.set(e, on: on) } }
+}
+
+struct KLCadenceRow: View {
+    @AppStorage(AlyxCadence.storageKey) private var alyxCadence = AlyxPreset.balanced.dials.cadence.rawValue
+    @State private var everySecond = KLCadence.everySecond
+    var body: some View {
+        KLRow(title: klT("Frame cadence", "Bildtakt"), help: "cadence") {
+            if klIsAlyx() {
+                Picker(klT("Frame cadence", "Bildtakt"), selection: $alyxCadence) {
+                    Text(AlyxCadence.every.name).tag(AlyxCadence.every.rawValue)
+                    Text(AlyxCadence.second.name).tag(AlyxCadence.second.rawValue)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+            } else {
+                Picker(klT("Frame cadence", "Bildtakt"), selection: $everySecond) {
+                    Text(klT("Every refresh", "Jedes Bild")).tag(false)
+                    Text(klT("Every second refresh", "Jedes zweite Bild")).tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                .onChange(of: everySecond) { _, on in KLCadence.set(everySecond: on); KLSettingsState.shared.changed() }
+            }
+        }
+    }
+}
+
 struct KLMotionPage: View {
     var body: some View {
         KLSection(title: klT("Frame rate", "Bildrate")) {
             if !KleptonRendering.targetIsMixedReality { KLFrameRateRow() }
+            KLCadenceRow()
             KLFrameGenRow()
         }
         if KLDevice.kind == .m2 {

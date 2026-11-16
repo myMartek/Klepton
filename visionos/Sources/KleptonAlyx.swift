@@ -1219,8 +1219,7 @@ struct AlyxPicturePage: View {
                  name: { $0.name }, tag: { $0.rawValue })
             dial(klT("Effects", "Effekte"), "alyx.effects", $effects, AlyxEffects.allCases,
                  name: { $0.name }, tag: { $0.rawValue })
-            dial(klT("Frame cadence", "Bildtakt"), "alyx.cadence", $cadence, [AlyxCadence.second, .every],
-                 name: { $0.name }, tag: { $0.rawValue })
+            // The frame cadence is on the frame rate page, as in every game (KLCadenceRow); it stays one of the preset's dials.
         }
         KLSection(title: klT("Textures", "Texturen")) {
             dial(klT("Texture memory", "Texturspeicher"), "alyx.pool", $texturePool, AlyxTexturePool.allCases,
