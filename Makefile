@@ -1122,6 +1122,18 @@ build/t_mfxpreset: tests/t_mfxpreset.swift visionos/Sources/KleptonMetalFXPreset
 mfxpreset: build/t_mfxpreset
 	./build/t_mfxpreset
 
+# The picture presets of the settings window (KleptonPictureProfile.swift): the
+# three built-in ones from a game's standard picture, the next higher eye size,
+# which preset a picture is, the player's own presets and their shared text, and
+# M2 against M5. In `make check`.
+build/t_presets: tests/t_presets.swift visionos/Sources/KleptonPictureProfile.swift
+	@mkdir -p build
+	swiftc -o $@ visionos/Sources/KleptonPictureProfile.swift tests/t_presets.swift
+
+.PHONY: presets
+presets: build/t_presets
+	./build/t_presets
+
 # MetalFX in mixed reality (KleptonMetalFXAlpha.swift): the real spatial scaler
 # on the Mac's GPU, then the alpha pass, for every format the compositor
 # upscales — transparent stays transparent, opaque stays opaque, one clean edge.
@@ -1226,7 +1238,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_tmnt build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_ctrlrecovery build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands build/t_xrhands
+check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_tmnt build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_ctrlrecovery build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_presets build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands build/t_xrhands
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1331,6 +1343,8 @@ check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load buil
 	@head -1 build/ue421.log && tail -1 build/ue421.log
 	@./build/t_mfxpreset > build/mfxpreset.log 2>&1 || { cat build/mfxpreset.log; exit 1; }
 	@echo "=== MetalFX switch: resolution preset ===" && tail -1 build/mfxpreset.log
+	@./build/t_presets > build/presets.log 2>&1 || { cat build/presets.log; exit 1; }
+	@echo "=== settings window: picture presets ===" && tail -1 build/presets.log
 	@./build/t_mfxalpha > build/mfxalpha.log 2>&1 || { cat build/mfxalpha.log; exit 1; }
 	@head -1 build/mfxalpha.log && tail -1 build/mfxalpha.log
 	@./build/t_statscard > build/statscard.log 2>&1 || { cat build/statscard.log; exit 1; }

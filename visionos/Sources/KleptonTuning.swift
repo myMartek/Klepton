@@ -961,7 +961,8 @@ struct TestSwitchesView: View {
             Text(klT("Changes that are built in but not switched on yet. Each applies from the next start of the game.",
                      "Änderungen, die eingebaut, aber noch nicht eingeschaltet sind. Jede gilt ab dem nächsten Start des Spiels."))
                 .font(.caption).foregroundStyle(.secondary)
-            ForEach(KleptonTestSwitches.entries) { e in
+            // The game's frame cadence (KL_GUEST_PACE_DIV) is a setting of its own on the frame rate page (KLCadenceRow).
+            ForEach(KleptonTestSwitches.entries.filter { $0.env != KLCadence.env }) { e in
                 TestSwitchRow(entry: e)
                 // What the tap does, under the switch that shows the panel (the owner's place for it).
                 if e.env == "KL_STATS_CARD" { KleptonTapActionPicker().padding(.leading, 16) }

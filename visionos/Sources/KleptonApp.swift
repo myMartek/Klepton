@@ -780,193 +780,6 @@ struct KeyboardEntryView: View {
     }
 }
 
-/// The three things a player may want to change, in words that do not need the
-/// port explained: how the picture is rendered, how large, and whether their
-/// own hands show. All of it is read once when the game starts, which the page
-/// says once instead of under every control.
-struct PlayerSettingsView: View {
-    @AppStorage(KleptonControllerMode.preferenceKey) private var controllerMode = KleptonControllerMode.selected().rawValue
-    @ObservedObject private var rendering = KleptonRendering.shared
-    @ObservedObject private var chroma = KleptonChroma.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            KleptonControllerSettingsView()
-            // Alyx's page shows AlyxPanel instead of this view, with these in its own boxes.
-            if !klIsAlyx() {
-            GroupBox(klT("Picture", "Bild")) {
-                VStack(alignment: .leading, spacing: 10) {
-                    // A Vulkan game has the level as a choice (kl_fove); the
-                    // switch is the GL path's and does nothing for it.
-                    if rendering.offersVkFoveation {
-                        HStack {
-                            Text(klT("Foveated rendering", "Foveated Rendering"))
-                            Picker(klT("Foveated rendering", "Foveated Rendering"), selection: $rendering.vkFoveation) {
-                                Text(klT("Off", "Aus")).tag("off")
-                                Text(klT("Light", "Leicht")).tag("low")
-                                Text(klT("Medium", "Mittel")).tag("medium")
-                                Text(klT("Strong", "Stark")).tag("high")
-                                Text(klT("Very strong", "Sehr stark")).tag("ultra")
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                        }
-                        Text(klT("Keeps the middle of the picture sharp and draws the edges more coarsely, so the game runs more smoothly. The stronger the level, the smaller the sharp middle and the coarser the edge.",
-                                 "Hält die Bildmitte scharf und zeichnet die Ränder gröber, damit das Spiel flüssiger läuft. Je stärker die Stufe, desto kleiner die scharfe Mitte und desto gröber der Rand."))
-                            .font(.callout).foregroundStyle(.secondary)
-                    } else {
-                    Toggle(klT("Foveated rendering", "Foveated Rendering"), isOn: $rendering.foveation)
-                    Text(klT("Keeps the middle of the picture sharp and draws the edges more coarsely. Games run more smoothly with it.",
-                             "Hält die Bildmitte scharf und zeichnet die Ränder gröber. Spiele laufen damit flüssiger."))
-                        .font(.callout).foregroundStyle(.secondary)
-                    }
-                    if KleptonRendering.targetHasMSAA {
-                        HStack {
-                            Text(klT("Edge smoothing", "Kantenglättung"))
-                            Picker(klT("Edge smoothing", "Kantenglättung"), selection: $rendering.msaa) {
-                                Text(klT("Off", "Aus")).tag(0)
-                                Text("2x").tag(2)
-                                Text("4x").tag(4)
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                        }
-                        Text(klT("Smooths jagged edges (MSAA). It costs frame rate: at full resolution the game can drop to 60 Hz with it, so lower the resolution along with it.",
-                                 "Glättet gezackte Kanten (MSAA). Kostet Bildrate: Bei voller Auflösung kann das Spiel damit auf 60 Hz fallen, also die Auflösung dazu verringern.")
-                             + (KleptonRendering.targetIsBeatSaber
-                                ? klT(" From Beat Saber 1.45 on.", " Ab Beat Saber 1.45.") : ""))
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
-                    // The same setting for a game that smooths its edges by
-                    // itself, with fewer samples (a Vulkan game; see
-                    // KleptonRendering.vkMsaa for when it is known).
-                    if rendering.offersVkMsaa {
-                        HStack {
-                            Text(klT("Edge smoothing", "Kantenglättung"))
-                            Picker(klT("Edge smoothing", "Kantenglättung"), selection: $rendering.vkMsaa) {
-                                Text(klT("As the game (\(KleptonRendering.vkGuestSamples)x)",
-                                         "Wie das Spiel (\(KleptonRendering.vkGuestSamples)x)")).tag(0)
-                                Text("4x").tag(4)
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                        }
-                        Text(klT("Smooths jagged edges more than the game does by itself (MSAA). It costs some graphics time and memory, and the first start after a change compiles the game's shaders again, which stutters for a while. If the picture shows faults, set it back.",
-                                 "Glättet gezackte Kanten stärker, als das Spiel es von sich aus tut (MSAA). Kostet etwas Grafikzeit und Speicher, und beim ersten Start nach einer Änderung werden die Shader des Spiels neu übersetzt, was eine Weile ruckelt. Zeigt das Bild Fehler, wieder zurückstellen."))
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
-                    PicturePrimary(hintFont: .callout)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            }
-            // For every game that opens an immersive space, Alyx included —
-            // except a mixed-reality one, whose room needs the mixed space.
-            if Immersive.wanted, !KleptonRendering.targetIsMixedReality {
-                GroupBox(klT("Frame rate", "Bildrate")) {
-                    FrameRatePicker().frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            // Frame generation (KleptonFrameGen), for every game that shows a picture of its own – among
-            // the main settings, where its owner wanted it ("nicht erst bei erweitert"). In the game a
-            // tap of Create + Options with the performance panel shown cycles the three, to compare
-            // (KleptonTapAction: unless the game's setting has the tap do something else). A mixed-reality
-            // game too: it had been left out on the guess that a moved in-between moves the edges to the room
-            // as well, never tried – they move with the picture's alpha, as the things in them do. Its owner
-            // asked for it with LEGO Bricktales (2026-10-29).
-            if Immersive.wanted {
-                GroupBox(klT("Frame generation", "Zwischenbilder")) {
-                    FrameGenPicker().frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            // The Digital Crown becomes the immersion control: a per-game
-            // switch, off by default, and never for a mixed-reality title whose
-            // room is the point (crown patch).
-            if Immersive.wanted, !KleptonRendering.targetIsMixedReality {
-                GroupBox(klT("Progressive (Digital Crown)", "Progressiv (Digital Crown)")) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Toggle(klT("Progressive immersion", "Progressive Immersion"),
-                               isOn: $rendering.crownImmersion)
-                        Text(klT("Starts fully immersed. Turning the Digital Crown down draws the game into a portal over the room, and at 0% the room is all that is left; the sound fades out there and returns as you turn it back up. Takes effect the next time the game starts.",
-                                 "Startet voll immersiv. Dreh die Krone herunter, dann zieht sich das Spiel in ein Portal über dem Raum zusammen, bei 0 % ist nur der Raum da; dort fadet der Ton aus und kommt zurück, sobald du hochdrehst. Wirkt beim nächsten Start des Spiels."))
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            // Alyx hides the player's arms whatever this says (see
-            // KleptonChroma.upperLimbVisibility), so the switch would be a lie there.
-            if !klIsAlyx() {
-                GroupBox(klT("Your hands", "Deine Hände")) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Toggle(klT("Show my real hands over the game", "Meine echten Hände über dem Spiel zeigen"),
-                               isOn: $chroma.settings.handMatting)
-                        Text(klT("Most games draw their own hands or controllers, so your real ones would be a second pair in the same place.",
-                                 "Die meisten Spiele zeichnen eigene Hände oder Controller – deine echten wären dann ein zweites Paar an derselben Stelle."))
-                            .font(.callout).foregroundStyle(.secondary)
-                        HandPinchView()
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            if controllerMode == KleptonControllerMode.standard.rawValue {
-                GroupBox(klT("Game controller", "Gamecontroller")) { GamepadStatusView() }
-            }
-            Label(klT("Changes to the picture apply the next time you start the game.",
-                      "Änderungen am Bild gelten ab dem nächsten Start des Spiels."),
-                  systemImage: "info.circle")
-                .font(.callout).foregroundStyle(.secondary)
-        }
-    }
-}
-
-/// The frame-rate choice (KleptonRendering.maxRate): its picker and what it does.
-struct FrameRatePicker: View {
-    @ObservedObject private var rendering = KleptonRendering.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker(klT("Frame rate", "Bildrate"), selection: $rendering.maxRate) {
-                Text(klT("Up to 100", "Bis 100")).tag(100)
-                Text(klT("Up to 120", "Bis 120")).tag(120)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            Text(klT("Up to 100 is the default. Up to 120 is smoother where the game manages it and the Vision Pro's display can do it. When a game cannot keep up, the Vision Pro halves the rate for a while: to 50 from 100, to 60 from 120.",
-                     "Bis 100 ist der Standard. Bis 120 ist flüssiger, wo das Spiel es schafft und das Display der Vision Pro es kann. Kommt ein Spiel nicht mit, halbiert die Vision Pro die Rate eine Weile: von 100 auf 50, von 120 auf 60."))
-                .font(.callout).foregroundStyle(.secondary)
-        }
-    }
-}
-
-/// The frame-generation choice (KleptonRendering.frameGen): its three modes and what they do.
-struct FrameGenPicker: View {
-    @ObservedObject private var rendering = KleptonRendering.shared
-    @ObservedObject private var metalfx = KleptonMetalFX.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker(klT("Frame generation", "Zwischenbilder"), selection: $rendering.frameGen) {
-                Text(klT("Off", "Aus")).tag(KleptonFrameGen.Mode.off.rawValue)
-                Text(klT("Ahead", "Vorausberechnet")).tag(KleptonFrameGen.Mode.ahead.rawValue)
-                Text(klT("In between", "Dazwischen")).tag(KleptonFrameGen.Mode.between.rawValue)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            Text(klT("For a game that draws fewer pictures than the display shows. Ahead: where the game has no new picture, one is made from its last two, moved on to the moment it is shown. In between: the middle between the game's last two pictures, as DLSS makes them – smoother, and what the game draws comes 10 ms later; the head's movement stays as quick. With the performance panel shown (Create and Options held together), a short tap of the two cycles the three – what the tap does can be set under the panel's switch.",
-                     "Für ein Spiel, das weniger Bilder zeichnet, als das Display zeigt. Vorausberechnet: Wo das Spiel kein neues Bild hat, wird eins aus seinen letzten beiden errechnet, bis zu dem Moment weitergerückt, in dem es gezeigt wird. Dazwischen: die Mitte zwischen den letzten beiden Bildern des Spiels, wie DLSS sie macht – weicher, und was das Spiel zeichnet, kommt 10 ms später; die Kopfbewegung bleibt so schnell. Bei eingeblendeter Leistungsanzeige (Create und Options zusammen gehalten) wechselt ein kurzer Tipp auf beide zwischen den dreien – was der Tipp tut, lässt sich unter dem Schalter der Anzeige einstellen."))
-                .font(.callout).foregroundStyle(.secondary)
-            // The compositor makes no in-between picture where MetalFX swapped the eye's picture
-            // (encodeComposite): the two would fight over the swap.
-            if rendering.frameGen != KleptonFrameGen.Mode.off.rawValue, metalfx.enabled {
-                Text(klT("While MetalFX upscaling is on, no in-between pictures are made – choose one of the two.",
-                         "Solange MetalFX-Hochskalieren an ist, entstehen keine Zwischenbilder – eins von beiden wählen."))
-                    .font(.callout).foregroundStyle(.orange)
-            }
-        }
-    }
-}
-
 /// Whether an ordinary game controller is connected, and which of its buttons stands for which.
 /// Looked up again every two seconds: a controller is paired and switched on while the page is
 /// open as often as before it.
@@ -1424,81 +1237,29 @@ struct BootView: View {
         }
     }
 
-    /// What Settings opens: the dials that matter to a player first, the
-    /// instruments after them, and the report last.
+    /// What Settings opens: the settings window (KleptonSettingsWindow) – pages
+    /// on the left, the page in the middle, what a setting does on the right.
+    /// Its Diagnostics page is this view's, since the log is this run's.
     private var settingsPage: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    if isLauncher { LauncherPanel() }
-                    // Alyx's page is its own (AlyxPanel), down to its language, which
-                    // the game picks itself (AlyxLanguage) and the general one does not reach.
-                    if klIsAlyx() { AlyxPanel(started: running || finished || run.started) }
-                    else { PlayerSettingsView() }
-                    RoomSettingsView(measure: { showSettings = false; openRoom(.setup) })
-                    PlayerNameView()
-                    if !klIsAlyx() { GameLanguageView() }
-                    WalkaboutUnlockView()
-                    ModCreditsView()
-                    if micUpFront { GroupBox { MicView() } }
-                    // Everything a player does not need to understand to play: the
-                    // dials of the port itself, and the report of this run.
-                    DisclosureGroup(klT("Advanced", "Erweitert")) {
-                        VStack(alignment: .leading, spacing: 14) {
-                            if klIsAlyx() {
-                                GroupBox(klT("Performance panel", "Leistungsanzeige")) { AlyxPerformancePanelView() }
-                            }
-                            GroupBox(klT("Picture, in detail", "Bild, im Einzelnen")) {
-                                VStack(alignment: .leading, spacing: 14) {
-                                    RenderingView()
-                                    if klIsAlyx() { AlyxLeanDepthView() }
-                                }
-                            }
-                            // Not for Alyx: its own KL_OVRP_EYE_MAX (klAlyxApply) would win over it.
-                            if !klIsAlyx() {
-                                GroupBox(klT("Max resolution per eye", "Maximale Auflösung je Auge")) { EyeMaxView() }
-                            }
-                            if KLRealityPresentSetting.offered {
-                                GroupBox(klT("Eye-tracked sharpness", "Schärfe nach Blick")) { RealityPresentView() }
-                            }
-                            DisclosureGroup(klT("Passthrough and chroma key", "Durchsicht und Chroma-Key")) { ChromaView() }
-                            DisclosureGroup(klT("Controller alignment", "Ausrichtung der Controller")) { TuningView() }
-                            if showMic {
-                                DisclosureGroup(klT("Microphone", "Mikrofon")) { MicView() }
-                            }
-                            if KleptonTestSwitches.available {
-                                DisclosureGroup(klT("Test", "Test")) { TestSwitchesView() }
-                            }
-                            DisclosureGroup(klT("Diagnostics", "Diagnose")) {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Toggle(klT("Record what the game waits for", "Aufzeichnen, worauf das Spiel wartet"),
-                                           isOn: $diagWaiters)
-                                    Text(klT("For a game that stops in a loading screen. Every few seconds the log notes which parts of the game are waiting for what, and a report of all of them is written when you leave the game. Leave the game while it is stuck and pass the log on before you start it again. Takes effect the next time the app starts.",
-                                             "Für ein Spiel, das in einem Ladebildschirm stehen bleibt. Alle paar Sekunden steht im Protokoll, welche Teile des Spiels worauf warten, und beim Verlassen wird ein Bericht über alle geschrieben. Das Spiel verlassen, während es hängt, und das Protokoll weitergeben, bevor es neu gestartet wird. Wirkt beim nächsten Start der App."))
-                                        .font(.caption).foregroundStyle(.secondary)
-                                    Text(status).font(.footnote).foregroundStyle(.secondary)
-                                    if !log.isEmpty {
-                                        ShareLink(item: log) {
-                                            Label(klT("Export log", "Protokoll weitergeben"), systemImage: "square.and.arrow.up")
-                                        }
-                                    }
-                                    Text(log.isEmpty ? klT("Nothing has been logged yet.", "Noch nichts protokolliert.") : String(log.suffix(6000)))
-                                        .font(.system(.caption2, design: .monospaced))
-                                        .textSelection(.enabled)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                            }
-                        }
-                        .padding(.top, 10)
+        KleptonSettingsWindow(started: running || finished || run.started,
+                              measureRoom: { showSettings = false; openRoom(.setup) },
+                              done: { showSettings = false }) {
+            KLSection(title: klT("This run", "Dieser Lauf")) {
+                Toggle(klT("Record what the game waits for", "Aufzeichnen, worauf das Spiel wartet"),
+                       isOn: $diagWaiters)
+                Text(klT("For a game that stops in a loading screen. Every few seconds the log notes which parts of the game are waiting for what, and a report of all of them is written when you leave the game. Leave the game while it is stuck and pass the log on before you start it again. Takes effect the next time the app starts.",
+                         "Für ein Spiel, das in einem Ladebildschirm stehen bleibt. Alle paar Sekunden steht im Protokoll, welche Teile des Spiels worauf warten, und beim Verlassen wird ein Bericht über alle geschrieben. Das Spiel verlassen, während es hängt, und das Protokoll weitergeben, bevor es neu gestartet wird. Wirkt beim nächsten Start der App."))
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(status).font(.footnote).foregroundStyle(.secondary)
+                if !log.isEmpty {
+                    ShareLink(item: log) {
+                        Label(klT("Export log", "Protokoll weitergeben"), systemImage: "square.and.arrow.up")
                     }
                 }
-                .padding(.horizontal, 40).padding(.vertical, 24)
-            }
-            .navigationTitle(Self.productTitle)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(klT("Done", "Fertig")) { showSettings = false }
-                }
+                Text(log.isEmpty ? klT("Nothing has been logged yet.", "Noch nichts protokolliert.") : String(log.suffix(6000)))
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -1549,7 +1310,7 @@ struct BootView: View {
 
             // Half-Life: Alyx's picture-against-smoothness choice, above the Start
             // button because it is read once, when the run starts.
-            if klIsAlyx() { AlyxPanel(started: running || finished) }
+            if klIsAlyx() { AlyxPicturePage() }
 
             // Resolution and MetalFX in view, as on a player's settings page:
             // the two dials of the picture's size, not folded away in Rendering.
