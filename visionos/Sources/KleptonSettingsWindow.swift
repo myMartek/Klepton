@@ -305,6 +305,10 @@ enum KLHelp {
                                + (KLDevice.kind == .m2 ? " Diese Vision Pro hat den M2: Ihr Display kann keine 120 Hz." : ""),
                                pictures: [KLHelpPicture(en: "Frame rate", de: "Bildrate", asset: "KLHelp-framerate")],
                                noteEN: nextStartEN, noteDE: nextStartDE)
+        case "steamCloud":
+            return KLHelpEntry(en: "Steam Cloud", de: "Steam Cloud",
+                               textEN: "Keeps this game's saves in step with your Steam Cloud, in both directions, at every start – so you can go on where you stopped on a PC, and back. The game app signs in to Steam itself, once: your password goes to Steam only, and what the app keeps is a sign-in token in this Vision Pro's keychain. Off: the saves stay on this Vision Pro only.",
+                               textDE: "Gleicht die Spielstände dieses Spiels bei jedem Start mit deiner Steam Cloud ab, in beide Richtungen – so spielst du am PC weiter, wo du hier aufgehört hast, und zurück. Die App des Spiels meldet sich einmal selbst bei Steam an: Dein Passwort geht nur an Steam, die App behält nur ein Anmelde-Token im Schlüsselbund dieser Vision Pro. Aus: Die Spielstände bleiben nur auf dieser Vision Pro.")
         case "cadence":
             return KLHelpEntry(en: "Frame cadence", de: "Bildtakt",
                                textEN: "Every second refresh: the game draws an even half of the display's pictures – \(rates.mixed / 2) of \(rates.mixed), or \(rates.full / 2) of \(rates.full) – and your head's movement is still corrected at the full rate. For a game that does not quite hold the full rate and stutters unevenly; the graphics chip also gets time to cool. Every refresh: as many as the game manages, which is uneven when a picture takes a little too long.",
@@ -671,7 +675,7 @@ struct KLToggleRow: View {
 // MARK: - The window
 
 enum KLSettingsPageID: String, Hashable, CaseIterable {
-    case presets, picture, motion, immersion, controls, room, game, advanced, diagnostics
+    case presets, steamCloud, picture, motion, immersion, controls, room, game, advanced, diagnostics
 }
 
 struct KleptonSettingsWindow<Diagnostics: View>: View {
@@ -698,6 +702,13 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
                 Section {
                     row(.presets, klT("Presets", "Presets"), "slider.horizontal.3",
                         KLPictureNow.activeName() ?? klT("Custom", "Eigene"))
+                    // A page of its own, right under the presets (the owner's wish, 2026-11-16), in every game that
+                    // keeps its saves in Steam Cloud (KLSteamCloud.game; Half-Life: Alyx so far).
+                    if KLSteamCloud.game != nil {
+                        row(.steamCloud, "Steam Cloud", "icloud",
+                            KLSteamCloud.enabled ? (KLSteamCloud.shared.accountName.isEmpty ? klT("Not signed in", "Nicht angemeldet") : klT("On", "An"))
+                                                 : klT("Off", "Aus"))
+                    }
                 }
                 Section(klT("Look", "Bild")) {
                     row(.picture, klT("Picture", "Bild"), "sparkles.tv", pictureValue)
@@ -711,7 +722,7 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
                 Section(klT("Play", "Spielen")) {
                     row(.controls, klT("Controls", "Steuerung"), "gamecontroller")
                     row(.room, klT("Play area", "Spielbereich"), "square.dashed")
-                    row(.game, isAlyx ? klT("Language & saves", "Sprache & Spielstände") : klT("Game", "Spiel"),
+                    row(.game, isAlyx ? klT("Language", "Sprache") : klT("Game", "Spiel"),
                         "character.bubble")
                 }
                 Section {
@@ -764,6 +775,10 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
             KLSettingsPage(title: klT("Presets", "Presets"), help: "presets", side: AnyView(KLPresetChanges())) {
                 KLPresetsPage(started: started)
             }
+        case .steamCloud:
+            KLSettingsPage(title: "Steam Cloud", help: "steamCloud") {
+                KLSteamCloudPanel().klHelp("steamCloud")
+            }
         case .picture:
             KLSettingsPage(title: klT("Picture", "Bild"), help: isAlyx ? "alyx.size" : "resolution") {
                 if isAlyx { AlyxPicturePage() } else { KLPicturePage() }
@@ -787,7 +802,7 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
                 RoomSettingsView(measure: measureRoom).klHelp("room")
             }
         case .game:
-            KLSettingsPage(title: isAlyx ? klT("Language & saves", "Sprache & Spielstände") : klT("Game", "Spiel"),
+            KLSettingsPage(title: isAlyx ? klT("Language", "Sprache") : klT("Game", "Spiel"),
                            help: isAlyx ? "alyx.language" : "game") {
                 KLGamePage()
             }
@@ -1365,7 +1380,6 @@ struct KLGamePage: View {
     var body: some View {
         if klIsLauncher() { LauncherPanel() }
         if klIsAlyx() {
-            KLSteamCloudPanel()
             AlyxLanguageView().klHelp("alyx.language")
         } else {
             KLSection(title: klT("Language", "Sprache")) { GameLanguageView().klHelp("language") }
