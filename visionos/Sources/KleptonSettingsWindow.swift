@@ -732,6 +732,14 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
             }
             .navigationTitle(klT("Settings", "Einstellungen"))
             .navigationSplitViewColumnWidth(min: 260, ideal: 290, max: 340)
+            // The way back to the start window. In the sidebar's own bar: a toolbar on the NavigationSplitView itself is
+            // outside both columns, and visionOS draws it nowhere – the window then had no way back to Start at all.
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { done() } label: { Label(klT("Back", "Zurück"), systemImage: "chevron.backward") }
+                        .help(klT("Back to the start window", "Zurück zum Startfenster"))
+                }
+            }
         } detail: {
             page(selection ?? .presets)
                 .id(selection)
@@ -739,11 +747,6 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
                 .background { KLFollowChanges(active: selection != .presets) }
         }
         .environmentObject(focus)
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button(klT("Done", "Fertig")) { done() }
-            }
-        }
     }
 
     private var pictureValue: String {
