@@ -591,6 +591,14 @@ _hero = _art_path(f"StartHero-{KLT['name']}.imageset")
 if _hero:
     _shutil.copytree(_hero, _os.path.join(_cat_abs, "StartHero.imageset"))
 
+# The settings window's explanation pictures (SettingsHelp/README.md): the same
+# general pictures in every app, asked for by name (KLHelpImage).
+_help_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "SettingsHelp")
+if _os.path.isdir(_help_dir):
+    for _set in sorted(_os.listdir(_help_dir)):
+        if _set.endswith(".imageset"):
+            _shutil.copytree(_os.path.join(_help_dir, _set), _os.path.join(_cat_abs, _set))
+
 # The two files apktool decodes out of the APK and a headset cannot (the
 # manifest is binary XML in the archive): carried as data assets, so the in-app
 # data panel can put them beside the assets it unpacks. They describe exactly
@@ -628,6 +636,7 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonSurrealAim.swift", "KleptonSurrealAimView.swift", "KleptonSurrealSDK.swift",
          "KleptonMetalFXPreset.swift", "KleptonMetalFXAlpha.swift",
          "KleptonEyeMax.swift", "KleptonOverlayDepth.swift", "KleptonHologram.swift",
+         "KleptonPictureProfile.swift", "KleptonSettingsWindow.swift",
          "KleptonWalkaboutSave.swift",
          "KleptonRealityPresent.swift",
          "KleptonRoomStore.swift", "KleptonRoomSpace.swift", "KleptonBoundary.swift"]

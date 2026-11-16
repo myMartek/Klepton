@@ -1146,7 +1146,12 @@ enum AlyxPreset: Int, CaseIterable, Identifiable {
     private static var large: AlyxQuality { AlyxDevice.fast ? .maximum : .sharp }
 }
 
-struct AlyxPanel: View {
+/// Alyx's picture, on the settings window's Picture page: resolution and MetalFX,
+/// then its nine dials. Which preset they make is the Presets page's business
+/// (KleptonPictureProfile: "Vision Pro M5" is Balanced, "M5 Quality" Sharp with
+/// the whole field of view, "M5 Performance" Balanced at 75 % with MetalFX).
+/// What each dial does is in the column on the right (KLHelp, "alyx.*").
+struct AlyxPicturePage: View {
     @AppStorage(AlyxQuality.storageKey) private var quality = AlyxPreset.balanced.dials.quality.rawValue
     @AppStorage(AlyxEdges.storageKey) private var edges = AlyxPreset.balanced.dials.edges.rawValue
     @AppStorage(AlyxView.storageKey) private var view = AlyxPreset.balanced.dials.view.rawValue
@@ -1156,203 +1161,131 @@ struct AlyxPanel: View {
     @AppStorage(AlyxEffects.storageKey) private var effects = AlyxPreset.balanced.dials.effects.rawValue
     @AppStorage(AlyxTexturePool.storageKey) private var texturePool = AlyxPreset.balanced.dials.texturePool.rawValue
     @AppStorage(AlyxTextureCap.storageKey) private var textureCap = AlyxPreset.balanced.dials.textureCap.rawValue
-    /// "Custom" was chosen: the dials are shown even while they happen to be a preset's.
-    @AppStorage("alyx.custom") private var customChosen = false
-    @AppStorage(klAlyxLoadingKey) private var loadingScreens = true
-    @AppStorage(AlyxPace.storageKey) private var pace = AlyxPace.game.rawValue
-    @AppStorage(AlyxLanguage.storageKey) private var language = AlyxLanguage.standard.rawValue
-    @AppStorage(AlyxLanguage.voicesKey) private var voices = true
-    @AppStorage(KleptonControllerMode.preferenceKey) private var controllerMode = KleptonControllerMode.selected().rawValue
     @AppStorage(klAlyxLastLeftKey) private var lastLeft = 0
     @AppStorage(klAlyxLastPoolKey) private var lastPool = 0
+    @ObservedObject private var rendering = KleptonRendering.shared
 
-    /// What "Automatic" means beside the chosen picture size, what Glovebox
-    /// uses, and what the last run had left — the three things to choose by.
-    private var texturePoolNote: String {
+    /// What the last run had left, beside the chosen texture memory.
+    private var memoryNote: String? {
+        guard lastLeft > 0, lastPool > 0 else { return nil }
         let q = AlyxQuality(rawValue: quality) ?? .balanced
-        let chosen = AlyxTexturePool(rawValue: texturePool) ?? .automatic
-        var s = klT("How much memory the game may fill with textures, in MB; more keeps distant surfaces finer. “Automatic” is the careful amount for the picture size “\(q.name)”: \(q.texturePoolMB) MB. 2560 MB is what Glovebox uses.",
-                    "Wie viel Speicher das Spiel mit Texturen füllen darf, in MB; mehr hält entfernte Flächen feiner. „Automatisch“ ist der vorsichtige Wert für die Bildgröße „\(q.name)“: \(q.texturePoolMB) MB. 2560 MB nutzt Glovebox.")
-        if lastLeft > 0, lastPool > 0 {
-            let now = chosen.megabytes(for: q)
-            let then = lastLeft - (now - lastPool)
-            s += " " + klT("The last run (\(lastPool) MB) had at least \(lastLeft) MB of memory left.",
-                           "Im letzten Lauf (\(lastPool) MB) blieben mindestens \(lastLeft) MB Speicher frei.")
-            if now != lastPool {
-                s += " " + (then >= 600
-                    ? klT("With \(now) MB about \(then) MB would be left.", "Mit \(now) MB blieben etwa \(then) MB.")
-                    : klT("With \(now) MB only about \(max(then, 0)) MB would be left – the system may end the game.",
-                          "Mit \(now) MB blieben nur etwa \(max(then, 0)) MB – das System kann das Spiel dann beenden."))
-            }
-        } else {
-            s += " " + klT("Every step up takes that much from the memory left; with too little the system ends the game.",
-                           "Jeder Schritt nach oben nimmt so viel vom freien Speicher; bei zu wenig beendet das System das Spiel.")
+        let now = (AlyxTexturePool(rawValue: texturePool) ?? .automatic).megabytes(for: q)
+        let then = lastLeft - (now - lastPool)
+        var s = klT("The last run (\(lastPool) MB) had at least \(lastLeft) MB of memory left.",
+                    "Im letzten Lauf (\(lastPool) MB) blieben mindestens \(lastLeft) MB Speicher frei.")
+        if now != lastPool {
+            s += " " + (then >= 600
+                ? klT("With \(now) MB about \(then) MB would be left.", "Mit \(now) MB blieben etwa \(then) MB.")
+                : klT("With \(now) MB only about \(max(then, 0)) MB would be left – the system may end the game.",
+                      "Mit \(now) MB blieben nur etwa \(max(then, 0)) MB – das System kann das Spiel dann beenden."))
         }
         return s
     }
-    /// True once a run has started: the values were read at its start, so the
-    /// controls then describe the NEXT launch and say so.
-    let started: Bool
 
-    private static let customTag = -1
-
-    /// The preset the dials are set to, if they are one's.
-    private var matching: AlyxPreset? {
-        AlyxPreset.allCases.first {
-            let d = $0.dials
-            return d.quality.rawValue == quality && d.edges.rawValue == edges && d.view.rawValue == view
-                && d.foveation.rawValue == foveation && d.output.rawValue == output
-                && d.cadence.rawValue == cadence && d.effects.rawValue == effects
-                && d.texturePool.rawValue == texturePool && d.textureCap.rawValue == textureCap
-        }
-    }
-
-    private var preset: Binding<Int> {
-        Binding(
-            get: { customChosen ? Self.customTag : (matching?.rawValue ?? Self.customTag) },
-            set: { tag in
-                guard let p = AlyxPreset(rawValue: tag) else { customChosen = true; return }
-                let d = p.dials
-                quality = d.quality.rawValue; edges = d.edges.rawValue; view = d.view.rawValue
-                foveation = d.foveation.rawValue; output = d.output.rawValue
-                cadence = d.cadence.rawValue; effects = d.effects.rawValue
-                texturePool = d.texturePool.rawValue; textureCap = d.textureCap.rawValue
-                customChosen = false
-            })
-    }
-
-    /// One dial of "Custom": its name, its choices, and a sentence on what it does.
-    private func dial<T: Identifiable>(_ title: String, _ selection: Binding<Int>, _ cases: [T],
-                                       name: @escaping (T) -> String, tag: @escaping (T) -> Int,
-                                       note: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.headline)
+    private func dial<T: Identifiable>(_ title: String, _ help: String, _ selection: Binding<Int>, _ cases: [T],
+                                       name: @escaping (T) -> String, tag: @escaping (T) -> Int) -> some View {
+        KLRow(title: title, help: help) {
             Picker(title, selection: selection) {
                 ForEach(cases) { c in Text(name(c)).tag(tag(c)) }
             }
-            .pickerStyle(.segmented)
-            Text(note).font(.footnote).foregroundStyle(.secondary)
+            .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 440)
         }
     }
 
-    /// A small heading inside one of the boxes, above the choice it names.
-    private func heading(_ title: String) -> some View {
-        Text(title).font(.headline)
-    }
-
-    /// The page in five boxes, his order (2026-10-28, "viel zu krass fragmentiert"): Steam Cloud,
-    /// the picture, the controls, the language – and the play area after this view. What only
-    /// measures or tinkers (performance panel, depth samples) is under Advanced.
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            KLSteamCloudPanel()
-            GroupBox(klT("Picture", "Bild")) {
-                VStack(alignment: .leading, spacing: 10) {
-                    heading(klT("Graphics", "Grafik"))
-                    Picker(klT("Graphics", "Grafik"), selection: preset) {
-                        ForEach(AlyxPreset.allCases) { p in Text(p.name).tag(p.rawValue) }
-                        Text(klT("Custom", "Eigene")).tag(Self.customTag)
-                    }
-                    .pickerStyle(.segmented)
-                    if preset.wrappedValue == Self.customTag {
-                        Text(klT("Your own combination. In every row the choice on the left is the lightest and the one on the right the most demanding.",
-                                 "Deine eigene Kombination. In jeder Zeile ist die Wahl links die leichteste und die rechts die aufwendigste."))
-                            .font(.callout).foregroundStyle(.secondary)
-                        // Resolution and MetalFX are not part of a preset: a preset neither sets nor
-                        // locks them, they only have their place here among the other dials.
-                        PicturePrimary(hintFont: .footnote)
-                        dial(klT("Picture size", "Bildgröße"), $quality, AlyxQuality.allCases,
-                             name: { $0.name }, tag: { $0.rawValue }, note: AlyxQuality.note)
-                        dial(klT("Edge smoothing", "Kantenglättung"), $edges, AlyxEdges.allCases,
-                             name: { $0.name }, tag: { $0.rawValue }, note: AlyxEdges.note)
-                        dial(klT("Field of view", "Sichtfeld"), $view, AlyxView.ordered,
-                             name: { $0.name }, tag: { $0.rawValue }, note: AlyxView.note)
-                        dial("Foveated Rendering", $foveation, AlyxFoveation.ordered,
-                             name: { $0.name }, tag: { $0.rawValue }, note: AlyxFoveation.note)
-                        dial(klT("Display output", "Ausgabe aufs Display"), $output, AlyxOutput.ordered,
-                             name: { $0.name }, tag: { $0.rawValue }, note: AlyxOutput.note)
-                        dial(klT("Frame cadence", "Bildtakt"), $cadence, [AlyxCadence.second, .every],
-                             name: { $0.name }, tag: { $0.rawValue }, note: AlyxCadence.note)
-                        dial(klT("Effects", "Effekte"), $effects, AlyxEffects.allCases,
-                             name: { $0.name }, tag: { $0.rawValue }, note: AlyxEffects.note)
-                        dial(klT("Texture memory", "Texturspeicher"), $texturePool, AlyxTexturePool.allCases,
-                             name: { $0.name }, tag: { $0.rawValue }, note: texturePoolNote)
-                        dial(klT("Finest texture", "Feinste Textur"), $textureCap, AlyxTextureCap.allCases,
-                             name: { $0.name }, tag: { $0.rawValue },
-                             note: klT("The finest any single texture is loaded at, in pixels along its edge. 4096 only pays with a large texture memory (about 3.3 GB) and has run the headset out of memory; 1024 is coarser and frees memory.",
-                                       "Wie fein eine einzelne Textur höchstens geladen wird, in Bildpunkten Kantenlänge. 4096 lohnt nur mit sehr großem Texturspeicher (rund 3,3 GB) und hat dem Headset schon den Speicher ausgehen lassen; 1024 ist gröber und spart Speicher."))
-                    } else if let p = matching {
-                        Text(p.note).font(.callout).foregroundStyle(.secondary)
-                    }
-                    Divider()
-                    heading(klT("Frame generation", "Zwischenbilder"))
-                    FrameGenPicker()
-                    Divider()
-                    heading(klT("Frame rate", "Bildrate"))
-                    FrameRatePicker()
+        KLSection(title: klT("Size", "Größe")) {
+            HStack {
+                Text(klT("Resolution", "Auflösung"))
+                Slider(value: rendering.renderScaleByHand, in: KleptonRendering.minRenderScale...1.0, step: 0.05)
+                Text(String(format: "%.0f %%", rendering.renderScale * 100))
+                    .monospacedDigit().frame(width: 64, alignment: .trailing)
+            }
+            .klHelp("resolution")
+            if KleptonMetalFX.deviceSupported {
+                MetalFXSwitch(title: klT("MetalFX upscaling", "MetalFX-Hochskalieren"), hintFont: .footnote)
+                    .klHelp("metalfx")
+            }
+            dial(klT("Picture size", "Bildgröße"), "alyx.size", $quality, AlyxQuality.allCases,
+                 name: { $0.name }, tag: { $0.rawValue })
+            dial(klT("Field of view", "Sichtfeld"), "alyx.view", $view, AlyxView.ordered,
+                 name: { $0.name }, tag: { $0.rawValue })
+        }
+        KLSection(title: klT("Detail", "Details")) {
+            dial(klT("Edge smoothing", "Kantenglättung"), "alyx.edges", $edges, AlyxEdges.allCases,
+                 name: { $0.name }, tag: { $0.rawValue })
+            dial("Foveated Rendering", "alyx.foveation", $foveation, AlyxFoveation.ordered,
+                 name: { $0.name }, tag: { $0.rawValue })
+            dial(klT("Display output", "Ausgabe aufs Display"), "alyx.output", $output, AlyxOutput.ordered,
+                 name: { $0.name }, tag: { $0.rawValue })
+            dial(klT("Effects", "Effekte"), "alyx.effects", $effects, AlyxEffects.allCases,
+                 name: { $0.name }, tag: { $0.rawValue })
+            dial(klT("Frame cadence", "Bildtakt"), "alyx.cadence", $cadence, [AlyxCadence.second, .every],
+                 name: { $0.name }, tag: { $0.rawValue })
+        }
+        KLSection(title: klT("Textures", "Texturen")) {
+            dial(klT("Texture memory", "Texturspeicher"), "alyx.pool", $texturePool, AlyxTexturePool.allCases,
+                 name: { $0.name }, tag: { $0.rawValue })
+            if let memoryNote {
+                Text(memoryNote).font(.footnote).foregroundStyle(.secondary).klHelp("alyx.pool")
+            }
+            dial(klT("Finest texture", "Feinste Textur"), "alyx.cap", $textureCap, AlyxTextureCap.allCases,
+                 name: { $0.name }, tag: { $0.rawValue })
+        }
+    }
+}
+
+/// Alyx's controls: the controllers, walking speed and the card after loading.
+struct AlyxControlsView: View {
+    @AppStorage(klAlyxLoadingKey) private var loadingScreens = true
+    @AppStorage(AlyxPace.storageKey) private var pace = AlyxPace.game.rawValue
+    @AppStorage(KleptonControllerMode.preferenceKey) private var controllerMode = KleptonControllerMode.selected().rawValue
+
+    var body: some View {
+        KLSection(title: klT("Controllers", "Controller")) {
+            KleptonControllerSettingsView(boxed: false)
+        }
+        .klHelp("controllers")
+        KLSection(title: klT("Moving", "Bewegen")) {
+            KLRow(title: klT("Walking speed", "Laufgeschwindigkeit"), help: "alyx.controls") {
+                Picker(klT("Walking speed", "Laufgeschwindigkeit"), selection: $pace) {
+                    ForEach(AlyxPace.allCases) { p in Text(p.name).tag(p.rawValue) }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 440)
             }
-            GroupBox(klT("Controls", "Steuerung")) {
-                VStack(alignment: .leading, spacing: 10) {
-                    heading(klT("Controllers", "Controller"))
-                    KleptonControllerSettingsView(boxed: false)
-                    Divider()
-                    heading(klT("Walking speed", "Laufgeschwindigkeit"))
-                    Picker(klT("Walking speed", "Laufgeschwindigkeit"), selection: $pace) {
-                        ForEach(AlyxPace.allCases) { p in Text(p.name).tag(p.rawValue) }
-                    }
-                    .pickerStyle(.segmented)
-                    Text(klT("How fast you move with the stick, walking and in a fight. Higher is faster; “Game's own” leaves the game its two speeds. Teleporting is not affected.",
-                             "Wie schnell du dich mit dem Stick bewegst, beim Gehen und im Kampf. Höher ist schneller; „Wie im Spiel“ lässt dem Spiel seine beiden Geschwindigkeiten. Teleportieren ist davon nicht betroffen."))
-                        .font(.callout).foregroundStyle(.secondary)
-                    Divider()
-                    Toggle(klT("Wait for the trigger after loading", "Nach dem Laden auf den Trigger warten"), isOn: $loadingScreens)
-                    Text(loadingScreens
-                         ? klT("When a level is ready the game shows a card and starts when you pull the trigger.",
-                               "Ist ein Level fertig geladen, zeigt das Spiel eine Karte und beginnt, wenn du den Trigger ziehst.")
-                         : klT("The game continues by itself as soon as a level is ready.",
-                               "Das Spiel geht von selbst weiter, sobald ein Level fertig geladen ist."))
-                        .font(.callout).foregroundStyle(.secondary)
-                    if controllerMode == KleptonControllerMode.standard.rawValue {
-                        Divider()
-                        heading(klT("Game controller", "Gamecontroller"))
-                        GamepadStatusView()
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Toggle(klT("Wait for the trigger after loading", "Nach dem Laden auf den Trigger warten"), isOn: $loadingScreens)
+                .klHelp("alyx.controls")
+        }
+        if controllerMode == KleptonControllerMode.standard.rawValue {
+            KLSection(title: klT("Game controller", "Gamecontroller")) { GamepadStatusView() }
+        }
+    }
+}
+
+/// Alyx's language: menus and subtitles from the game, voices from a fan-made
+/// voice-over where one was installed.
+struct AlyxLanguageView: View {
+    @AppStorage(AlyxLanguage.storageKey) private var language = AlyxLanguage.standard.rawValue
+    @AppStorage(AlyxLanguage.voicesKey) private var voices = true
+
+    var body: some View {
+        KLSection(title: klT("Language", "Sprache")) {
+            Picker(klT("Language", "Sprache"), selection: $language) {
+                ForEach(AlyxLanguage.allCases) { l in Text(l.title).tag(l.rawValue) }
             }
-            GroupBox(klT("Language", "Sprache")) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Picker(klT("Language", "Sprache"), selection: $language) {
-                        ForEach(AlyxLanguage.allCases) { l in Text(l.title).tag(l.rawValue) }
-                    }
-                    .pickerStyle(.segmented)
-                    let chosen = AlyxLanguage(rawValue: language) ?? .english
-                    let staged = chosen.voiceArchive != nil
-                    if staged {
-                        Toggle(klT("\(chosen.title) voices", "Stimmen auf \(chosen.title)"), isOn: $voices)
-                    }
-                    Text(chosen == .english
-                         ? klT("Menus, subtitles and voices are English, as the game was recorded.",
-                               "Menüs, Untertitel und Stimmen sind englisch, wie das Spiel aufgenommen wurde.")
-                         : staged
-                           ? (voices ? klT("Menus and subtitles are the game's own \(chosen.title); the voices are the fan-made voice-over that was installed with the game.",
-                                           "Menüs und Untertitel bringt das Spiel selbst mit; die Stimmen sind die Fan-Vertonung, die mit dem Spiel installiert wurde.")
-                                     : klT("Menus and subtitles are the game's own \(chosen.title); the voices stay English.",
-                                           "Menüs und Untertitel bringt das Spiel selbst mit; die Stimmen bleiben englisch."))
-                           : klT("Menus and subtitles are the game's own \(chosen.title); the voices stay English. A fan-made voice-over can be added when the game is installed from the Mac.",
-                                 "Menüs und Untertitel bringt das Spiel selbst mit; die Stimmen bleiben englisch. Eine Fan-Vertonung lässt sich bei der Installation vom Mac aus hinzufügen."))
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            .pickerStyle(.segmented)
+            let chosen = AlyxLanguage(rawValue: language) ?? .english
+            if chosen.voiceArchive != nil {
+                Toggle(klT("\(chosen.title) voices", "Stimmen auf \(chosen.title)"), isOn: $voices)
             }
-            if started {
-                Label(klT("The game is running: these apply the next time it is started.",
-                          "Das Spiel läuft: Das gilt ab dem nächsten Start."),
-                      systemImage: "info.circle")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
+            Text(chosen == .english
+                 ? klT("Menus, subtitles and voices are English, as the game was recorded.",
+                       "Menüs, Untertitel und Stimmen sind englisch, wie das Spiel aufgenommen wurde.")
+                 : chosen.voiceArchive != nil && voices
+                   ? klT("Menus and subtitles are the game's own; the voices are the fan-made voice-over that was installed with the game.",
+                         "Menüs und Untertitel bringt das Spiel selbst mit; die Stimmen sind die Fan-Vertonung, die mit dem Spiel installiert wurde.")
+                   : klT("Menus and subtitles are the game's own; the voices stay English.",
+                         "Menüs und Untertitel bringt das Spiel selbst mit; die Stimmen bleiben englisch."))
+                .font(.footnote).foregroundStyle(.secondary)
         }
     }
 }
