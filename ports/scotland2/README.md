@@ -1,6 +1,12 @@
 # Scotland2 port component
 
 Current build and update instructions are in [CUSTOM-SONGS.md](../../CUSTOM-SONGS.md).
+
+What AVP Play builds the mods from is `prebuilt/<version code>` (named by
+`avp-profiles.json`), a git-ignored folder that a toolchain package must carry:
+a package made from a checkout without it builds Beat Saber without mods. That
+happened with toolchain 896 (AVP Play 1.10.17 and 1.10.18); 897 brings the
+folder back (CUSTOM-SONGS.md, "Through AVP Play", says how to check a package).
 The selected release composition is `selected-mods.json`. `build_release.py`
 exports source into a private workspace; `bootstrap.py` verifies dependencies and
 reconstructs original source; `package_release.py` builds that one composition.
