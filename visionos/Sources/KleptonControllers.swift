@@ -253,10 +253,17 @@ struct KLSenseTune {
     /// Gun Club VR: the general pitch, the gun's grip 3 cm lower and 3 cm further
     /// back than the general offset, as its owner aligned it (fix 44,
     /// 2026-10-15, on their headset; not run here).
+    /// Hot Dogs, Horseshoes & Hand Grenades 2 (Meta Store build): the general
+    /// pitch, 0.5 cm more in Y and 8 cm more in Z (+Z is back along the hilt)
+    /// than the general offset, as its owner aligned it with HandTuneView while playing (on a
+    /// Vision Pro with PSVR2 Sense controllers, 2026-11-15; one person's by-eye
+    /// value, so a second opinion is welcome). The game reads its controllers
+    /// through the OVRPlugin nodes, so this path is the one that moves them.
     static let targetHand: (pitch: Float, pos: SIMD3<Float>)? = {
         switch klTargetName() {
         case "x4015163475201433": return (-30, SIMD3<Float>(-0.010, 0.005, 0.055))
         case "x2285803881494677": return (-37, SIMD3<Float>(-0.005, -0.010, 0.010))
+        case "x26291709480509388": return (-37, SIMD3<Float>(-0.005, 0.025, 0.060))
         default: return nil
         }
     }()
