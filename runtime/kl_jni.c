@@ -1705,8 +1705,8 @@ static const klj_binding *klj_resolve_by_name(const char *cls, const char *name,
 }
 
 // The Sentry crash reporter's Java SDK. Arizona Sunshine 2
-// (x5245041552210029) ships sentry-unity, whose Android integration asks the
-// Java side for its hub (Sentry.getCurrentHub) right after the splash, then
+// (x5245041552210029, and x1540210, the build Steam ships) ships
+// sentry-unity, whose Android integration asks the Java side for its hub (Sentry.getCurrentHub) right after the splash, then
 // sets tags, builds Breadcrumbs (writing their fields) and reads SentryLevel
 // constants — each of which aborted the run. There is no Sentry Java SDK
 // running on this host, so every io.sentry call and field read answers
@@ -1719,7 +1719,8 @@ static int klj_drop_sentry(const klj_wanted *w) {
     static int drop = -1;
     if (drop < 0) {
         const char *t = kl_driver_target_name();
-        drop = kl_env_on("KL_JNI_DROP_SENTRY", t && strcmp(t, "x5245041552210029") == 0);
+        drop = kl_env_on("KL_JNI_DROP_SENTRY", t && (strcmp(t, "x5245041552210029") == 0 ||
+                                                      strcmp(t, "x1540210") == 0));
     }
     if (!drop) return 0;
     static int said;   // the first few name the entries; the rest are noise

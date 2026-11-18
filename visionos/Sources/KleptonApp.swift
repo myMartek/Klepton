@@ -265,6 +265,8 @@ enum Lifecycle {
                   : "[app] the guest did not finish in time — exiting")
             fflush(nil)
         }
+        // The Surreal SDK's destructors run inside exit; nothing may still be calling it.
+        KleptonSurrealSDK.shared.quiesceForExit()
         exit(0)
     }
 }

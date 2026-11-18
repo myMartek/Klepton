@@ -1236,11 +1236,13 @@ static void mprobe_call_spec(unsigned frame, const char *spec, int nth) {
     if (!sep) { fprintf(stderr, "  [mprobe] call: '%s' is not Class::Method\n", spec); return; }
     *sep = 0;
     char *meth = sep + 2;
-    // Method("text",true,3): up to four arguments — a quoted one is a string,
-    // true/false and whole numbers go as the value they are. (A script step's
-    // arguments: how a guest's own loader is told WHICH scene.)
+    // Method("text",true,3,1.5): up to four arguments — a quoted one is a
+    // string, true/false and whole numbers go as the value they are, and one
+    // with a decimal point as a float. (A script step's arguments: how a
+    // guest's own loader is told WHICH scene.)
     void *argv[4];
     static int32_t ival[4];
+    int isfloat[4] = {0};
     int argc = 0;
     char *paren = strchr(meth, '(');
     if (paren) {
@@ -1255,6 +1257,11 @@ static void mprobe_call_spec(unsigned frame, const char *spec, int nth) {
                 char *q = strrchr(tok, '"');
                 if (q) *q = 0;
                 argv[argc] = il.string_new(tok);
+            } else if (strchr(tok, '.')) {
+                float f = strtof(tok, NULL);
+                memcpy(&ival[argc], &f, sizeof f);
+                isfloat[argc] = 1;
+                argv[argc] = &ival[argc];
             } else {
                 ival[argc] = !strcmp(tok, "true") ? 1 : !strcmp(tok, "false") ? 0 : (int32_t)strtol(tok, NULL, 0);
                 argv[argc] = &ival[argc];
@@ -1269,8 +1276,35 @@ static void mprobe_call_spec(unsigned frame, const char *spec, int nth) {
     Il2CppClass *k = find_class(ns, cls);
     if (!k) { fprintf(stderr, "  [mprobe f%u] call: no class %s.%s\n", frame, ns, cls); return; }
     const MethodInfo *m = il.class_get_method_from_name(k, meth, argc);
-    if (!m) { fprintf(stderr, "  [mprobe f%u] call: %s has no %s with %d argument(s)\n", frame, cls, meth, argc); return; }
     kl_image *img = kl_find_image("libil2cpp.so");
+    if (!m && argc == 1 && argv[0] == &ival[0] && img) {
+        // A setter IL2CPP stripped because the game never calls it (Arizona
+        // Sunshine 2 has QualitySettings.get_lodBias and no set_lodBias) is
+        // still in the engine: Unity binds the managed property to a native
+        // internal call, and il2cpp_resolve_icall finds that by name. A static
+        // setter of one int or float only.
+        typedef void *(*icall_fn)(const char *);
+        icall_fn resolve = (icall_fn)kl_sym(img, "il2cpp_resolve_icall");
+        char name[200];
+        const char *sig = isfloat[0] ? "System.Single" : "System.Int32";
+        void *fn = NULL;
+        if (resolve) {
+            snprintf(name, sizeof name, "%s%s%s::%s(%s)", ns, *ns ? "." : "", cls, meth, sig);
+            fn = resolve(name);
+            if (!fn) { snprintf(name, sizeof name, "%s%s%s::%s", ns, *ns ? "." : "", cls, meth); fn = resolve(name); }
+        }
+        if (!fn) { fprintf(stderr, "  [mprobe f%u] call: %s has no %s with 1 argument(s), nor an internal call by that name\n", frame, cls, meth); return; }
+        float f; memcpy(&f, &ival[0], sizeof f);
+        if (isfloat[0]) {
+            fprintf(stderr, "  [mprobe f%u] call: %s(%g) through the engine's internal call %s\n", frame, meth, (double)f, name);
+            ((void (*)(float))fn)(f);
+        } else {
+            fprintf(stderr, "  [mprobe f%u] call: %s(%d) through the engine's internal call %s\n", frame, meth, ival[0], name);
+            ((void (*)(int32_t))fn)(ival[0]);
+        }
+        return;
+    }
+    if (!m) { fprintf(stderr, "  [mprobe f%u] call: %s has no %s with %d argument(s)\n", frame, cls, meth, argc); return; }
     typedef uint32_t (*m_flags_fn)(const MethodInfo *, uint32_t *);
     m_flags_fn m_flags = img ? (m_flags_fn)kl_sym(img, "il2cpp_method_get_flags") : NULL;
     int is_static = m_flags && (m_flags(m, NULL) & 0x10);
@@ -2147,7 +2181,41 @@ static void brink_look_pinch(void) {
     } else fprintf(stderr,"  [brink-select] hand%d ray did not hit an enabled ButtonBase\n",hand);
 }
 
+// KL_UNITY_LOD_BIAS=<x>: QualitySettings.lodBias for a Unity guest, set again
+// every 600 frames from frame 300 so a scene load that resets it does not keep
+// it. A game built for a Quest keeps its detailed models only up close
+// (Arizona Sunshine 2 runs at 0.4, where 1 to 2 is usual on a PC); the Vision
+// Pro's GPU has room for more, and the detailed meshes are already loaded, so
+// it costs fill and no memory. Set through the engine's internal call: IL2CPP
+// strips the managed setter of a game that never calls it.
+static void unity_lod_bias(unsigned frame) {
+    static int state;             // 0 unread, 1 on, -1 off
+    static float bias;
+    static void (*set)(float);
+    if (state < 0 || frame < 300 || (frame - 300) % 600) return;
+    if (!state) {
+        bias = kl_env_float("KL_UNITY_LOD_BIAS", 0.0f);
+        state = bias > 0.0f ? 1 : -1;
+        if (state < 0) return;
+    }
+    if (!set) {
+        kl_image *img = kl_find_image("libil2cpp.so");
+        void *(*resolve)(const char *) = img ? (void *(*)(const char *))kl_sym(img, "il2cpp_resolve_icall") : NULL;
+        if (resolve) set = (void (*)(float))resolve("UnityEngine.QualitySettings::set_lodBias(System.Single)");
+        if (!set) {
+            fprintf(stderr, "  [unity] KL_UNITY_LOD_BIAS=%g: no QualitySettings::set_lodBias in this engine — left as the game set it\n",
+                    (double)bias);
+            state = -1;
+            return;
+        }
+        fprintf(stderr, "  [unity] LOD bias %g from frame %u (KL_UNITY_LOD_BIAS), set again every 600 frames\n",
+                (double)bias, frame);
+    }
+    set(bias);
+}
+
 void kl_mprobe_tick(unsigned frame) {
+    unity_lod_bias(frame);
     brink_look_pinch();
     brink_real_hands(frame);
     brink_wrist_ui(frame);

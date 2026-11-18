@@ -60,7 +60,9 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   Java SDK: they answer zero/NULL/void (writes are not kept), as an SDK that
   was never started, and the first 16 are named in the log. Default 1 for
   `x5245041552210029` (Arizona Sunshine 2, whose sentry-unity asks for
-  `Sentry.getCurrentHub` after its splash), else 0 — the stop by name.
+  `Sentry.getCurrentHub` after its splash) and `x1540210` (the same game as
+  Steam ships it, whose breadcrumbs otherwise fill the field-write table in
+  the first level), else 0 — the stop by name.
 - `KL_MP14_TRACE=1` — (`runtime/jni/kl_jni_ue4.c`) name the first few hundred
   calls a guest makes on UE4's `MediaPlayer14` (position, frame fetch, playing,
   complete, resolution change, start/pause/seek), each with the thread it came
@@ -1533,11 +1535,18 @@ behind "no controllers render". Diagnostic only, off unless asked for.
 - `KL_PROBE_STRINGS=<Namespace.Class>::<field>` — a List of strings on the
   class's `Instance`, printed as it grows (a test driver's own results).
 - `KL_PROBE_FIND` with an `@Class` part lists that class's fields as well.
+- `KL_UNITY_LOD_BIAS=<x>` — (`runtime/diag/kl_mprobe.c`) `QualitySettings.lodBias`
+  for a Unity guest, through the engine's internal call (IL2CPP strips the
+  managed setter of a game that never calls it), from frame 300 and again every
+  600 frames. The start window's test switch "Detail: detailed models further
+  away" sets 1.5 (Arizona Sunshine 2, Steam build, runs at 0.4). Logs
+  `[unity] LOD bias`.
 - `KL_PROBE_SCRIPT=<frame>:<Namespace.Class>::<Method>[(args)][#n];<frame>:...`
   — several calls like `KL_PROBE_CALL`'s, each at its frame (rising), separated
   by `;`. Arguments, up to four: a quoted one is a string, `true`/`false` and
-  whole numbers go as the value they are; the overload is picked by their
-  COUNT, so a method with two one-argument overloads gets whichever comes first
+  whole numbers go as the value they are, one with a decimal point as a float;
+  the overload is picked by their COUNT, so a method with two one-argument
+  overloads gets whichever comes first
   (`MultiplayerLauncher::LoadScene` took a string for a `CourseInfoAsset` and
   threw). With `#n` the call goes to the n-th object of that class in the
   loaded scenes (inactive ones too, by instance id), and the line says that
@@ -1548,6 +1557,10 @@ behind "no controllers render". Diagnostic only, off unless asked for.
   basement (part of the main menu), `Mighty.Homestar.HSLauncher::Launch#n`
   starts one of the 36 launchers there and
   `Mighty.Homestar.HomestarMenuUtility::ReturnToBasement` comes back.
+- A static setter of one int or float that IL2CPP stripped is called through the
+  engine's internal call of that name (`il2cpp_resolve_icall`): Arizona Sunshine 2
+  has `QualitySettings::get_lodBias` and no `set_lodBias`, and
+  `UnityEngine.QualitySettings::set_lodBias(1.5)` still sets it.
 - `KL_PROBE_KEEP` without `KL_PROBE_CALL` only lists (and filters) at
   `KL_PROBE_CALL_FROM` — how `tools/pipeline_tour.py` reads the names a guest
   loads its scenes by.
@@ -1961,16 +1974,17 @@ puts the camera on the ground with its hands underneath it.
   "Function requires stage_in attributes but no descriptor was set") is created
   again with those locations reading zeroes from a buffer of the layer's own.
   Pipelines that compile are untouched. Default 1 for `x24882487241367228`
-  (Alien: Rogue Incursion), `x5245041552210029` (Arizona Sunshine 2) and
-  `x9269393463181825` (Roboquest VR, Meta Store build: its start-up shader
-  precompile stopped at the first refusal), else 0.
+  (Alien: Rogue Incursion), `x5245041552210029` and `x1540210` (Arizona
+  Sunshine 2, Meta and Steam builds) and `x9269393463181825` (Roboquest VR,
+  Meta Store build: its start-up shader precompile stopped at the first
+  refusal), else 0.
 - `KL_VK_VIN_INT=0|1` — (only with `KL_VK_VIN_FILL` on) the same retry also
   takes a location the state supplies as 32-bit floats but the shader reads as
   int/uint ("Cannot convert attribute from MTLAttributeFormatFloat2 to int4 or
   uint4"): it is declared again with the integer format of the same size,
   which hands the shader the same bits. Default 1 for `x5245041552210029`
-  (Arizona Sunshine 2), else 0 — Alien keeps such a pipeline refused, as it was
-  measured.
+  and `x1540210` (Arizona Sunshine 2, Meta and Steam builds), else 0 — Alien
+  keeps such a pipeline refused, as it was measured.
 - `KL_VK_GRID_DILATE=0|1` — conservative rasterization for draws through a
   100x60 viewport: each is drawn again four times with the viewport moved by
   ±0.49 pixel, so every pixel a primitive touches gets a fragment. HITMAN 3 VR:

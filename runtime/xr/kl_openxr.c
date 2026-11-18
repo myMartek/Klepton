@@ -4933,6 +4933,18 @@ static XrResult klxr_SuggestInteractionProfileBindings(
                 if (strcmp(suffix, "/input/y/click") == 0) { kind = KLXR_SRC_BUTTON_OTHER; bit = KL_OVRP_RAW_Y; }
                 if (strcmp(suffix, "/input/x/touch") == 0 || strcmp(suffix, "/input/y/touch") == 0) kind = KLXR_SRC_NONE;
             }
+            // Arizona Sunshine 2 from Steam binds its "menu" to the Steam Frame's
+            // right menu/click and left view/click. A Touch-shaped controller has one
+            // menu button a hand: the left one comes in as START, which the table
+            // reads for menu/click, and the right one as BACK, which it reads for
+            // view/click — so each of the game's two bindings waited for the other
+            // hand's button, and "press to open menu" answered to nothing (Surreal
+            // Touch, on device, 2026-11-03). Here each hand's own button opens it.
+            if (klxr_target_is("x1540210") && strcmp(profile, KLXR_VALVE_PROFILE) == 0 &&
+                (strcmp(suffix, "/input/menu/click") == 0 || strcmp(suffix, "/input/view/click") == 0)) {
+                kind = KLXR_SRC_BUTTON;
+                bit  = KL_OVRP_RAW_START | KL_OVRP_RAW_BACK;
+            }
             // A BOOLEAN action bound to the bare /input/thumbstick reads the
             // stick's click: the spec has a boolean bound to an identifier take
             // its click component. Served as the whole stick it read the X
