@@ -1116,7 +1116,10 @@ static klj_val klj_GA_forceQuit(void *env, void *self, const klj_val *a, int n) 
     // (moh-exit-no-rhi-teardown, kl_guestpatch.c), and for The 7th Guest VR
     // (x5223884527630557), whose Quit button stops audio, destroys its Vulkan
     // device and then calls ForceQuit with no error kept; ignored, the last
-    // picture froze on the headset (2026-11-12). Off for every other title,
+    // picture froze on the headset (2026-11-12). The same for The Pirate Queen
+    // with Lucy Liu (x5420468924659233): its quit stops audio, destroys the
+    // Vulkan device and calls ForceQuit with no error kept; ignored, the last
+    // picture froze and the game did not end (2026-11-17). Off for every other title,
     // where ForceQuit is still a bail worth staying alive for.
     const char *t = kl_driver_target_name();
     if (kl_env_on("KL_UE4_FORCE_QUIT", t && (strcmp(t, "x3647259232032222") == 0 ||
@@ -1124,7 +1127,9 @@ static klj_val klj_GA_forceQuit(void *env, void *self, const klj_val *a, int n) 
                                              // Journey to Foundation: its Quit tears
                                              // down Vulkan, then ForceQuit; ignored,
                                              // the picture froze (2026-11-16)
-                                             strcmp(t, "x4822681107767272") == 0))) {
+                                             strcmp(t, "x4822681107767272") == 0 ||
+                                             // The Pirate Queen with Lucy Liu: the same
+                                             strcmp(t, "x5420468924659233") == 0))) {
         fprintf(stderr, "  [ue4] ForceQuit obeyed (KL_UE4_FORCE_QUIT): the game quit — ending the run\n");
         fflush(stderr);
         kl_ue4_note_force_quit();

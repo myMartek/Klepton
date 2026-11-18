@@ -2029,7 +2029,9 @@ puts the camera on the ground with its hands underneath it.
   glimpses of models under its UI) and `x5223884527630557` (The 7th Guest
   VR: wrong colours and scattered blocks from the first frame) and
   `x2719294624823942` (Myst: blocks, wrong colours and different pictures per
-  eye right at the start), else 0.
+  eye right at the start) and `x5420468924659233` (The Pirate Queen with Lucy
+  Liu: a chaotic background, blocks, wrong colours, displaced content
+  flickering), else 0.
 - `KL_VK_PASS_BARRIERS=0|1|2` — what happens to a `vkCmdPipelineBarrier`
   recorded INSIDE a dynamic-rendering pass that only makes colour attachments
   readable as input attachments. MoltenVK answers one by ending the Metal pass
@@ -2200,7 +2202,8 @@ puts the camera on the ground with its hands underneath it.
   `moh-exit-no-rhi-teardown` lets `FEngineLoop::Exit` through, and for The 7th
   Guest VR (`x5223884527630557`), whose Quit button tears down Vulkan and then
   calls it; ignored, the last picture froze; and for Journey to Foundation
-  (`x4822681107767272`), which does the same. The bounded quit
+  (`x4822681107767272`) and The Pirate Queen with Lucy Liu
+  (`x5420468924659233`), which do the same. The bounded quit
   that came with the surface around it (`KL_UE4_QUIT_LIMIT`,
   `KL_UE4_QUIT_TRACE`) is not taken.
 - `KL_UE4_CXX_ALLOC=0|1` — (`kl_ue4.c`) bind libc++_shared's own calls to
