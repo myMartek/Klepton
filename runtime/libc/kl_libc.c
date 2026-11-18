@@ -1516,12 +1516,12 @@ void kl_mem_pressure_init(void) {
     dispatch_source_set_event_handler(src, ^{
         // Never delivered here: the handler thread is foreign to the guest
         // (see g_lowmem_os_level). Record the highest urgency seen; the frame
-        // poll delivers it on the Unity thread. Disarm so the poll's one-shot
-        // fires once, the way the immediate call did.
+        // poll delivers it on the Unity thread and disarms there, so it fires
+        // once. Disarming here as well would leave the poll's exchange
+        // reading 0 and the OS warning would never arrive.
         int level = (dispatch_source_get_data(src) & DISPATCH_MEMORYPRESSURE_CRITICAL) ? 2 : 1;
         int prev = atomic_load(&g_lowmem_os_level);
         if (level > prev) atomic_store(&g_lowmem_os_level, level);
-        atomic_store(&g_lowmem_armed, 0);
     });
     dispatch_resume(src);   // deliberately never cancelled: it lives as long as
                             // the process, and there is nothing to release it to

@@ -1014,6 +1014,8 @@ static void kl_dlsym_log_hit(const char *name, void *s) {
 static int kl_dl_refuse_crash_candidate(const char *name, void *v) {
     if (!name || !v) return 0;
     if (strcmp(name, "UnityPluginLoad") != 0) return 0;
+    const char *t = kl_driver_target_name();
+    if (!t || strcmp(t, "x2497738113633933") != 0) return 0;
     size_t off = 0;
     const char *img = kl_addr_image(v, &off);
     if (img && strstr(img, "VuplexWebView")) {

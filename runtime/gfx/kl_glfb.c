@@ -3461,6 +3461,16 @@ static void klfb_BindBufferRange(uint32_t target, uint32_t index, uint32_t buffe
 // is the whole avatar table setup (black bodies; only singular unbinds were
 // ever seen). Fan out to the singular wrappers, which record SSBO bindings
 // and forward everything else to the real entry points.
+// KL_GLFB_MULTIBIND=1/0 overrides; on by default for Bigscreen Beta only.
+static int klfb_multibind_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_GLFB_MULTIBIND", t && strcmp(t, "x2497738113633933") == 0);
+    }
+    return on;
+}
 static void klfb_BindBuffersBase(uint32_t target, uint32_t first, int32_t count, const uint32_t *buffers) {
     static int said;
     if (said < 4) { said++;
@@ -16030,40 +16040,6 @@ static void klfb_BindSampler(uint32_t u, uint32_t s) {
 // says a write was rejected, and which uniform it was aimed at is the question.
 static int glfb_errscan(void);
 static void klfb_uniform_refused(const char *fn, int32_t loc, int32_t count, uint32_t err);
-// Probe for the avatar style table (Bigscreen, 2026-10-24): _UserStyles is a
-// float[360] uniform the avatar shader indexes with (style << 2) into the
-// SSBO tables. Its values decide which table slots the albedo reads —
-// zeros keep _MainTex, out-of-range indices read zero padding (black).
-// One-shot (x2): program, count, first 48 values as float and int.
-static void klfb_uniform1fv_probe(int32_t l, int32_t n, const float *v) {
-    static int done;
-    if (done >= 2 || n < 32 || !v || !g_cur_prog) return;
-    static void (*r_gpi)(uint32_t, uint32_t, int32_t *);
-    static void (*r_gau)(uint32_t, uint32_t, int32_t, int32_t *, int32_t *, uint32_t *, char *);
-    if (!r_gpi) r_gpi = asym("glGetProgramiv");
-    if (!r_gau) r_gau = asym("glGetActiveUniform");
-    if (!r_gpi || !r_gau) return;
-    int32_t nu = 0;
-    r_gpi(g_cur_prog, 0x8B86 /* ACTIVE_UNIFORMS */, &nu);
-    for (int32_t i = 0; i < nu && i < 64; i++) {
-        char name[96]; int32_t len = 0, size = 0; uint32_t type = 0;
-        name[0] = 0;
-        r_gau(g_cur_prog, (uint32_t)i, sizeof name, &len, &size, &type, name);
-        if (strncmp(name, "_UserStyles", 11) != 0) continue;
-        int32_t actual = klfb_actual_loc(g_cur_prog, name);
-        if (actual != klfb_remap_loc(l)) continue;
-        done++;
-        fprintf(stderr, "  [glfb] _UserStyles on program %u (count %d, first 48):",
-                g_cur_prog, n);
-        int m = n < 48 ? n : 48;
-        for (int k = 0; k < m; k++) {
-            if (k % 8 == 0) fprintf(stderr, "\n  [glfb]   [%3d]:", k);
-            fprintf(stderr, " %g(%d)", v[k], (int)v[k]);
-        }
-        fprintf(stderr, "\n");
-        return;
-    }
-}
 #define KLFB_UV(fn, T)                                                        \
     static void (*g_real_##fn)(int32_t, int32_t, const T *);                  \
     static void klfb_##fn(int32_t l, int32_t n, const T *v) {                 \
@@ -16084,20 +16060,8 @@ KLFB_U2(Uniform2f, float) KLFB_U3(Uniform3f, float) KLFB_U4(Uniform4f, float)
 KLFB_U2(Uniform2i, int32_t) KLFB_U3(Uniform3i, int32_t) KLFB_U4(Uniform4i, int32_t)
 KLFB_U1(Uniform1ui, uint32_t) KLFB_U2(Uniform2ui, uint32_t)
 KLFB_U3(Uniform3ui, uint32_t) KLFB_U4(Uniform4ui, uint32_t)
-KLFB_UV(Uniform2fv, float)
+KLFB_UV(Uniform1fv, float) KLFB_UV(Uniform2fv, float)
 KLFB_UV(Uniform3fv, float) KLFB_UV(Uniform4fv, float)
-static void (*g_real_Uniform1fv)(int32_t, int32_t, const float *);
-static void klfb_Uniform1fv(int32_t l, int32_t n, const float *v) {
-    if (!g_real_Uniform1fv) return;
-    klfb_uniform1fv_probe(l, n, v);
-    if (!glfb_errscan() || !a_glGetError) {
-        g_real_Uniform1fv(klfb_remap_loc(l), n, v); return;
-    }
-    while (a_glGetError()) {}
-    g_real_Uniform1fv(klfb_remap_loc(l), n, v);
-    uint32_t e = a_glGetError();
-    if (e) klfb_uniform_refused("glUniform1fv", l, n, e);
-}
 KLFB_UV(Uniform1iv, int32_t) KLFB_UV(Uniform2iv, int32_t)
 KLFB_UV(Uniform3iv, int32_t) KLFB_UV(Uniform4iv, int32_t)
 KLFB_UV(Uniform1uiv, uint32_t) KLFB_UV(Uniform2uiv, uint32_t)
@@ -17322,9 +17286,11 @@ void *kl_glfb_sym(const char *name) {
     }
     // ES 3.1 multi-bind: ANGLE's 3.0 context has neither name, so without
     // this the guest resolves NULL and skips the binds (see above).
-    if (strcmp(name, "glBindBuffersBase") == 0)
+    // Bigscreen only: every other title has run with these names resolving
+    // NULL, and a guest that finds them takes a different bind path.
+    if (klfb_multibind_on() && strcmp(name, "glBindBuffersBase") == 0)
         return glfb_wrap_traced(name, (void *)klfb_BindBuffersBase);
-    if (strcmp(name, "glBindBuffersRange") == 0)
+    if (klfb_multibind_on() && strcmp(name, "glBindBuffersRange") == 0)
         return glfb_wrap_traced(name, (void *)klfb_BindBuffersRange);
     void *fn = klfb_es32_alias(name);
     if (!fn) fn = asym(name);

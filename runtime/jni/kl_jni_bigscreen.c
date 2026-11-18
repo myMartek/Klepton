@@ -391,19 +391,8 @@ static void bsinfo_pump(void *env) {
     }
 }
 
-// Housekeeping for the Movies folder: the delete-flag (see
-// kl_movies_process_delete_flag) is honored wherever Bigscreen touches local
-// films — browsing (RequestMediaInfo) and playback (film open) — because the
-// public-directory query the services layer hooks is never called (0×).
-static void bs_movies_housekeeping(void) {
-    char kp[1024];
-    const char *host = kl_guest_path("/sdcard/Movies", kp, sizeof kp);
-    if (host && *host) kl_movies_process_delete_flag(host);
-}
-
 static klj_val media_request_media_info(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self;
-    bs_movies_housekeeping();
     // argv[0] is the uri here: unlike the (I,...) calls beside this one there
     // is no leading handle, so the first signature arg is at index 0 (reading
     // a[1] took the float bits as a pointer and faulted in klj_str, 2026-10-26).
@@ -472,7 +461,6 @@ static void bs_film_close(void) {
 static void bs_film_open(const char *path) {
     bs_film_close();
     if (!path || !*path) return;
-    bs_movies_housekeeping();
     // Guest spelling ("/storage/emulated/0/Movies/…") names nothing on the
     // host: translate to the container path first, exactly as UE4's
     // MediaPlayer14 does (kl_jni_ue4.c). Without this the open refused with

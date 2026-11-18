@@ -2038,11 +2038,6 @@ static klj_val klj_Environment_getExternalStoragePublicDirectory(void *env, void
     kl_public_dir_for_type(type, path, sizeof path);
     char kp[1024];
     klj_mkdir_p(kl_guest_path(path, kp, sizeof kp));
-    // Delete-flag without a cable: devicectl cannot delete from the container,
-    // so a __delete__.txt list inside Movies names films to unlink. Honored
-    // here because the guest opens its film browser through this call.
-    if (type && !strcmp(type, "Movies"))
-        kl_movies_process_delete_flag(kp);
     KLJ_LOG("getExternalStoragePublicDirectory(%s) -> %s", type ? type : "null", path);
     return (klj_val){.l = klj_new_file(path)};
 }

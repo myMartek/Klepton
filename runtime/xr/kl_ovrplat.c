@@ -308,19 +308,7 @@ static int plat_is_obb_langpack_target(void) {
 #define KLPLAT_TRACE_MAX 1024
 int kl_ovrplat_trace_on(void) {
     static int v = -1;
-    if (v < 0) {
-        v = kl_env_on("KL_PLAT_TRACE", 0);
-        // TEMPORARY diagnostic (Bigscreen boot stall, 2026-10-16): devicectl
-        // launches hang on this device (tunnel, DDI and usage assertion all
-        // acquire, then no answer — a control third-party app hangs the same
-        // way), so the switch cannot arrive through the environment, and a
-        // Home-View launch has none to begin with. Forced ON for this target
-        // only; REMOVE once the round has been measured.
-        if (!v) {
-            const char *t = kl_driver_target_name();
-            v = (t && strcmp(t, "x2497738113633933") == 0);
-        }
-    }
+    if (v < 0) v = kl_env_on("KL_PLAT_TRACE", 0);
     return v;
 }
 static void klplat_trace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

@@ -12,11 +12,5 @@
 #include <stddef.h>
 
 void kl_public_dir_for_type(const char *type, char *out, size_t cap);
-// Delete-flag: devicectl cannot delete from the container, so the app honors
-// a __delete__.txt list (one film file name per line) inside the Movies
-// directory: each listed basename is unlinked, the flag removed afterwards.
-// Refuses paths (slashes, ".."), the flag itself and blanks. Returns the
-// number of films deleted; missing flag or dir is a silent 0. NULL-safe.
-int kl_movies_process_delete_flag(const char *movies_host_dir);
 
 #endif
