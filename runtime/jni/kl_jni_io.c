@@ -181,9 +181,11 @@ static int klj_zip_throws(void) {
         const char *t = kl_driver_target_name();
         // Pistol Whip and Drop Dead: Dual Strike Edition — both ship a main OBB and
         // no patch OBB, and Drop Dead's log stops on the same "mismatching GUID ...
-        // got ''" with the game sitting on its logo.
+        // got ''" with the game sitting on its logo. Marvel's Iron Man VR is the
+        // same: main OBB only, the same "got ''", and nothing but black frames.
         int dflt = t && (strcmp(t, "x2104963472963790") == 0    // Pistol Whip
-                      || strcmp(t, "x1935017546592600") == 0);  // Drop Dead: Dual Strike
+                      || strcmp(t, "x1935017546592600") == 0    // Drop Dead: Dual Strike
+                      || strcmp(t, "x5017327094985781") == 0);  // Marvel's Iron Man VR
         v = kl_env_on("KL_JNI_ZIP_THROW", dflt);
     }
     return v;

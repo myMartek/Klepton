@@ -1838,6 +1838,26 @@ static size_t kl_fs_sdcard_obb(const char *rest) {
     return 13 + pl;
 }
 
+// KL_FS_OBB_PKG_DIR: the other direction of KL_FS_SDCARD_OBB. A file the guest
+// asks for in the directory getObbDir() answers (<files>/obb) that is NOT there
+// is looked for in <files>/Android/obb/<package> — Android's own OBB directory,
+// where the store's loose content bundles are staged — and that path is used
+// only if the file exists there. On a Quest both are one directory. Marvel's
+// Iron Man VR (x5017327094985781) gets its main OBB from <files>/obb and then
+// looks for AssetManifest.Android.asset (and its bundles) beside it, through
+// getObbDir(): it stat()s <files>/obb/AssetManifest.Android.asset thousands of
+// times and never leaves its black boot screen (2026-11-16). Tied to the target
+// like the other two; a file that exists in <files>/obb always wins.
+static int kl_fs_obb_pkg_dir(void) {
+    static int v = -1;
+    if (v < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        v = kl_env_on("KL_FS_OBB_PKG_DIR", t && strcmp(t, "x5017327094985781") == 0);
+    }
+    return v;
+}
+
 static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) {
     if (!path) return path;
     // Windows-heritage guests (reVC / GTA Vice City) build paths with '\'
@@ -1982,6 +2002,17 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
             // the suffix to the on-disk spelling, past the known-good target prefix.
             kl_casefix(buf, strlen(g_ext_target));
             return buf;
+        }
+    }
+    if (g_ext_target[0] && kl_fs_obb_pkg_dir()) {
+        const char *obb = kl_jni_obb_dir();
+        const char *pkg = kl_jni_guest_package();
+        size_t ol = obb ? strlen(obb) : 0;
+        struct stat st;
+        if (ol && pkg && *pkg && strncmp(path, obb, ol) == 0 && path[ol] == '/' &&
+            stat(path, &st) != 0) {
+            snprintf(buf, cap, "%s/Android/obb/%s%s", g_ext_target, pkg, path + ol);
+            if (stat(buf, &st) == 0) return buf;
         }
     }
     if (strncmp(path, "/proc/", 6) != 0 &&

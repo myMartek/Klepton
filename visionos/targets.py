@@ -1478,6 +1478,11 @@ STORE_DEFAULTS = {
     # offsets Unity's 1.2x eye texture expansion.
     "x3967680489996895": {"foveation": False, "foveation_reset": 1,
                           "render_scale": 0.8, "picture_reset": 1},
+    # Marvel's Iron Man VR (Unity 2021.2.19f1, Vulkan). Foveated rendering off
+    # by default: on the headset the game runs only with the start window's
+    # "Foveated rendering" switch off (its owner, 2026-11-16). "foveation_reset"
+    # calls back a stored "on" once; a player can still turn it on afterwards.
+    "x5017327094985781": {"foveation": False, "foveation_reset": 1},
     # HITMAN 3 VR: Reloaded (Glacier, Vulkan, OpenXR). Its owner's choices in
     # the start window, made the default for new players (2026-10-20): 100 Hz
     # (the mixed space, the default anyway), a frame on every second refresh —

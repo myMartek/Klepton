@@ -979,6 +979,12 @@ The guest's own memory management, and the three seams that used to disable it.
   its OBB a second time by that literal path; Gloomy Eyes loads its episodes
   from it. Default 1 for `x2190353671014400` (Arizona Sunshine) and
   `x2933720383334150` (Gloomy Eyes), else 0.
+- `KL_FS_OBB_PKG_DIR=0|1` — (`runtime/libc/kl_libc.c`) the other direction: a
+  file asked for in the directory `getObbDir()` answers (`<files>/obb`) that is
+  not there is served from `<files>/Android/obb/<package>`, where the store's
+  loose content bundles are staged, if it exists there. Marvel's Iron Man VR
+  looks for `AssetManifest.Android.asset` beside its main OBB. Default 1 for
+  `x5017327094985781` (Marvel's Iron Man VR), else 0.
 - `KL_OVRP_GL_ARRAY=0|1` on the legacy path — (`runtime/xr/kl_ovrp.c`,
   `klovrp_setup_eye_array`) also on for Arizona Sunshine (`x2190353671014400`):
   Unity's old Oculus VRDevice is told multiview and texture arrays are
