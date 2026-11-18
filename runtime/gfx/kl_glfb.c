@@ -4037,13 +4037,18 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
             // (x2933720383334150, Unity 2019.2): ground and objects flickered,
             // faces going black for an instant and back, from the first scene
             // of the first episode (owner on the headset, 2026-11-10).
+            // Cosmodread (x3688751474502123, Unity forward lighting): the
+            // flashlight's spot light is a ForwardAdd pass drawn over the base
+            // pass, and its lit cone flickered in squares (owner on the
+            // headset, 2026-11-17; foveation off made no difference).
             {
                 static int inv = -1;
                 if (inv < 0) {
                     extern const char *kl_driver_target_name(void);
                     const char *t = kl_driver_target_name();
                     inv = kl_env_on("KL_GLFB_INVARIANT", t && (strcmp(t, "doom3quest") == 0 ||
-                                                             strcmp(t, "x2933720383334150") == 0));
+                                                             strcmp(t, "x2933720383334150") == 0 ||
+                                                             strcmp(t, "x3688751474502123") == 0));
                 }
                 if (inv && klfb_shader_type(shader) == 0x8B31 /* GL_VERTEX_SHADER */ &&
                     strncmp(buf, "#version 3", 10) == 0 && !strstr(buf, "invariant gl_Position")) {

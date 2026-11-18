@@ -1995,6 +1995,22 @@ static void *guest_thread(void *unused) {
             fflush(NULL);
             break;
         }
+        // A quit handed to the headset rather than to Unity: OVRManager's
+        // PlatformUIConfirmQuit (KL_OVRP_CONFIRM_QUIT, kl_ovrp.c). On a Quest
+        // the system ends the app; here the loop ends and the app leaves, as
+        // for an Application.Quit() below.
+        {
+            extern int kl_ovrp_quit_requested(void);
+            if (kl_ovrp_quit_requested()) {
+                printf("[guest] the game asked the headset to quit it (ovrp ConfirmQuit) — "
+                       "the frame loop ends here\n");
+                fflush(NULL);
+                pthread_mutex_lock(&g_guest.mu);
+                g_guest.asked_quit = 1;
+                pthread_mutex_unlock(&g_guest.mu);
+                break;
+            }
+        }
         if (rendered == 0 && guest_quit_exits()) {
             printf("[guest] nativeRender returned false: the game asked to quit — "
                    "the frame loop ends here (KL_UNITY_QUIT_EXITS)\n");

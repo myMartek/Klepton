@@ -301,8 +301,9 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   drawing the same surface agree on its depth to the last bit. Without it,
   passes that must match (a depth fill, then the lit pass under EQUAL/LEQUAL)
   disagree in places and whole faces flash black. Default 1 for `doom3quest`
-  and `x2933720383334150` (Gloomy Eyes: ground and objects flickering black),
-  else 0.
+  and `x2933720383334150` (Gloomy Eyes: ground and objects flickering black)
+  and `x3688751474502123` (Cosmodread: the flashlight's lit cone flickering in
+  squares), else 0.
 - `KL_GLFB_SSBO_TEX=0|1` — (`runtime/gfx/kl_glfb.c`, `kl_glfb_ssbo_tex`) read a
   shader's read-only storage buffers through textures, so shaders built for
   ES 3.1 compile on the ES 3.0 backend; also answers the ES 3.1 storage limits.
@@ -4076,6 +4077,13 @@ except its own control vars (next section).
   `x3327317663977182` (Ven VR Adventure, with `KL_UNITY_QUIT_TEARDOWN`: its
   quit froze the last picture and left the app open), else 0: no
   other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
+- `KL_OVRP_CONFIRM_QUIT=0|1` — (`runtime/xr/kl_ovrp.c`) answer
+  `ovrp_ShowSystemUI(ConfirmQuit)` — `OVRManager.PlatformUIConfirmQuit()`, a
+  game handing its quit to the headset's system dialog — as confirmed: true is
+  returned, the guest frame loop ends after that frame and the app leaves, as
+  on a Quest once the player says yes. Other system UIs answer false. Default 1
+  for `x3688751474502123` (Cosmodread: its main menu's Quit did nothing), else
+  0: the name keeps its old answer.
 - `KL_UNITY_QUIT_TEARDOWN=0|1` — (`runtime/guest/kl_driver.c`) when
   `nativeRender` first answers false, end Unity the way Android does before
   the loop stops: Gun Club VR's own public static `TBMPrefs.Save()` through

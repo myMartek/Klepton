@@ -2448,6 +2448,30 @@ static klj_val klj_PlayAssetDelivery_missing(void *env, void *self, const klj_va
     return (klj_val){.j = 1};        // Play Core is absent — see above
 }
 
+// The same wrapper under its earlier name. Unity 2019.4 (Cosmodread is
+// 2019.4.33f1) ships it as com.unity3d.player.AssetPackManagerWrapper with the
+// identical contract: the
+// guest's own dex carries "should be created only once" / "init() should be
+// called only once" and playCoreApiMissing, so init() constructs the singleton
+// unconditionally and NULL is again outside its range. Cosmodread
+// (x3688751474502123) asked for init(Context), got the soft-unknown zero, and
+// crashed in GetObjectClass(0) one line later — the Beat Saber 1.40 failure
+// under the older class name. Absence goes through playCoreApiMissing() = true,
+// for the same reason: there is no Play Store here, as on every Quest.
+static klj_val klj_AssetPackManager_init(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    static void *singleton;
+    if (!singleton)
+        singleton = klj_new_object_data("com/unity3d/player/AssetPackManagerWrapper", NULL);
+    KLJ_LOG("AssetPackManagerWrapper.init() -> wrapper "
+            "(playCoreApiMissing will answer true: no Play Store here)");
+    return (klj_val){.l = singleton};
+}
+
+static klj_val klj_AssetPackManager_getInstance(void *env, void *self, const klj_val *a, int n) {
+    return klj_AssetPackManager_init(env, self, a, n);
+}
+
 klj_val klj_Context_getAssets(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     static void *am;
@@ -3261,6 +3285,14 @@ const klj_binding klj_bind_services[] = {
      "()Lcom/unity3d/player/PlayAssetDeliveryUnityWrapper;",
      klj_PlayAssetDelivery_getInstance},
     {"com/unity3d/player/PlayAssetDeliveryUnityWrapper", "playCoreApiMissing", "()Z",
+     klj_PlayAssetDelivery_missing},
+    {"com/unity3d/player/AssetPackManagerWrapper", "init",
+     "(Landroid/content/Context;)Lcom/unity3d/player/AssetPackManagerWrapper;",
+     klj_AssetPackManager_init},
+    {"com/unity3d/player/AssetPackManagerWrapper", "getInstance",
+     "()Lcom/unity3d/player/AssetPackManagerWrapper;",
+     klj_AssetPackManager_getInstance},
+    {"com/unity3d/player/AssetPackManagerWrapper", "playCoreApiMissing", "()Z",
      klj_PlayAssetDelivery_missing},
 
     {"android/os/Bundle", "getString",  "(Ljava/lang/String;)Ljava/lang/String;", klj_Bundle_getString},
