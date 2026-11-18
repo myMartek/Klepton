@@ -4873,6 +4873,8 @@ final class KleptonCompositor {
                                    originFromHead: originFromHead)
         drawn += encodeStatsCard(enc, viewIndices: viewIndices, drawable: drawable,
                                  originFromHead: originFromHead)
+        drawn += encodeCheatMenu(enc, viewIndices: viewIndices, drawable: drawable,
+                                 originFromHead: originFromHead)
         return drawn
     }
 
@@ -5153,9 +5155,9 @@ final class KleptonCompositor {
             kl_metrics_upscale_now(&u)
             // The tap cycles frame generation instead where it was chosen or MetalFX has nothing to switch
             // (KleptonMetalFX.tapToggle).
-            let tap = KleptonTapAction.resolved
-            let fgTap = tap == .frameGen
-            return Upscale(tap: KleptonMetalFX.canUpscale && tap == .metalFX, state: Int(u.upscale),
+            // No tap of Create + Options any more (2026-11-18): the menu in the headset switches both.
+            let fgTap = false
+            return Upscale(tap: false, state: Int(u.upscale),
                            outW: Int(u.out_w), outH: Int(u.out_h),
                            path: withUnsafeBytes(of: &u.path) {
                                String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
@@ -5279,6 +5281,107 @@ final class KleptonCompositor {
         enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         return 1
     }
+
+    // The menu in the headset (KleptonHeadsetMenu.swift), in every game, fixed to the head in the middle of the view and over
+    // everything, the metrics panel included. Drawn as the panel is: on a queue of its own into the texture no frame
+    // reads, two textures swapped, two levels each — but only when what it shows has changed (and while a "given"
+    // mark is up, until it goes), not on a clock.
+    private var cheatFront: MTLTexture?                 // under statsLock
+    private var cheatFrontGen = -1, cheatFrontHeight = 0, cheatFrontFlash = false
+    private var cheatTextures: [MTLTexture] = []
+    private var cheatContexts: [CGContext] = []
+    private var cheatDrawing = false, cheatTurn = 0
+    private let cheatQueue = DispatchQueue(label: "klepton.cheatmenu", qos: .userInitiated)
+
+    private func encodeCheatMenu(_ enc: MTLRenderCommandEncoder,
+                                 viewIndices: [Int],
+                                 drawable: KLDrawable,
+                                 originFromHead: simd_float4x4) -> Int {
+        let menu = KLHeadsetMenu.shared
+        guard menu.isOpen, let pipe = overlayPipeline else { return 0 }
+        let px = KLHeadsetMenuPanel.pixels, levels = KLHeadsetMenuPanel.levels
+        if cheatTextures.isEmpty {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: px.w,
+                                                                height: px.h, mipmapped: false)
+            desc.mipmapLevelCount = levels
+            desc.usage = .shaderRead
+            cheatTextures = (0..<2).compactMap { _ in device.makeTexture(descriptor: desc) }
+            cheatContexts = (0..<levels).compactMap {
+                KLMetricsPanel.makeContext(w: px.w >> $0, h: px.h >> $0, units: KLHeadsetMenuPanel.units)
+            }
+            if statsSampler == nil {
+                let sd = MTLSamplerDescriptor()
+                sd.minFilter = .linear; sd.magFilter = .linear; sd.mipFilter = .linear
+                sd.sAddressMode = .clampToEdge; sd.tAddressMode = .clampToEdge
+                statsSampler = device.makeSamplerState(descriptor: sd)
+            }
+            guard cheatTextures.count == 2, cheatContexts.count == levels else {
+                NSLog("[cp] the menu has no texture to draw into — not shown")
+                return 0
+            }
+            NSLog("[cp] the menu in the view")
+        }
+        let (gen, snap) = menu.snapshot()
+        let now = ProcessInfo.processInfo.systemUptime
+        let flashing = snap.flashRow >= 0 && now < snap.flashUntil
+        statsLock.lock()
+        let front = cheatFront, frontGen = cheatFrontGen, frontHeight = cheatFrontHeight, frontFlash = cheatFrontFlash
+        let busy = cheatDrawing
+        statsLock.unlock()
+        // The console's state is in the picture too, and it changes without the menu knowing.
+        if !busy && (gen != frontGen || flashing != frontFlash || front == nil
+                     || Int(snap.console) != cheatShownConsole) {
+            statsLock.lock(); cheatDrawing = true; statsLock.unlock()
+            cheatShownConsole = Int(snap.console)
+            cheatTurn += 1
+            let back = cheatTextures[cheatTurn % 2], contexts = cheatContexts, german = menu.german, title = menu.title
+            let height = KLHeadsetMenuPanel.height(snap)
+            cheatQueue.async { [weak self] in
+                for (level, ctx) in contexts.enumerated() {
+                    KLHeadsetMenuPanel.draw(ctx, snap, title: title, german: german, now: now)
+                    guard let data = ctx.data else { continue }
+                    back.replace(region: MTLRegionMake2D(0, 0, px.w >> level, px.h >> level), mipmapLevel: level,
+                                 withBytes: data, bytesPerRow: (px.w >> level) * 4)
+                }
+                guard let self else { return }
+                self.statsLock.lock()
+                self.cheatFront = back; self.cheatFrontGen = gen; self.cheatFrontHeight = height
+                self.cheatFrontFlash = flashing; self.cheatDrawing = false
+                self.statsLock.unlock()
+            }
+        }
+        guard let tex = front else { return 0 }
+        let h = max(1, frontHeight)
+        var ov = kl_ovrp_overlay()
+        ov.shape = 0
+        ov.head_locked = 1
+        ov.tex_w = Int32(tex.width); ov.tex_h = Int32(tex.height)
+        ov.viewport.0 = (0, 0, Int32(px.w), Int32(h))
+        ov.viewport.1 = (0, 0, Int32(px.w), Int32(h))
+        let w = KLHeadsetMenuPanel.width
+        ov.pose = (0, 0, 0, 1, 0, -0.03, -1.1)
+        ov.size = (w, w * Float(h) / Float(px.w))
+        ov.origin_top_left = 1
+        var uniforms: [kl_overlay_uniforms] = []
+        for vi in viewIndices {
+            uniforms.append(kl_overlay_build(&ov, Int32(vi), originFromHead,
+                                             Self.headFromView(drawable.views[vi].transform,
+                                                               midpoint: eyeMidpointInDevice),
+                                             drawable.computeProjection(viewIndex: vi)))
+        }
+        guard uniforms.contains(where: { $0.visible != 0 }) else { return 0 }
+        if let s = statsCardState ?? depthState { enc.setDepthStencilState(s) }
+        enc.setRenderPipelineState(pipe)
+        enc.setFragmentTexture(tex, index: 0)
+        enc.setFragmentSamplerState(statsSampler ?? sampler, index: 0)
+        uniforms.withUnsafeBytes { buf in
+            enc.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
+            enc.setFragmentBytes(buf.baseAddress!, length: buf.count, index: 0)
+        }
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        return 1
+    }
+    private var cheatShownConsole = -1
 
     // Black behind the quads of a frame that carries no eye picture (kl_ovrp.c,
     // kl_ovrp_eyeless_black). In a mixed space the system shows the room

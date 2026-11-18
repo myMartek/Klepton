@@ -115,6 +115,8 @@ static int g_chord_switched;               // this chord switched the panel
 static _Atomic int g_visible;
 
 void kl_metrics_set_visible(int visible) { g_visible = visible != 0; }
+static _Atomic int g_chord_menu;
+void kl_metrics_set_chord_menu(int on) { g_chord_menu = on != 0; }
 int kl_metrics_visible(void) { return g_visible; }
 
 int kl_metrics_chord(int left_down, int right_down, double now, int *pass_left, int *pass_right) {
@@ -125,10 +127,15 @@ int kl_metrics_chord(int left_down, int right_down, double now, int *pass_left, 
             g_chord_since = now; g_chord_spent = 0; g_chord_switched = 0;
         } else if (!g_chord_spent && now - g_chord_since >= KL_PILL_CHORD_S) {
             g_chord_spent = g_chord_switched = 1;
-            int visible = !g_visible;
-            g_visible = visible;
-            switched = 1;
-            fprintf(stderr, "[metrics] both menu buttons held: the panel is %s\n", visible ? "shown" : "hidden");
+            if (g_chord_menu) {
+                switched = 3;
+                fprintf(stderr, "[metrics] both menu buttons held: for the app's menu\n");
+            } else {
+                int visible = !g_visible;
+                g_visible = visible;
+                switched = 1;
+                fprintf(stderr, "[metrics] both menu buttons held: the panel is %s\n", visible ? "shown" : "hidden");
+            }
         }
     } else if (g_pill[0].phase == kChord) {
         g_chord_spent = 1;                 // held together means without a gap

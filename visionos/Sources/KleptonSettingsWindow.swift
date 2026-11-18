@@ -414,6 +414,11 @@ enum KLHelp {
             return KLHelpEntry(en: "Controls", de: "Steuerung",
                                textEN: "Your controllers, how fast you walk with the stick, and whether a loaded level waits for the trigger.",
                                textDE: "Deine Controller, wie schnell du mit dem Stick läufst und ob ein geladenes Level auf den Trigger wartet.")
+        case "alyx.cheats":
+            return KLHelpEntry(en: "Cheats", de: "Cheats",
+                               textEN: "A Cheats page in the menu in the headset (hold Create and Options together for a second): the game's own cheats – switches such as god mode and gifts such as weapons, health or resin. The game is started with cheats allowed; achievements may not count while they are.",
+                               textDE: "Eine Seite Cheats im Menü im Headset (Create und Options eine Sekunde zusammen halten): die Cheats des Spiels selbst – Schalter wie Godmode und Gegenstände wie Waffen, Heilspritzen oder Harz. Das Spiel startet mit erlaubten Cheats; Erfolge zählen dann womöglich nicht.",
+                               noteEN: nextStartEN, noteDE: nextStartDE)
         case "alyx.language":
             return KLHelpEntry(en: "Language", de: "Sprache",
                                textEN: "Menus and subtitles come with the game in many languages; the voices were recorded in English only. A fan-made voice-over can be added when the game is installed from the Mac.",
@@ -675,7 +680,7 @@ struct KLToggleRow: View {
 // MARK: - The window
 
 enum KLSettingsPageID: String, Hashable, CaseIterable {
-    case presets, steamCloud, picture, motion, immersion, controls, room, game, advanced, diagnostics
+    case presets, steamCloud, picture, motion, immersion, controls, room, game, cheats, advanced, diagnostics
 }
 
 struct KleptonSettingsWindow<Diagnostics: View>: View {
@@ -724,6 +729,9 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
                     row(.room, klT("Play area", "Spielbereich"), "square.dashed")
                     row(.game, isAlyx ? klT("Language", "Sprache") : klT("Game", "Spiel"),
                         "character.bubble")
+                    if isAlyx {
+                        row(.cheats, "Cheats", "wand.and.stars", cheatsValue)
+                    }
                 }
                 Section {
                     row(.advanced, klT("Advanced", "Erweitert"), "wrench.and.screwdriver")
@@ -755,6 +763,9 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
         let scale = String(format: "%.0f %%", rendering.renderScale * 100)
         return metalfx.enabled ? scale + " · MetalFX" : scale
     }
+
+    @AppStorage(klAlyxCheatsKey) private var cheatsOn = false
+    private var cheatsValue: String { cheatsOn ? klT("On", "An") : klT("Off", "Aus") }
 
     private var motionValue: String {
         let r = KLDevice.kind.rates
@@ -808,6 +819,10 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
             KLSettingsPage(title: isAlyx ? klT("Language", "Sprache") : klT("Game", "Spiel"),
                            help: isAlyx ? "alyx.language" : "game") {
                 KLGamePage()
+            }
+        case .cheats:
+            KLSettingsPage(title: "Cheats", help: "alyx.cheats") {
+                KLSection(title: "Cheats") { AlyxCheatsView() }
             }
         case .advanced:
             KLSettingsPage(title: klT("Advanced", "Erweitert"), help: "advanced") { KLAdvancedPage() }

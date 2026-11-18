@@ -78,6 +78,13 @@ extern uint32_t g_klvk_scene_view_w, g_klvk_scene_view_h;
 
 static float g_edge, g_inner, g_outer;
 static int   g_trace, g_fov_on;
+// KL_VK_FOVEATE_LIVE=1 (the app, for Half-Life: Alyx): the hooks are put in even
+// with foveation off, so that the menu in the headset can switch it while the
+// game runs (kl_mtl_foveate_set). Each change is a new generation of maps; an
+// older one is rebuilt once no open pass refers to it, and what it held is let
+// go two seconds later, when no frame in flight can still be reading it.
+static int      g_live;
+static unsigned g_gen;
 // Recursive: the unwarp opens and ends encoders of its own while it holds this,
 // and those come back through the same two methods.
 static pthread_mutex_t g_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
@@ -97,6 +104,7 @@ typedef struct {
     __unsafe_unretained id<MTLTexture> aside;              // physical-size copy
     NSUInteger pw, ph;
     MTLPixelFormat aside_fmt;
+    unsigned gen;                 // the settings it was built with (g_gen)
 } klf_map;
 static klf_map g_maps[4];
 static int     g_nmaps;
@@ -143,13 +151,76 @@ static void klf_axis(float *q, float neg, float pos, float widest, float span) {
     }
 }
 
+// What an older generation's map held, let go of a little later (klf_retire_tick).
+typedef struct { CFTypeRef obj[3]; double t; } klf_retired;
+static klf_retired g_retired[16];
+
+static double klf_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static void klf_retire_tick(void) {
+    double now = klf_now();
+    for (unsigned i = 0; i < sizeof g_retired / sizeof *g_retired; i++) {
+        if (!g_retired[i].t || now - g_retired[i].t < 2.0) continue;
+        for (int j = 0; j < 3; j++) if (g_retired[i].obj[j]) CFRelease(g_retired[i].obj[j]);
+        memset(&g_retired[i], 0, sizeof g_retired[i]);
+    }
+}
+
+// A slot of an older generation that no open pass refers to, its objects put aside; or -1.
+// `for_build`: an emptied slot (w 0) does too; otherwise those are passed over.
+static int klf_recycle(int for_build) {
+    for (int i = 0; i < g_nmaps; i++) {
+        if (!g_maps[i].w) { if (for_build) return i; continue; }
+        if (g_maps[i].gen == g_gen) continue;
+        int open = 0;
+        for (unsigned j = 0; j < sizeof g_open / sizeof *g_open; j++)
+            if (g_open[j].enc && g_open[j].map == i) open = 1;
+        if (open) continue;
+        unsigned r = 0;
+        while (r < sizeof g_retired / sizeof *g_retired && g_retired[r].t) r++;
+        if (r == sizeof g_retired / sizeof *g_retired) return -1;      // all younger than 2 s: next time
+        klf_map *k = &g_maps[i];
+        g_retired[r].obj[0] = (__bridge CFTypeRef)k->map;
+        g_retired[r].obj[1] = (__bridge CFTypeRef)k->params;
+        g_retired[r].obj[2] = (__bridge CFTypeRef)k->aside;
+        g_retired[r].t = klf_now();
+        memset(k, 0, sizeof *k);
+        return i;
+    }
+    return -1;
+}
+
+static int klf_build(id<MTLDevice> dev, NSUInteger w, NSUInteger h, NSUInteger vw, NSUInteger vh, int slot);
+
 static int klf_map_for(id<MTLDevice> dev, NSUInteger w, NSUInteger h) {
     NSUInteger vw = g_klvk_scene_view_w, vh = g_klvk_scene_view_h;
     if (!vw || vw > w) vw = w;
     if (!vh || vh > h) vh = h;
     for (int i = 0; i < g_nmaps; i++)
-        if (g_maps[i].w == w && g_maps[i].h == h && g_maps[i].vw == vw && g_maps[i].vh == vh) return i;
-    if (g_nmaps >= (int)(sizeof g_maps / sizeof *g_maps)) return -1;
+        if (g_maps[i].w == w && g_maps[i].h == h && g_maps[i].vw == vw && g_maps[i].vh == vh &&
+            g_maps[i].gen == g_gen) return i;
+    // An older generation's slot is taken over first, so a change does not keep the old map's copy
+    // (as large as the picture) for the rest of the run.
+    int slot = -1;
+    if (g_live) { klf_retire_tick(); slot = klf_recycle(1); }
+    if (slot >= 0) return klf_build(dev, w, h, vw, vh, slot);
+    if (g_nmaps >= (int)(sizeof g_maps / sizeof *g_maps)) {
+        if (slot < 0) {
+            // No slot yet: an older map of this size until one is free, rather than none.
+            for (int i = 0; i < g_nmaps; i++)
+                if (g_maps[i].w == w && g_maps[i].h == h && g_maps[i].vw == vw && g_maps[i].vh == vh) return i;
+            return -1;
+        }
+        return klf_build(dev, w, h, vw, vh, slot);
+    }
+    return klf_build(dev, w, h, vw, vh, g_nmaps);
+}
+
+static int klf_build(id<MTLDevice> dev, NSUInteger w, NSUInteger h, NSUInteger vw, NSUInteger vh, int slot) {
     if (![dev supportsRasterizationRateMapWithLayerCount:2]) {
         static int said;
         if (!said++) fprintf(stderr, "  [fov] this GPU has no two-layer rasterization rate "
@@ -197,9 +268,9 @@ static int klf_map_for(id<MTLDevice> dev, NSUInteger w, NSUInteger h) {
         fprintf(stderr, "  [fov] no rate map for %lux%lu\n", (unsigned long)w, (unsigned long)h);
         return -1;
     }
-    klf_map *k = &g_maps[g_nmaps];
+    klf_map *k = &g_maps[slot];
     memset(k, 0, sizeof *k);
-    k->w = w; k->h = h; k->vw = vw; k->vh = vh; k->map = m;
+    k->w = w; k->h = h; k->vw = vw; k->vh = vh; k->map = m; k->gen = g_gen;
     MTLSizeAndAlign sa = m.parameterBufferSizeAndAlign;
     id<MTLBuffer> b = [dev newBufferWithLength:sa.size options:MTLResourceStorageModeShared];
     [m copyParameterDataToBuffer:b offset:0];
@@ -219,7 +290,8 @@ static int klf_map_for(id<MTLDevice> dev, NSUInteger w, NSUInteger h) {
             (unsigned long)k->pw, (unsigned long)k->ph,
             100.0 * (double)(k->pw * k->ph) / (double)(w * h), (double)g_inner, (double)g_edge,
             (double)((g_outer > g_inner + 0.01f && g_outer < widest) ? g_outer : widest), (double)tan[0][0], (double)tan[0][1], (double)tan[0][2], (double)tan[0][3]);
-    return g_nmaps++;
+    if (slot == g_nmaps) g_nmaps++;
+    return slot;
 }
 
 static NSString *const kUnwarpSrc = @
@@ -764,12 +836,37 @@ static id klf_begin(id self, SEL _cmd, MTLRenderPassDescriptor *d) {
     return enc;
 }
 
+int kl_mtl_foveate_live(void) { return g_live && g_orig_begin != NULL; }
+
+void kl_mtl_foveate_set(float edge, float inner, float outer) {
+    pthread_mutex_lock(&g_mu);
+    int on = edge > 0.02f && edge < 0.999f;
+    if (on) {
+        g_edge = edge;
+        g_inner = inner >= 0.0f ? inner : 0.30f;
+        g_outer = outer;
+    }
+    g_fov_on = on;
+    g_gen++;
+    // Off: what the maps held goes now (two seconds on), not at the next change.
+    if (!on && g_live) { klf_retire_tick(); while (klf_recycle(0) >= 0) {} }
+    pthread_mutex_unlock(&g_mu);
+    if (on)
+        fprintf(stderr, "  [fov] foveation from now on (the menu): %.2f at the edge, from tan %.2f%s\n",
+                (double)edge, (double)g_inner, outer > 0 ? "" : " to the cone's edge");
+    else
+        fprintf(stderr, "  [fov] foveation off from now on (the menu)\n");
+    if (!g_live || !g_orig_begin)
+        fprintf(stderr, "  [fov] ...but its hooks are not in place (KL_VK_FOVEATE_LIVE): nothing changes\n");
+}
+
 // Called once a Metal device exists (kl_vulkan.c, at vkCreateDevice).
 void kl_mtl_foveate_install(void) {
     static int done;
     if (done++) return;
     g_edge = kl_env_float("KL_VK_FOVEATE", 0.0f);
     g_fov_on = g_edge > 0.02f && g_edge < 0.999f;
+    g_live = kl_env_on("KL_VK_FOVEATE_LIVE", 0);
     g_inner = kl_env_float("KL_VK_FOVEATE_INNER", 0.30f);
     if (!(g_inner >= 0.0f)) g_inner = 0.30f;
     g_outer = kl_env_float("KL_VK_FOVEATE_OUTER", 0.0f);
@@ -778,7 +875,7 @@ void kl_mtl_foveate_install(void) {
     { const char *t = kl_driver_target_name();
       g_gt_on = kl_env_on("KL_MTL_GPU_TIME", t && strcmp(t, "alyx") == 0); }
     g_ml_guard = kl_env_on("KL_VK_MSAA_MEMORYLESS", 0);
-    if (!g_fov_on && !g_trace && !textures && !g_gt_on && !g_ml_guard && kl_env_int("KL_MTL_PROFILE", 0) <= 0) return;
+    if (!g_fov_on && !g_live && !g_trace && !textures && !g_gt_on && !g_ml_guard && kl_env_int("KL_MTL_PROFILE", 0) <= 0) return;
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         klp_install(dev);
@@ -798,7 +895,7 @@ void kl_mtl_foveate_install(void) {
         if (!m) {
             fprintf(stderr, "  [fov] no command buffer class to extend — KL_VK_FOVEATE and "
                             "KL_MTL_PROFILE ignored\n");
-        } else if (g_fov_on || g_trace || g_klp_every || g_gt_on || g_ml_guard) {
+        } else if (g_fov_on || g_live || g_trace || g_klp_every || g_gt_on || g_ml_guard) {
             g_orig_begin = method_getImplementation(m);
             class_replaceMethod(cls, @selector(renderCommandEncoderWithDescriptor:),
                                 (IMP)klf_begin, method_getTypeEncoding(m));

@@ -34,7 +34,22 @@ import simd
 // Until it arrives nothing is shown.
 
 final class KLBoundary {
-    let mode: KLRoomGuard.Mode
+    /// What is shown at the edge, switchable while the game runs (the menu in the headset, KleptonHeadsetMenu.swift):
+    /// the setting the run started with until then. Off draws nothing; the room is still followed.
+    private static let modeLock = NSLock()
+    private static var liveMode: KLRoomGuard.Mode?
+    /// Whether this run has a play area at all (a room measured, or stationary, and the switch on): only then
+    /// does the menu offer the choice.
+    nonisolated(unsafe) static var available = false
+    static var mode: KLRoomGuard.Mode {
+        get { modeLock.lock(); defer { modeLock.unlock() }; return liveMode ?? KLRoomGuard.mode }
+        set {
+            // For this run only (the owner's word, 2026-11-18: changes in the menu are not stored).
+            modeLock.lock(); liveMode = newValue; modeLock.unlock()
+            NSLog("[room] play area: shown as %@ until the game ends (the menu)", newValue.rawValue)
+        }
+    }
+    var mode: KLRoomGuard.Mode { Self.mode }
     private let device: MTLDevice
     private let lock = NSLock()
     private struct Active {
@@ -65,10 +80,12 @@ final class KLBoundary {
     static func make(device: MTLDevice, color: MTLPixelFormat, amplification: Int) -> KLBoundary? {
         guard KLRoomGuard.enabled else { return nil }
         let mode = KLRoomGuard.mode
-        guard mode != .off else { NSLog("[room] play area: shown as nothing (the game's setting)"); return nil }
+        // Made even where the setting is off, so the menu can switch it on: off draws nothing.
+        if mode == .off { NSLog("[room] play area: shown as nothing (the game's setting) — the menu can switch it") }
         let stationary = KLRoomGuard.style == .stationary
         let rooms = stationary ? [] : KLRoomStore.load()
         guard stationary || !rooms.isEmpty else { NSLog("[room] play area: no room measured — nothing to show"); return nil }
+        available = true
         return KLBoundary(device: device, color: color, amplification: amplification, mode: mode, rooms: rooms,
                           stationary: stationary)
     }
@@ -81,7 +98,6 @@ final class KLBoundary {
     private init(device: MTLDevice, color: MTLPixelFormat, amplification: Int, mode: KLRoomGuard.Mode,
                  rooms: [KLRoomRecord], stationary: Bool) {
         self.device = device
-        self.mode = mode
         self.rooms = rooms
         self.stationary = stationary
         var map: [UUID: UUID] = [:]
@@ -416,6 +432,8 @@ final class KLBoundary {
         if most > 0.6 && lastNear <= 0.6 { NSLog("[room] play area: near the edge (%.2f)", most) }
         lastNear = most
         guard most > 0.002 else { return }
+        let mode = self.mode
+        guard mode != .off else { return }
         if let depthState { enc.setDepthStencilState(depthState) }
 
         if mode == .room && mixedSpace, let fadePipe {

@@ -403,7 +403,7 @@ final class KleptonRendering: ObservableObject {
     private static let pictureResetKey = "klepton.picture.reset"
     static let targetPictureReset: Int =
         Int((Bundle.main.object(forInfoDictionaryKey: "KLPictureReset") as? String) ?? "") ?? 0
-    private static let vkFoveationKey = "klepton.vk.foveation"
+    static let vkFoveationKey = "klepton.vk.foveation"
     static let targetVkFoveation: String = {
         let v = (Bundle.main.object(forInfoDictionaryKey: "KLVkFoveationDefault") as? String) ?? "off"
         return vkFoveationLevels.contains(v) ? v : "off"
@@ -606,8 +606,12 @@ final class KleptonMetalFX: ObservableObject {
     /// What the compositor reads every frame: the choice made in the game, else
     /// what the installation started with.
     static var isOn: Bool {
-        (UserDefaults.standard.object(forKey: key) as? Bool) ?? onFromInstall
+        if let live = liveSwitch { return live }
+        return (UserDefaults.standard.object(forKey: key) as? Bool) ?? onFromInstall
     }
+    /// The menu in the headset's switch for this run only (KleptonHeadsetMenu.swift): nil = the stored choice.
+    /// Not stored — the owner's word, 2026-11-18: what is changed in the menu lasts until the game ends.
+    nonisolated(unsafe) static var liveSwitch: Bool?
 
     @Published var enabled: Bool {
         didSet {
@@ -657,36 +661,6 @@ final class KleptonMetalFX: ObservableObject {
         }
         enabled = on
         return set
-    }
-
-    /// A tap of Create and Options together while the metrics panel is shown
-    /// (kl_metrics_chord's 2, KleptonControllers): switches upscaling, in every
-    /// build, from the next frame — the same choice as the switch under
-    /// Picture, so it is stored the same way and the page shows it. Where
-    /// MetalFX cannot upscale (no scaler, or a game started at 100 %) it does
-    /// nothing. The panel's MetalFX, Path and Output rows show what it did.
-    static func tapToggle() {
-        // What the tap does is the game's setting (KleptonTapAction): frame generation cycles (off, ahead,
-        // between), MetalFX switches, or nothing.
-        switch KleptonTapAction.resolved {
-        case .nothing:
-            NSLog("[cp] tap of Create + Options: set to do nothing")
-            return
-        case .frameGen:
-            KleptonFrameGen.cycle()
-            return
-        default:
-            break
-        }
-        guard canUpscale else {
-            NSLog("[metalfx] tap of Create + Options: nothing to switch (%@)",
-                  deviceSupported ? "the game was started at 100 % resolution" : "no MetalFX on this device")
-            return
-        }
-        DispatchQueue.main.async {
-            shared.switchTo(!shared.enabled)
-            NSLog("[metalfx] switched %@ with Create + Options", shared.enabled ? "on" : "off")
-        }
     }
 }
 
@@ -836,8 +810,8 @@ enum KleptonTestSwitches {
             Entry(env: "KL_STATS_CARD", value: "1",
                   title: klT("Show performance in the headset from the start",
                              "Leistungsanzeige im Headset von Anfang an einblenden"),
-                  note: klT("A small panel just above the middle of the view, like the performance overlay of a Quest: frames a second, pictures that had to be shown twice, GPU and CPU load, memory, heat and picture size, with the last minute as graphs. In every game, holding Create and Options on the controllers together for a second shows it and hides it again; this switch only decides whether it is there when the game starts. Half-Life: Alyx has this as a setting of its own.",
-                            "Eine kleine Tafel knapp über der Blickmitte, wie die Leistungsanzeige einer Quest: Bilder pro Sekunde, Bilder, die doppelt gezeigt werden mussten, Auslastung von GPU und CPU, Speicher, Wärme und Bildgröße, dazu die letzte Minute als Verlauf. In jedem Spiel blendet Create und Options an den Controllern, eine Sekunde lang zusammen gehalten, sie ein und wieder aus; dieser Schalter bestimmt nur, ob sie beim Start des Spiels schon zu sehen ist. Half-Life: Alyx hat dafür eine eigene Einstellung.")),
+                  note: klT("A small panel just above the middle of the view, like the performance overlay of a Quest: frames a second, pictures that had to be shown twice, GPU and CPU load, memory, heat and picture size, with the last minute as graphs. In every game it can be shown and hidden from the menu in the headset (hold Create and Options together for a second); this switch only decides whether it is there when the game starts. Half-Life: Alyx has this as a setting of its own.",
+                            "Eine kleine Tafel knapp über der Blickmitte, wie die Leistungsanzeige einer Quest: Bilder pro Sekunde, Bilder, die doppelt gezeigt werden mussten, Auslastung von GPU und CPU, Speicher, Wärme und Bildgröße, dazu die letzte Minute als Verlauf. In jedem Spiel lässt sie sich über das Menü im Headset (Create und Options eine Sekunde zusammen halten) ein- und ausblenden; dieser Schalter bestimmt nur, ob sie beim Start des Spiels schon zu sehen ist. Half-Life: Alyx hat dafür eine eigene Einstellung.")),
             // The fallback to KleptonMetalFXAlpha (KleptonMetalFXPause, pauseInMR).
             Entry(env: "KL_MFX_MR_PAUSE", value: "1",
                   title: klT("MetalFX: pause in mixed reality",
@@ -969,8 +943,6 @@ struct TestSwitchesView: View {
             // The game's frame cadence (KL_GUEST_PACE_DIV) is a setting of its own on the frame rate page (KLCadenceRow).
             ForEach(KleptonTestSwitches.entries.filter { $0.env != KLCadence.env }) { e in
                 TestSwitchRow(entry: e)
-                // What the tap does, under the switch that shows the panel (the owner's place for it).
-                if e.env == "KL_STATS_CARD" { KleptonTapActionPicker().padding(.leading, 16) }
             }
         }
     }
@@ -1619,49 +1591,6 @@ enum KleptonProgramCaches {
     }
 }
 
-/// What a short tap of Create + Options does while the performance panel is shown – a setting of each
-/// game, under the switch that shows the panel from the start (the owner's wish, 2026-10-28: "wählen,
-/// was die Share + Menü Taste genau machen soll"). Automatic: frame generation where it is chosen for
-/// the game or MetalFX has nothing to switch, else MetalFX. Holding the two for a second always shows
-/// and hides the panel.
-enum KleptonTapAction: Int, CaseIterable, Identifiable {
-    case automatic = 0, frameGen = 1, metalFX = 2, nothing = 3
-    var id: Int { rawValue }
-    static let storageKey = "klepton.tapAction"
-    static var stored: KleptonTapAction {
-        KleptonTapAction(rawValue: UserDefaults.standard.integer(forKey: storageKey)) ?? .automatic
-    }
-    /// The setting with Automatic decided: frameGen, metalFX or nothing.
-    static var resolved: KleptonTapAction {
-        switch stored {
-        case .automatic: return KleptonFrameGen.chosen != .off || !KleptonMetalFX.canUpscale ? .frameGen : .metalFX
-        case let a: return a
-        }
-    }
-    var title: String {
-        switch self {
-        case .automatic: return klT("Automatic", "Automatisch")
-        case .frameGen: return klT("Frame generation", "Zwischenbilder")
-        case .metalFX: return "MetalFX"
-        case .nothing: return klT("Nothing", "Nichts")
-        }
-    }
-}
-
-/// The choice, for a settings page: under the performance panel's switch.
-struct KleptonTapActionPicker: View {
-    @AppStorage(KleptonTapAction.storageKey) private var action = KleptonTapAction.automatic.rawValue
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Picker(klT("A tap of Create + Options", "Ein Tipp auf Create + Options"), selection: $action) {
-                ForEach(KleptonTapAction.allCases) { Text($0.title).tag($0.rawValue) }
-            }
-            Text(klT("What a short tap of the two does while the performance panel is shown. Frame generation: off, ahead, in between, in turn. MetalFX: upscaling on and off, where the game is rendered below 100 %. Automatic: frame generation where it is chosen for this game or MetalFX has nothing to switch, else MetalFX. Holding the two for a second still shows and hides the panel.",
-                     "Was ein kurzer Tipp auf beide tut, während die Leistungsanzeige zu sehen ist. Zwischenbilder: reihum aus, vorausberechnet, dazwischen. MetalFX: Hochskalieren an und aus, wo das Spiel unter 100 % gezeichnet wird. Automatisch: Zwischenbilder, wo sie für dieses Spiel gewählt sind oder MetalFX nichts umzuschalten hat, sonst MetalFX. Eine Sekunde lang halten blendet die Anzeige weiter ein und aus."))
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-}
 
 /// Frame generation (KleptonFrameGen.swift, moonshot s3-framegen): the start window's choice
 /// (KleptonRendering.frameGen, a target's own default before one is made), and what a tap of
@@ -1726,11 +1655,6 @@ enum KleptonFrameGen {
     /// taken out, as from a searched field: the timewarp does it. KL_FRAMEGEN_MV_HEAD=0 keeps it.
     static let gameVectorsHaveHead = klEnvOn("KL_FRAMEGEN_MV_HEAD", default: true)
 
-    /// A tap of Create + Options: off → ahead → between → off.
-    static func cycle() {
-        mode = mode.next
-        NSLog("[framegen] %@ with Create + Options", mode.name)
-    }
 
     /// Pictures made and shown, counted by the compositor, for the performance panel.
     private static let lock = NSLock()

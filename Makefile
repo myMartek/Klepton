@@ -58,7 +58,7 @@ LX_SRC  := runtime/linux/kl_lx_exec.c runtime/linux/kl_lx_syscall.c runtime/linu
            runtime/linux/kl_lx_hostlib.c runtime/linux/kl_lx_vulkan.c runtime/linux/kl_lx_steam.c \
            runtime/linux/kl_lx_steam_net.c runtime/linux/kl_lx_openxr.c \
            runtime/linux/kl_lx_diag.c runtime/linux/kl_lx_audio.c \
-           runtime/linux/kl_lx_interstitial.c
+           runtime/linux/kl_lx_interstitial.c runtime/linux/kl_lx_netcon.c
 
 RUNTIME_SHIP := $(LX_SRC) runtime/guest/kl_linuxproc.c \
            runtime/kl_env.c runtime/kl_image.c runtime/kl_stub_cells.S runtime/libc/kl_shim.c runtime/libc/kl_va.c \
@@ -1014,6 +1014,10 @@ build/t_mtlbusy: tests/t_mtlbusy.m runtime/gfx/kl_mtl_busy.m runtime/gfx/kl_mtl_
 	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_mtlbusy.m runtime/gfx/kl_mtl_busy.m -framework Metal -framework Foundation
 
 # ...and the sample they are part of (kl_metrics.c): rates, the busiest thread, memory.
+build/t_netcon: tests/t_netcon.c runtime/linux/kl_lx_netcon.c runtime/linux/kl_lx.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_netcon.c runtime/linux/kl_lx_netcon.c
+
 build/t_metrics: tests/t_metrics.c runtime/diag/kl_metrics.c runtime/diag/kl_metrics.h runtime/gfx/kl_mtl_busy.m runtime/gfx/kl_mtl_busy.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_metrics.c runtime/diag/kl_metrics.c runtime/gfx/kl_mtl_busy.m -framework Metal -framework Foundation
@@ -1238,7 +1242,7 @@ tgkill: build/t_tgkill
 # Each test writes to a log and is checked BEFORE the log is filtered. Piping a
 # test straight into tail/grep would hand make the filter's exit status instead
 # of the test's, so a failing test would leave the sweep green.
-check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_tmnt build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_ctrlrecovery build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_presets build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands build/t_xrhands
+check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load build/t_il2cpp build/m_boot build/t_haptics build/t_hevc build/t_xrspace build/t_ovrplat build/t_posebound build/t_ovrplayers build/t_trackers build/t_untested build/t_audio build/t_audiorace build/t_xrinput build/t_softinput build/t_ctr build/t_mtxtable build/t_bcast build/t_neterrno build/t_fault build/t_glcaps build/t_x18race build/t_tgkill build/klepton-ld build/t_uevk build/t_jniobj build/t_fove build/t_mtlbusy build/t_metrics build/t_netcon build/t_dl_ext build/t_jni_io build/t_jni_url build/t_jni_firebase build/t_jni_vivox build/t_jni_memory build/t_jni_tmnt build/t_jni_azs2 build/t_gunclub build/t_maxeye build/t_assetcfg build/t_pinch build/t_ctrlrecovery build/t_arrayviews build/t_surreal build/t_mfxpreset build/t_presets build/t_mfxalpha build/t_statscard build/t_hologram build/t_maxeye_swift build/t_x18pool build/t_ue421 build/t_room build/t_hands build/t_brink_depth build/t_brink_selection build/t_brink_hands build/t_xrhands
 	@# The guest steps read $(TARGET)'s own files. Without them the loader steps print nothing and pass, and the
 	@# run ends at the il2cpp step with a bare "Error 1" - a check that looked green until its last line. A
 	@# working copy without the game's tree (a fresh git worktree) is told so here, before anything runs.
@@ -1298,6 +1302,7 @@ check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load buil
 	@./build/t_mtlbusy > build/mtlbusy.log 2>&1 || { cat build/mtlbusy.log; exit 1; }
 	@head -1 build/mtlbusy.log && tail -1 build/mtlbusy.log
 	@./build/t_metrics > build/metrics.log 2>&1 || { cat build/metrics.log; exit 1; }
+	@./build/t_netcon > build/netcon.log 2>&1 || { cat build/netcon.log; exit 1; }
 	@head -1 build/metrics.log && tail -1 build/metrics.log
 	@KL_FUTEX_EXACT=1 ./build/t_futex > build/futex.log 2>&1 || { cat build/futex.log; exit 1; }
 	@KL_SEM_CLAIM_FIRST=0 ./build/t_sem > build/sem.log 2>&1 || { cat build/sem.log; exit 1; }

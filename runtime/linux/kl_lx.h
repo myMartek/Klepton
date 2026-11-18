@@ -157,4 +157,30 @@ int64_t kl_lx_rt_sigaction(int sig, const void *act, void *old);
 int64_t kl_lx_rt_sigprocmask(int how, const uint64_t *set, uint64_t *old);
 int64_t kl_lx_raise(int sig);
 
+// ---- the game's console for the app (kl_lx_netcon.c) ----
+// With KL_LX_NETCON=<port>, the TCP socket a guest listens on at that port is
+// a stand-in the app connects to without a network; without it every socket
+// call answers ENOSYS as it always has. The syscall table's half:
+int     kl_lx_netcon_enabled(void);
+int     kl_lx_netcon_is(int fd);
+int64_t kl_lx_netcon_socket(int domain, int type, int protocol);
+int64_t kl_lx_netcon_bind(int fd, const void *addr, uint32_t len);
+int64_t kl_lx_netcon_listen(int fd, int backlog);
+int64_t kl_lx_netcon_accept(int fd, void *addr, uint32_t *len, int flags);
+int64_t kl_lx_netcon_recvfrom(int fd, void *buf, size_t n, int flags, void *addr, uint32_t *len);
+int64_t kl_lx_netcon_sendto(int fd, const void *buf, size_t n, int flags);
+int64_t kl_lx_netcon_msg(int fd, void *msghdr, int flags, int sending);
+int64_t kl_lx_netcon_name(int fd, void *addr, uint32_t *len);
+int64_t kl_lx_netcon_sockopt(int fd, int get, void *val, uint32_t *len);
+int64_t kl_lx_netcon_shutdown(int fd, int how);
+void    kl_lx_netcon_close(int fd);
+struct timespec;
+int64_t kl_lx_pselect6(int n, void *r, void *w, void *e, const struct timespec *ts);
+// ...and the app's (also declared in kl_app.h): one console line out; 0 = written.
+// The state: 0 the game has no console (yet), 1 it listens, 2 it took the connection.
+// Each line the console prints back goes to `fn`, on a thread of its own.
+int     kl_lx_netcon_send(const char *command);
+int     kl_lx_netcon_state(void);
+void    kl_lx_netcon_set_output(void (*fn)(const char *line));
+
 #endif

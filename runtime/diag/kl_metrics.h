@@ -82,5 +82,9 @@ int kl_metrics_chord(int left_down, int right_down, double now_s, int *pass_left
 // game's setting at its start, or the two buttons.
 void kl_metrics_set_visible(int visible);
 int kl_metrics_visible(void);
+// While on, the hold of the two is the app's instead (Half-Life: Alyx's cheat
+// menu, KleptonCheatMenu.swift): kl_metrics_chord returns 3 on the poll the hold
+// completes and leaves the panel as it is — the menu has its own entry for it.
+void kl_metrics_set_chord_menu(int on);
 
 #endif

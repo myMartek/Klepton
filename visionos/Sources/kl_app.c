@@ -5,6 +5,7 @@
 #include <math.h>
 #include <mach/mach.h>          // task_info(TASK_VM_INFO) — the heartbeat's footprint
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1710,7 +1711,29 @@ static uint64_t guest_pose_gap_ns(void) {      // under g_guest.mu; 0 until ther
     return v[n / 2];
 }
 void kl_app_set_panel_hz(float hz) { (void)hz; }   // kept for the compositor's call; the rate is read from the poses
+// The app's menu in the headset sets it while the game runs (kl_app_set_pace_div); 0 = as started.
+static _Atomic int g_pace_div_live;
+void kl_app_set_pace_div(int div) {
+    if (div < 0) div = 0;
+    if (div > 4) div = 4;
+    g_pace_div_live = div;
+    fprintf(stderr, "[guest] paced to every %d. refresh of the panel from now on (the menu)\n", div ? div : 1);
+}
+static int guest_pace_div_start(void);
 static int guest_pace_div(void) {
+    int live = g_pace_div_live;
+    return live ? live : guest_pace_div_start();
+}
+int kl_app_pace_div(void) { return guest_pace_div(); }
+// Whether the system shows the game at half the panel's rate already (50 of 100): every second refresh then
+// changes nothing, since there is no faster rate to halve (guest_pace_wait's own test, a gap of 13 ms or more).
+int kl_app_shown_at_half_rate(void) {
+    pthread_mutex_lock(&g_guest.mu);
+    uint64_t gap = guest_pose_gap_ns();
+    pthread_mutex_unlock(&g_guest.mu);
+    return gap >= 13000000ull;
+}
+static int guest_pace_div_start(void) {
     static int v = -1;
     if (v < 0) {
         // Moss: every second refresh. At the display's own eye size it needs about 8 ms of GPU a frame,
@@ -1883,9 +1906,11 @@ static void *guest_thread(void *unused) {
     // read it, so the Test switch did nothing for any Unity game (Arkham Shadow
     // and LEGO Bricktales on the headset: no "[guest] paced" line, the full
     // rate shown).
-    int pace_div = guest_pace_div();
+    // Read again for every frame: the menu in the headset changes it while the game runs (kl_app_set_pace_div).
+    // Read once before this loop, as it was until 2026-11-18, the menu's switch did nothing in a Unity game.
     uint64_t last_turn_ns = 0;
     for (;;) {
+        int pace_div = guest_pace_div();
         pthread_mutex_lock(&g_guest.mu);
         for (;;) {
             while (!g_guest.stop && g_guest.published == g_guest.consumed)
