@@ -1042,6 +1042,15 @@ extension KleptonRendering {
         // Foveated rendering for a Vulkan guest. kl_fove reads KL_FOVEATION the
         // first time it is asked, which is after this. A GL guest never asks.
         let launchLine = ProcessInfo.processInfo.environment["KL_FOVEATION"]
+        if klTargetName() == "x26291709480509388" {
+            // Hot Dogs, Horseshoes & Hand Grenades 2: with foveation on, the
+            // scene is drawn into the compressed rate-map area but the eye
+            // subpass that expands it is never marked ("first expand" never
+            // logs, expands stay 0), so the picture stays in the top-left
+            // corner of the view. Off until that path is fixed for this game;
+            // a value on the launch line still wins, as for BRINK above.
+            setenv("KL_FOVEATION", "off", 0)
+        }
         if vkFoveation != "off" {
             setenv("KL_FOVEATION", vkFoveation == "ultra" ? "high" : vkFoveation, 0)
             if vkFoveation == "high" {

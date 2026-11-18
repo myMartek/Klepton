@@ -172,6 +172,7 @@ klj_val     klj_PackageInfo_versionCode(void);
 klj_val     klj_PackageInfo_versionName(void);
 klj_val     klj_PackageInfo_packageName(void);
 klj_val     klj_PackageInfo_reqFeatures(void);
+klj_val     klj_PackageInfo_signatures(void);
 klj_val     klj_appinfo_sourceDir(void);
 klj_val     klj_appinfo_nativeLibraryDir(void);
 klj_val     klj_appinfo_dataDir(void);

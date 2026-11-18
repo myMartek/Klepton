@@ -2757,6 +2757,14 @@ that reports what came due since the frontend last asked. Platform-independent
   question at all: without the extension the client publishes an EMPTY rate
   list, and a host told the client can present at no rate never starts sending
   video.
+- `KL_XR_META_HEADSET_ID=0|1` — advertise `XR_META_headset_id`
+  (`runtime/xr/kl_openxr.c`). Default 1 for Hot Dogs, Horseshoes & Hand Grenades 2
+  (`x26291709480509388`) only, 0 elsewhere. That game picks its platform object
+  by which headset-family extension is enabled; without this one it finds none
+  ("No platform found that contains extension ..."), falls back to its Steam
+  Frame platform, never creates an `OVRManager` and stops on its loading screen.
+  The extension has no entry points and its one output struct is left zeroed.
+  `=0` restores the earlier behaviour for that game, `=1` offers it to any guest.
 - `KL_XR_VULKAN=0` — stop advertising `XR_KHR_vulkan_enable`
   (`runtime/xr/kl_openxr.c`), putting the runtime back to before the OpenXR↔Vulkan
   bridge. The A/B for Open Brush, and it restores the original failure
@@ -4710,6 +4718,14 @@ games is on`. Host test: `make untested`.
 Under the profile:
 - `KL_OVRP_UNANSWERED=unsupported`: an OVRPlugin entry point with no answer here
   says UNSUPPORTED instead of ending the run.
+- `KL_JNI_SIGNATURES=0|1` (`runtime/jni/kl_jni_services.c`): answer
+  `PackageInfo.signatures` (GET_SIGNATURES) with one `Signature` carrying the
+  APK's own signing certificate, read from its v3 (else v2) signing block. Default
+  1 for Hot Dogs, Horseshoes & Hand Grenades 2 (`x26291709480509388`), whose Meta
+  platform start-up walks the array and threw a NullReferenceException on the
+  null it got; 0 elsewhere (the field stays null). `=1` offers it to any guest,
+  `=0` withholds it. The log line `APK signing certificate: ...` says whether the
+  block was found.
 - `KL_JNI_SOFT_UNKNOWN=1` (`runtime/kl_jni.c`): a Java method or field with no
   answer here answers zero (nothing for void, 0 / false, a null object), each
   named in the log with `...answered with zero`. Only these two lookups;

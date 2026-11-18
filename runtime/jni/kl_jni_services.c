@@ -1547,6 +1547,142 @@ static klj_val klj_PackageInfo_getLongVersionCode(void *env, void *self,
     return (klj_val){.l = klj_new_array('L', "android/content/pm/FeatureInfo", 0)};
 }
 
+// PackageInfo.signatures — the certificate the guest's APK is signed with, for
+// Hot Dogs, Horseshoes & Hand Grenades 2 (x26291709480509388) only. Its Meta
+// platform start-up asks for it (GET_SIGNATURES) and walks the array; with no
+// value here the field came back null and that start-up threw a
+// NullReferenceException ("Failed to initialize platform").
+//
+// The value is the TRUE one: the first signer's first certificate out of the
+// APK's own v3 (else v2) signing block, which is what Android reports for an
+// unmodified install of that file. Nothing is made up, and nothing here
+// compares or vouches for it — the guest reads it and decides for itself.
+// Other targets keep the earlier answer (a null field). KL_JNI_SIGNATURES=1
+// offers it to any guest, =0 withholds it.
+static struct { unsigned char *der; size_t len; int tried; } g_apk_cert;
+
+static uint32_t klj_le32(const unsigned char *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+static uint64_t klj_le64(const unsigned char *p) {
+    return (uint64_t)klj_le32(p) | (uint64_t)klj_le32(p + 4) << 32;
+}
+// One length-prefixed (uint32) field at p, inside a buffer with `avail` bytes
+// left. Returns its contents and sets *len, or NULL when it does not fit.
+static const unsigned char *klj_lp_field(const unsigned char *p, size_t avail, size_t *len) {
+    if (avail < 4) return NULL;
+    uint32_t n = klj_le32(p);
+    if ((size_t)n > avail - 4) return NULL;
+    *len = n;
+    return p + 4;
+}
+// A v2/v3 signature-scheme value is: signers[ signer{ signed_data{ digests,
+// certificates, ... }, ... } ]. Returns the first certificate of the first signer.
+static int klj_sigblock_first_cert(const unsigned char *v, size_t vl,
+                                   const unsigned char **cert, size_t *clen) {
+    size_t n;
+    const unsigned char *signers = klj_lp_field(v, vl, &n);                if (!signers) return 0;
+    const unsigned char *signer  = klj_lp_field(signers, n, &n);           if (!signer) return 0;
+    const unsigned char *sdata   = klj_lp_field(signer, n, &n);            if (!sdata) return 0;
+    size_t sdl = n, dl;
+    const unsigned char *digests = klj_lp_field(sdata, sdl, &dl);          if (!digests) return 0;
+    const unsigned char *rest = digests + dl;
+    size_t rl = sdl - 4 - dl, cl;
+    const unsigned char *certs = klj_lp_field(rest, rl, &cl);              if (!certs) return 0;
+    const unsigned char *first = klj_lp_field(certs, cl, clen);            if (!first || !*clen) return 0;
+    *cert = first;
+    return 1;
+}
+static void klj_apk_cert_load(void) {
+    if (g_apk_cert.tried) return;
+    g_apk_cert.tried = 1;
+    if (!g_apk_path) return;
+    FILE *f = fopen(g_apk_path, "rb");
+    if (!f) return;
+    unsigned char *tail = NULL, *pairs = NULL;
+    do {
+        if (fseek(f, 0, SEEK_END) != 0) break;
+        long fsz = ftell(f);
+        if (fsz < 64) break;
+        long tl = fsz < 65557 ? fsz : 65557;
+        tail = malloc((size_t)tl);
+        if (!tail || fseek(f, fsz - tl, SEEK_SET) != 0 || fread(tail, 1, (size_t)tl, f) != (size_t)tl) break;
+        long e = -1;
+        for (long i = tl - 22; i >= 0; i--)
+            if (tail[i] == 0x50 && tail[i+1] == 0x4b && tail[i+2] == 5 && tail[i+3] == 6) { e = i; break; }
+        if (e < 0) break;
+        long cd = (long)klj_le32(tail + e + 16);
+        if (cd < 32 || cd > fsz) break;
+        unsigned char foot[24];
+        if (fseek(f, cd - 24, SEEK_SET) != 0 || fread(foot, 1, 24, f) != 24) break;
+        if (memcmp(foot + 8, "APK Sig Block 42", 16) != 0) break;
+        uint64_t bsz = klj_le64(foot);                     // excludes its own 8-byte size field
+        if (bsz < 24 || bsz > (4u << 20) || (long)bsz + 8 > cd) break;
+        size_t pl = (size_t)bsz - 24;
+        pairs = malloc(pl ? pl : 1);
+        if (!pairs || fseek(f, cd - (long)bsz - 8 + 8, SEEK_SET) != 0 || fread(pairs, 1, pl, f) != pl) break;
+        static const uint32_t ids[2] = {0xf05368c0u, 0x7109871au};      // v3, then v2
+        for (int k = 0; k < 2 && !g_apk_cert.der; k++) {
+            size_t p = 0;
+            while (p + 12 <= pl) {
+                uint64_t len = klj_le64(pairs + p);
+                if (len < 4 || len > pl - p - 8) break;
+                if (klj_le32(pairs + p + 8) == ids[k]) {
+                    const unsigned char *c; size_t cl;
+                    if (klj_sigblock_first_cert(pairs + p + 12, (size_t)len - 4, &c, &cl)) {
+                        g_apk_cert.der = malloc(cl);
+                        if (g_apk_cert.der) { memcpy(g_apk_cert.der, c, cl); g_apk_cert.len = cl; }
+                    }
+                    break;
+                }
+                p += 8 + (size_t)len;
+            }
+        }
+    } while (0);
+    free(tail); free(pairs); fclose(f);
+    KLJ_LOG("APK signing certificate: %s (%zu bytes)", g_apk_cert.der ? "read from the APK's signing block" : "NOT found", g_apk_cert.len);
+}
+
+klj_val klj_PackageInfo_signatures(void) {
+    extern const char *kl_driver_target_name(void);
+    const char *t = kl_driver_target_name();
+    if (!kl_env_on("KL_JNI_SIGNATURES", t && !strcmp(t, "x26291709480509388")))
+        return (klj_val){.l = NULL};
+    klj_apk_cert_load();
+    int have = g_apk_cert.der != NULL;
+    void *arr = klj_new_array('L', "android/content/pm/Signature", have ? 1 : 0);
+    if (have) {
+        void *sig = klj_new_object_data("android/content/pm/Signature", &g_apk_cert);
+        ((void **)klj_arr(arr)->data)[0] = sig;
+    }
+    KLJ_LOG("PackageInfo.signatures -> %d certificate(s)", have);
+    return (klj_val){.l = arr};
+}
+static klj_val klj_Signature_toByteArray(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    void *out = klj_new_array('B', NULL, (int)g_apk_cert.len);
+    if (g_apk_cert.der && g_apk_cert.len) memcpy(klj_arr(out)->data, g_apk_cert.der, g_apk_cert.len);
+    return (klj_val){.l = out};
+}
+// Signature.toCharsString(): the certificate bytes as lowercase hex.
+static klj_val klj_Signature_toCharsString(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    char *hex = malloc(g_apk_cert.len * 2 + 1);
+    if (!hex) return (klj_val){.l = NULL};
+    for (size_t i = 0; i < g_apk_cert.len; i++) snprintf(hex + i * 2, 3, "%02x", g_apk_cert.der[i]);
+    hex[g_apk_cert.len * 2] = '\0';
+    void *s = kl_jni_new_string(hex);
+    free(hex);
+    return (klj_val){.l = s};
+}
+// Signature.hashCode() is Arrays.hashCode over the certificate bytes.
+static klj_val klj_Signature_hashCode(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    int32_t h = 1;
+    for (size_t i = 0; i < g_apk_cert.len; i++) h = (int32_t)((uint32_t)h * 31u + (uint32_t)(int32_t)(signed char)g_apk_cert.der[i]);
+    return (klj_val){.j = (uint64_t)(int64_t)h};
+}
+
 // PackageInfo, like ApplicationInfo, is read field-by-field.
 // Packages other than the guest itself (such as Meta Quest system packages like
 // com.oculus.shellenv or com.oculus.vrshell) are queried by games like Warplanes: WW1
@@ -2848,6 +2984,9 @@ const klj_binding klj_bind_services[] = {
     {"org/fmod/FmodAndroidAudioManager", "stopBluetoothSco",  "()V",  klj_fmod_void},
     {"android/content/pm/PackageInfo", "getLongVersionCode", "()J",
      klj_PackageInfo_getLongVersionCode},
+    {"android/content/pm/Signature", "toByteArray", "()[B", klj_Signature_toByteArray},
+    {"android/content/pm/Signature", "toCharsString", "()Ljava/lang/String;", klj_Signature_toCharsString},
+    {"android/content/pm/Signature", "hashCode", "()I", klj_Signature_hashCode},
     {"com/unity3d/player/UnityPlayer", "getNetworkConnectivity", "()I",
      klj_UnityPlayer_getNetworkConnectivity},
     {"io/sentry/Sentry", "close", "()V", klj_Sentry_close},
