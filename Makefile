@@ -43,12 +43,12 @@ RUNTIME_JNI := runtime/kl_jni.c \
            runtime/jni/kl_jni_looper.c runtime/jni/kl_jni_display.c \
            runtime/jni/kl_jni_bridge.c runtime/jni/kl_jni_window.c \
            runtime/jni/kl_jni_net.c runtime/jni/kl_jni_softinput.c \
-           runtime/jni/kl_jni_services.c runtime/jni/kl_jni_io.c \
-           runtime/jni/kl_jni_prefs.c runtime/jni/kl_jni_sdl.c \
+           runtime/jni/kl_jni_services.c runtime/jni/kl_jni_publicdir.c runtime/jni/kl_jni_io.c runtime/jni/kl_jni_prefs.c \
+           runtime/jni/kl_jni_sdl.c \
            runtime/jni/kl_jni_ue4.c runtime/jni/kl_jni_electra.c runtime/jni/kl_jni_fmod.c runtime/jni/kl_jni_jkxr.c \
            runtime/jni/kl_jni_haptics.c \
            runtime/jni/kl_jni_firebase.c runtime/jni/kl_jni_vivox.c \
-           runtime/jni/kl_jni_vertigo.c runtime/jni/kl_jni_ghosttown.c
+           runtime/jni/kl_jni_vertigo.c runtime/jni/kl_jni_ghosttown.c runtime/jni/kl_jni_bigscreen.c
 
 # The Linux process runtime (runtime/linux/) and its door. Part of what ships:
 # a Linux guest in the visionOS app is the same code as build/m_linux.
@@ -68,13 +68,13 @@ RUNTIME_SHIP := $(LX_SRC) runtime/guest/kl_linuxproc.c \
            $(RUNTIME_JNI) \
            runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c runtime/xr/kl_hands.c \
            runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_present.c \
-           runtime/xr/kl_ovrplat.c runtime/xr/kl_assetcfg.c runtime/xr/kl_room.c runtime/xr/kl_steamapi.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_avdec.m runtime/media/kl_avpro.m \
+           runtime/xr/kl_ovrplat.c runtime/xr/kl_assetcfg.c runtime/xr/kl_room.c runtime/xr/kl_steamapi.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_avdec.m runtime/media/kl_avpro.m runtime/media/kl_bsplayer.c runtime/media/kl_bsfbs.c \
            runtime/gfx/kl_vulkan.c runtime/gfx/kl_vk_eyefix.c runtime/gfx/kl_mtl_foveate.m runtime/gfx/kl_mtl_busy.m \
            runtime/guest/kl_nativeactivity.c runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_xashservers.c runtime/guest/kl_sdl2.c \
            runtime/guest/kl_gles3jni.c runtime/guest/kl_driver.c \
            runtime/media/kl_aaudio.c runtime/media/kl_mediaplayer.c \
-           runtime/gfx/kl_glfb.c runtime/gfx/kl_cvmtl.m runtime/gfx/kl_fove.m runtime/gfx/kl_gl_trace.S runtime/gfx/kl_gl_lock.S \
+           runtime/gfx/kl_glfb.c runtime/gfx/kl_gltex.c runtime/gfx/kl_cvmtl.m runtime/gfx/kl_fove.m runtime/gfx/kl_gl_trace.S runtime/gfx/kl_gl_lock.S \
            runtime/guest/kl_mono.c \
            runtime/guest/kl_il2cpp.c runtime/kl_fault.c runtime/guest/kl_guestpatch.c \
            runtime/guest/kl_guestpoke.c runtime/kl_cacerts.c runtime/media/kl_phonon_hrtf.S \
@@ -483,6 +483,79 @@ build/t_ovrplayers: tests/t_ovrplayers.c $(RUNTIME) $(RUNTIME_HDRS)
 
 ovrplayers: build/t_ovrplayers
 	./build/t_ovrplayers
+
+build/t_bigscreen_menu: tests/t_bigscreen_menu.c $(RUNTIME) $(RUNTIME_HDRS)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bigscreen_menu.c $(RUNTIME) $(LDLIBS)
+
+bigscreen_menu: build/t_bigscreen_menu
+	./build/t_bigscreen_menu
+
+build/t_bigscreen_gamma: tests/t_bigscreen_gamma.c runtime/gfx/kl_reproject.c runtime/gfx/kl_reproject.h runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bigscreen_gamma.c runtime/gfx/kl_reproject.c runtime/kl_env.c
+
+bigscreen_gamma: build/t_bigscreen_gamma
+	./build/t_bigscreen_gamma
+
+build/t_bigscreen_movies: tests/t_bigscreen_movies.c runtime/jni/kl_jni_publicdir.c runtime/jni/kl_jni_publicdir.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bigscreen_movies.c runtime/jni/kl_jni_publicdir.c
+
+bigscreen_movies: build/t_bigscreen_movies
+	./build/t_bigscreen_movies
+
+build/t_bs_demux: tests/t_bs_demux.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_demux.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_avdec.m runtime/kl_env.c $(LDLIBS)
+
+bs_demux: build/t_bs_demux
+	./build/t_bs_demux
+
+build/t_bs_decode: tests/t_bs_decode.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_decode.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_avdec.m runtime/kl_env.c $(LDLIBS)
+
+bs_decode: build/t_bs_decode
+	./build/t_bs_decode
+
+build/t_bs_present: tests/t_bs_present.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_present.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_avdec.m runtime/kl_env.c $(LDLIBS)
+
+bs_present: build/t_bs_present
+	./build/t_bs_present
+
+build/t_bs_transport: tests/t_bs_transport.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_transport.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_avdec.m runtime/kl_env.c $(LDLIBS)
+
+bs_transport: build/t_bs_transport
+	./build/t_bs_transport
+
+build/t_bs_aplay: tests/t_bs_aplay.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_aplay.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_avdec.m runtime/kl_env.c $(LDLIBS)
+
+bs_aplay: build/t_bs_aplay
+	./build/t_bs_aplay
+
+build/t_bs_fbs: tests/t_bs_fbs.c runtime/media/kl_bsfbs.c runtime/media/kl_bsfbs.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_fbs.c runtime/media/kl_bsfbs.c $(LDLIBS)
+
+bs_fbs: build/t_bs_fbs
+	./build/t_bs_fbs
+
+# The MediaInfo thumbnail upload against a fake GL: tight pixel-unpack state
+# around glTexImage2D, ambient state restored, failed uploads deleted. No
+# ANGLE needed. `make bs_thumb`, part of the focused Bigscreen suite.
+build/t_bs_thumb: tests/t_bs_thumb.c runtime/gfx/kl_gltex.c runtime/gfx/kl_gltex.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_thumb.c runtime/gfx/kl_gltex.c $(LDLIBS)
+
+bs_thumb: build/t_bs_thumb
+	./build/t_bs_thumb
 
 # Tracker nodes 5..8 as a Quest answers them (KL_OVRP_NO_TRACKERS, Angry Birds VR). In `make check`.
 build/t_trackers: tests/t_trackers.c $(RUNTIME) $(RUNTIME_HDRS)
@@ -1095,6 +1168,12 @@ build/t_ctrlrecovery: tests/t_ctrlrecovery.swift visionos/Sources/KleptonControl
 	@mkdir -p build
 	swiftc -o $@ visionos/Sources/KleptonControllerRecoveryPolicy.swift tests/t_ctrlrecovery.swift
 
+build/t_vrrfloor: tests/t_vrrfloor.swift visionos/Sources/KleptonVRRFloor.swift
+	@mkdir -p build
+	swiftc -o $@ visionos/Sources/KleptonVRRFloor.swift tests/t_vrrfloor.swift
+
+vrrfloor: build/t_vrrfloor
+	./build/t_vrrfloor
 # Hardware-independent tests for the actual shipped Surreal decoder, mapper and fusion.
 SURREAL_CORE := visionos/Sources/KleptonControllerInput.swift visionos/Sources/KleptonControllerMode.swift visionos/Sources/KleptonSurrealInput.swift visionos/Sources/KleptonSurrealAim.swift
 build/t_surreal: $(SURREAL_CORE) tests/t_surreal.swift

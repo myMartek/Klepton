@@ -57,6 +57,10 @@ static void legacy_test(void) {
     assert(legacy_calls == 3);
 }
 int main(void) {
+    // The pressure gate waits for initJni in a real boot; this test never boots
+    // the guest, so it arms delivery explicitly (before the fork — the child
+    // inherits it).
+    kl_driver_test_mark_initjni_done();
     // Separate native registries: UnregisterNatives is intentionally inert here.
     pid_t pid = fork();
     assert(pid >= 0);

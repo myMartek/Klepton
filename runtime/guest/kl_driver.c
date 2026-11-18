@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,16 @@ static void           (*g_phase_hook)(const char *);
 static unsigned         g_alarm = 20;
 static unsigned         g_frames;
 static int              g_gap_only;
+
+// Whether UnityPlayer.initJni has returned: before that moment the engine is
+// half-constructed and a nativeLowMemory call into it faults (startup crash
+// seen 2026-10-21, x2497738113633933: OS pressure event during boot fired
+// kl_mem_pressure_fire on the dispatch thread straight into libil2cpp).
+// Pressure during boot is dropped — nothing cached yet, so there is nothing
+// for the guest to shed.
+static _Atomic int g_initjni_done;
+int kl_driver_initjni_done(void) { return atomic_load(&g_initjni_done); }
+void kl_driver_test_mark_initjni_done(void) { atomic_store(&g_initjni_done, 1); }
 
 // The Unity guest's handle and its resolved nativeRender, kept between _begin
 // and each _frame. A NULL g_render is how _frame knows _begin has not run.
@@ -868,6 +879,7 @@ static int boot_unity(FILE *out) {
     kl_jni_unity_construct_helpers();
     P(out, "\n=== EXIT CRITERION MET: initJni completed, no unimplemented "
            "JNI calls ===\n");
+    atomic_store(&g_initjni_done, 1);
     return 0;
 }
 
@@ -1417,6 +1429,12 @@ int kl_driver_frame(void) {
     kl_mprobe_nexus_frame_budget(g_frames);
     // Ven VR Adventure's realtime shadows, taken out (self-gated on the target).
     kl_mprobe_ven_no_rt_shadows(g_frames);
+    // The texture-unit cap is set when the GfxDevice is built, so a device
+    // rebuilt after begin (XR start, graphics reset) comes back at Unity's
+    // default 32 and the one-shot poke silently expires — Bigscreen showed
+    // 120k "Invalid texture unit!" after a single 32->64 poke. Re-check here:
+    // idempotent, only writes when below target (see kl_guestpoke.c).
+    kl_guest_poke_texture_unit_cap();
     // Custom levels, from the same seat and for the same reason. Self-gated on a
     // CustomLevels directory existing, so every other guest pays one stat().
     kl_songs_tick(g_frames);

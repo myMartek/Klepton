@@ -14,12 +14,22 @@
 // kl_audio_mic_set_enabled and read by kl_aaudio.c / kl_opensl.c when a guest
 // opens an input stream.
 import SwiftUI
+import AVFAudio
 
 /// The one field, kept as a struct for the same reason KLChromaSettings is: a
 /// single JSON blob in UserDefaults migrates cleanly when a field is added
 /// later, rather than a loose default key nothing writes.
 struct KLMicSettings: Codable, Equatable {
     var enabled = false
+}
+
+/// Whether this target's guest has voice chat. Such a target arms the microphone
+/// on the first launch after an install — that is what makes visionOS ask its
+/// permission question, the same way every other app that needs the microphone
+/// does. Everything else keeps the original opt-in: no category change, no
+/// prompt, no capture device for a title that never asks.
+func klTargetUsesVoiceChat(_ name: String) -> Bool {
+    ["x2497738113633933"].contains(name)      // Bigscreen
 }
 
 final class KleptonMic: ObservableObject {
@@ -31,17 +41,35 @@ final class KleptonMic: ObservableObject {
 
     private init() {
         // Same precedence as KleptonChroma: environment wins where explicitly
-        // set, then the saved setting, then the default (off). KL_MIC=1 on a
-        // launch line turns it on for that run without having to touch the panel.
+        // set, then the saved setting, then the default (off) — except on a voice
+        // target's first launch after an install, where there is no saved answer
+        // yet and the default has to be "ask". Arming here is what makes visionOS
+        // put its permission question on screen; the answer is saved below, so a
+        // "no" stays a no until someone turns it back on in Settings.
         var s = KLMicSettings()
+        var saved = false
         if let d = UserDefaults.standard.data(forKey: Self.defaultsKey),
-           let saved = try? JSONDecoder().decode(KLMicSettings.self, from: d) {
-            s = saved
+           let store = try? JSONDecoder().decode(KLMicSettings.self, from: d) {
+            s = store
+            saved = true
             NSLog("[mic] restored: \(Self.describe(s))")
         }
         let env = ProcessInfo.processInfo.environment
-        if let v = env["KL_MIC"] { s.enabled = v != "0" }
+        if let v = env["KL_MIC"] { s.enabled = v != "0"; saved = true }
+        if !saved && klTargetUsesVoiceChat(klTargetName()) {
+            s.enabled = true
+            NSLog("[mic] first launch on a voice target — asking for the microphone")
+        }
         settings = s          // didSet arms the C side and (if on) the session
+    }
+
+    /// visionOS said no. The system will not ask again, so the switch goes back to
+    /// off and the panel says where to allow it; turning the toggle on here would
+    /// only light up a capture that hardware permission keeps silent.
+    func disableAfterDenial() {
+        guard settings.enabled else { return }
+        settings.enabled = false
+        NSLog("[mic] permission denied — capture off (Settings > Apps > Klepton > Microphone)")
     }
 
     private func publish() {
@@ -82,6 +110,12 @@ struct MicView: View {
                 .font(.caption).foregroundStyle(.secondary)
 
             Toggle(klT("Allow microphone", "Mikrofon erlauben"), isOn: $mic.settings.enabled)
+
+            if AVAudioApplication.shared.recordPermission == .denied {
+                Text(klT("visionOS has denied microphone access for Klepton. Allow it under Settings → Apps → Klepton → Microphone, then switch this on again.",
+                         "visionOS hat den Mikrofon-Zugriff für Klepton verweigert. Erlaube ihn unter Einstellungen → Apps → Klepton → Mikrofon und schalte den Regler danach wieder ein."))
+                    .font(.caption).foregroundStyle(.orange)
+            }
 
             Text(KleptonMic.describe(mic.settings))
                 .font(.system(.caption2, design: .monospaced))

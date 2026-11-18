@@ -777,6 +777,102 @@ static void probe_xr_display(unsigned frame) {
 }
 
 // ---------------------------------------------------------------------------
+// Bigscreen menu signal (2026-10-24): the room menu's own pages
+// (BigUIPage) plus the film renderer's in-eye liveness, feeding
+// menu-yields-film (kl_bigscreen_menu_set). Only the hide-flip log
+// remains; the route/overlay/page/film census logs are cleaned out.
+// KL_PROBE_BIGSCREEN=0 opts out (see kl_probe_bigscreen).
+static void probe_bigscreen_route(unsigned frame) {
+    static const MethodInfo *m_find, *m_active;
+    static const MethodInfo *m_ovrname, *m_behen, *m_pageshow;
+    static Il2CppObject *page_type, *mr_type;
+    static void *f_mrscreen, *f_mrrend;
+    static size_t o_mrscreen, o_mrrend;
+    static int resolved;
+    if (!resolved) {
+        resolved = 1;
+        m_find   = find_method("UnityEngine", "Resources", "FindObjectsOfTypeAll", 1);
+        m_active = find_method("UnityEngine", "GameObject", "get_activeSelf", 0);
+        m_ovrname = find_method("UnityEngine", "Object", "get_name", 0);
+        m_behen   = find_method("UnityEngine", "Behaviour", "get_enabled", 0);
+        m_pageshow = find_method("Bigscreen.UI", "BigUIPage", "get_IsShowing", 0);
+        Il2CppClass *kp = find_class("Bigscreen.UI", "BigUIPage");
+        if (kp) page_type = il.type_get_object(il.class_get_type(kp));
+        Il2CppClass *km = find_class("Bigscreen.Media", "BigMediaRenderer");
+        if (km) {
+            mr_type = il.type_get_object(il.class_get_type(km));
+            // Dump-measured layout (screen 0x20, renderer 0x38); resolved
+            // by name, drift is said.
+            kl_image *img = kl_find_image("libil2cpp.so");
+            typedef void *(*field_fn)(Il2CppClass *, const char *);
+            typedef size_t (*f_off_fn)(void *);
+            field_fn field = img ? (field_fn)kl_sym(img, "il2cpp_class_get_field_from_name") : NULL;
+            f_off_fn f_off = img ? (f_off_fn)kl_sym(img, "il2cpp_field_get_offset") : NULL;
+            if (field && f_off) {
+                f_mrscreen = field(km, "regularScreen");
+                f_mrrend   = field(km, "regularScreenRenderer");
+                if (f_mrscreen) o_mrscreen = f_off(f_mrscreen);
+                if (f_mrrend) o_mrrend = f_off(f_mrrend);
+            }
+        }
+    }
+    static unsigned nrun;
+    if (nrun == 0) probe_xr_display(frame);   // the device string, once
+    // The room menu's own pages (BigUIPage): showing-state feeds
+    int want_menu = 0;
+    if (m_find && page_type && m_ovrname && m_pageshow) {
+        void *ta[1] = { page_type };
+        Il2CppObject *arr = invoke(m_find, ta, "FindObjectsOfTypeAll(BigUIPage)");
+        unsigned n = arr ? il.array_length(arr) : 0;
+        Il2CppObject **items = arr ? (Il2CppObject **)((uint8_t *)arr + ARR_DATA) : NULL;
+        for (unsigned i = 0; i < n && i < 16; i++) {
+            Il2CppObject *p = items[i];
+            if (!p) continue;
+            char nm[64] = "?";
+            int sh = -1;
+            Il2CppObject *t = invoke_on(p, m_ovrname, NULL, "BigUIPage.name");
+            if (t) str_ascii(t, nm, sizeof nm);
+            if ((t = invoke_on(p, m_pageshow, NULL, "BigUIPage.IsShowing")))
+                sh = *(uint8_t *)il.object_unbox(t) ? 1 : 0;
+            // Player chrome is not the menu: VideoPlayer*/VideoFileNav* Windows
+            // plus the ControlStrip coexist with the film (room, file list).
+            // Only a showing page outside that set (HomePage, NavMenu_*, …,
+            // never Loading*) counts as the fullscreen menu the film yields to.
+            if (sh == 1 && !strstr(nm, "Loading") &&
+                strncmp(nm, "VideoPlayer", 11) != 0 &&
+                strncmp(nm, "VideoFileNav", 12) != 0 &&
+                strncmp(nm, "ControlStrip", 12) != 0) want_menu = 1;
+        }
+    }
+    // The film renderer: in-eye mesh alive? regularScreen active and
+    // screen renderer enabled — the DRM guard for menu-yields-film: never
+    // hide the overlay when the mesh is dead.
+    int ineye_alive = 0;
+    if (m_find && mr_type && m_active && m_behen) {
+        void *ta[1] = { mr_type };
+        Il2CppObject *arr = invoke(m_find, ta, "FindObjectsOfTypeAll(BigMediaRenderer)");
+        unsigned n = arr ? il.array_length(arr) : 0;
+        Il2CppObject **items = arr ? (Il2CppObject **)((uint8_t *)arr + ARR_DATA) : NULL;
+        for (unsigned i = 0; i < n && i < 4; i++) {
+            Il2CppObject *r = items[i];
+            if (!r) continue;
+            Il2CppObject *scr = NULL, *rnd = NULL, *t;
+            int sa = -1, re = -1;
+            if (f_mrscreen) memcpy(&scr, (uint8_t *)r + o_mrscreen, sizeof scr);
+            if (f_mrrend) memcpy(&rnd, (uint8_t *)r + o_mrrend, sizeof rnd);
+            if (scr && (t = invoke_on(scr, m_active, NULL, "regularScreen.activeSelf")))
+                sa = *(uint8_t *)il.object_unbox(t) ? 1 : 0;
+            if (rnd && (t = invoke_on(rnd, m_behen, NULL, "screenRenderer.enabled")))
+                re = *(uint8_t *)il.object_unbox(t) ? 1 : 0;
+            if (sa == 1 && re == 1) ineye_alive = 1;
+        }
+    }
+    // Menu-yields-film: publish the debounced state for the compositor.
+    kl_bigscreen_menu_set(want_menu, ineye_alive);
+    nrun++;
+}
+
+// ---------------------------------------------------------------------------
 // KL_PROBE_RESOLVE=0xoff[,0xoff...]: name the managed method CONTAINING each
 // given libil2cpp offset. The sampler reports parked pcs as libil2cpp+0x...;
 // on metadata v29 its own resolver cannot name them, but the RUNTIME can:
@@ -2452,6 +2548,18 @@ void kl_mprobe_tick(unsigned frame) {
         }
         if (frame >= xr_from && frame % xr_every == 0 && mprobe_init())
             probe_xr_display(frame);
+    }
+    // Bigscreen menu-route triage (see probe_bigscreen_route): VRSDK +
+    // HACK + live browser mode + scene, on its own cadence, change-only
+    // with a heartbeat. KL_PROBE_BIGSCREEN=0 opts out. Cadence is 30
+    // frames (~0.4 s) since menu-yields-film needs it: the triage lines
+    // stay change-only, so the cost is the Find calls, not the log.
+    {
+        extern int kl_probe_bigscreen(void);
+        static unsigned bs_every = 0;
+        if (!bs_every) { bs_every = kl_env_uint("KL_PROBE_BS_EVERY", 30u); if (!bs_every) bs_every = 30; }
+        if (kl_probe_bigscreen() && frame >= 600 && frame % bs_every == 0 && mprobe_init())
+            probe_bigscreen_route(frame);
     }
 
     static int on = -1;

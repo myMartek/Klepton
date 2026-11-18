@@ -26,6 +26,7 @@
 #include "kl_ndk.h"
 #include "kl_va.h"
 #include "kl_jni_int.h"
+#include "guest/kl_driver.h"
 
 // ---- the on-screen keyboard (Unity's soft input) ---------------------------
 //
@@ -331,7 +332,16 @@ static klj_val klj_UnityPlayer_getClipboardText(void *env, void *self,
     memcpy(copy, g_clipboard, sizeof copy);
     pthread_mutex_unlock(&g_soft.mu);
     // Android's own answer for an empty clipboard is null (getPrimaryClip
-    // returns null), and the guest's code tests for it.
+    // returns null), and the guest's code tests for it — except Bigscreen's
+    // login path, which passes the result straight into a strlen on a worker
+    // thread (libunity+0x692338 -> strlen(NULL), signal 11 on device
+    // 2026-10-21, one second after a successful Bigscreen-account login).
+    // For that title an empty clipboard is "" rather than null.
+    if (!copy[0]) {
+        const char *t = kl_driver_target_name();
+        if (t && strcmp(t, "x2497738113633933") == 0)
+            return (klj_val){.l = kl_jni_new_string("")};
+    }
     return (klj_val){.l = copy[0] ? kl_jni_new_string(copy) : NULL};
 }
 

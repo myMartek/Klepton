@@ -29,6 +29,13 @@ void *kl_ovrp_sym(const char *name);
 // Which ovrp_* the guest resolved and which it called — the work list.
 void kl_ovrp_report(FILE *f);
 
+// Bigscreen menu-triage probe (2026-10-24): one predicate for the three
+// logging sites (enqueue batches in kl_ovrp.c, guest route in kl_mprobe,
+// composite sets in Swift). Target-gated default-ON during triage — a
+// manually started device app has no environment to opt in through —
+// KL_PROBE_BIGSCREEN=0 opts out, anything else opts in.
+int kl_probe_bigscreen(void);
+
 // Which space those poses are in: 0 = eye level, 1 = floor level, 2 = stage,
 // as the guest last set with ovrp_SetTrackingOriginType. Beat Saber asks for
 // floor level, so y=0 is the floor and a head belongs at standing eye height —
@@ -139,6 +146,30 @@ void kl_ovrp_notify_recenter(void);
 // longer submitted is taken down and cannot come back. 1 = passed. Host test
 // tests/t_ovrplayers.c; it needs KL_OVRP_ENQ_RETIRE=1 in the environment.
 int kl_ovrp_layer_lifecycle_selftest(void);
+
+// Menu-yields-film (Bigscreen x2497738113633933): while a room-menu BigUIPage
+// IsShowing, the film quad overlay is skipped host-side and the in-eye mesh
+// carries the picture. State is set from the frame-thread probe (kl_mprobe)
+// and read by the compositor. 1 = passed. Host test tests/t_bigscreen_menu.c.
+void kl_bigscreen_menu_set(int open, int ineye_alive);
+int kl_bigscreen_menu_open(void);
+int kl_bigscreen_hide_film(int shape, int head_locked);
+int kl_bigscreen_menu_selftest(void);
+
+// Local-file film texture (Bigscreen x2497738113633933): the decoded BGRA
+// frame uploaded into a shared GL texture. Both the guest (GetVideoTextureId,
+// which samples it itself) and the mirror hook share it; each serial uploads
+// once. 0 = no frame / no GL yet. The note stands the mirror down once the
+// guest draws from the texture itself.
+uint32_t klovrp_bsfilm_upload(const unsigned char *bgra, int w, int h,
+                              unsigned long long serial);
+void klovrp_bsfilm_note_guest_draws(void);
+
+// Per-entry MediaInfo thumbnail texture (fresh GL texture per payload; the
+// guest wraps each id in its own Texture2D, so ids must not be shared).
+// Uploaded at the frame boundary, fired from the JNI Update pump. 0 = failed.
+uint32_t klovrp_bsinfo_thumb_upload(const unsigned char *bgra, int w, int h,
+                                    int info_id);
 
 // The frame clock, for a guest that owns its own frame loop — kl_openxr's
 // pacer, on the OVRPlugin side of the same question.

@@ -895,7 +895,7 @@ struct BootView: View {
     // The microphone dial only appears where voice is actually used: Steam Link's
     // stream and the Xash titles that name a local server. Every other build hides it.
     private var showMic: Bool {
-        ["steamlink-vr", "hl1", "cs1"].contains(klTargetName())
+        ["steamlink-vr", "hl1", "cs1"].contains(klTargetName()) || klTargetUsesVoiceChat(klTargetName())
     }
     // Walkabout's multiplayer rooms have voice chat (Photon Voice, AudioInAEC in
     // kl_jni_services.c), and there the switch is a player's, not a tinkerer's:

@@ -308,7 +308,19 @@ static int plat_is_obb_langpack_target(void) {
 #define KLPLAT_TRACE_MAX 1024
 int kl_ovrplat_trace_on(void) {
     static int v = -1;
-    if (v < 0) v = kl_env_on("KL_PLAT_TRACE", 0);
+    if (v < 0) {
+        v = kl_env_on("KL_PLAT_TRACE", 0);
+        // TEMPORARY diagnostic (Bigscreen boot stall, 2026-10-16): devicectl
+        // launches hang on this device (tunnel, DDI and usage assertion all
+        // acquire, then no answer — a control third-party app hangs the same
+        // way), so the switch cannot arrive through the environment, and a
+        // Home-View launch has none to begin with. Forced ON for this target
+        // only; REMOVE once the round has been measured.
+        if (!v) {
+            const char *t = kl_driver_target_name();
+            v = (t && strcmp(t, "x2497738113633933") == 0);
+        }
+    }
     return v;
 }
 static void klplat_trace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -2444,6 +2456,16 @@ static int klplat_user_listed(const char *t) {
                                 // The offline user supplies only player identity;
                                 // ownership and purchases remain separate.
                                 "x7532973430077887",
+                                // Bigscreen Beta 0.950.2: the entitlement
+                                // request completes, then GetLoggedInUser comes
+                                // back 0 with "An unknown error occurred.
+                                // Request failed." and its social menu stays
+                                // behind a spinner that never stops (on device,
+                                // 2026-10-16). As for Shave & Stuff, the offline
+                                // user supplies only "who is playing";
+                                // ownership and purchases remain the separate
+                                // answers they are.
+                                "x2497738113633933",
                                 // Cubism 1.8.0: entitlement succeeds, then
                                 // GetLoggedInUser returns 0 with "Request
                                 // failed." while the picture stays black
@@ -2597,7 +2619,8 @@ static uint64_t klplat_User_GetOrgScopedID(uint64_t user_id) {
     static int err = -1;
     if (err < 0) {
         const char *t = kl_driver_target_name();
-        err = t && strcmp(t, "x4360608937312293") == 0;
+        err = t && (strcmp(t, "x4360608937312293") == 0 ||
+                    strcmp(t, "x2497738113633933") == 0);
     }
     if (!err) return klplat_init_fails("ovr_User_GetOrgScopedID");
     plat_hit("ovr_User_GetOrgScopedID");

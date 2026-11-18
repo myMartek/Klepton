@@ -488,7 +488,16 @@ static int kl_getsockopt(int fd, int level, int opt, void *val, socklen_t *len) 
 // timeouts are the remaining clock that could pace it.
 static int kl_net_trace(void) {
     static int on = -1;
-    if (on < 0) on = kl_env_on("KL_TRACE_NET", 0);
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        on = kl_env_on("KL_TRACE_NET", 0);
+        // TEMPORARY diagnostic (see kl_ovrplat.c kl_ovrplat_trace_on): forced ON
+        // for this target while devicectl launches hang. REMOVE after measuring.
+        if (!on) {
+            const char *t = kl_driver_target_name();
+            on = (t && strcmp(t, "x2497738113633933") == 0);
+        }
+    }
     return on;
 }
 // KL_NET_OFFLINE=1: present a headset with no network at all — a valid real
@@ -2543,9 +2552,6 @@ static const kl_entry g_shim[] = {
     E("getrandom", klb_getrandom), E("isnan", klb_isnan),
     E("__isnan", klb_isnan), E("__isnanf", klb_isnanf), E("__isinf", klb_isinf),
     E("__isinff", klb_isinff), E("__isfinite", klb_isfinite), E("__isfinitef", klb_isfinitef),
-    // Android arm64 off_t is already 64-bit. Space Atlas VR's avatar SDK
-    // imports mmap64; keep Linux flag translation and the executable-map guard.
-    E("mmap64", klb_mmap),
     E("mmap", klb_mmap), E("mprotect", klb_mprotect), E("madvise", klb_madvise),
     E("sbrk", klb_sbrk),
     // Linux-only, and the third door onto the memory budget — UE4 asks here

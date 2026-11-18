@@ -34,6 +34,7 @@
 #include "kl_va.h"
 #include <zlib.h>
 #include "kl_jni_int.h"
+#include "kl_jni_publicdir.h"
 
 // ---- org.fmod.FmodAndroidAudioManager — FMOD's Java device census ----
 //
@@ -2023,6 +2024,28 @@ static klj_val klj_Environment_getExternalStorageDirectory(void *env, void *self
     (void)env; (void)self; (void)a; (void)n;
     return (klj_val){.l = klj_new_file("/sdcard")};   // short form; see getExternalFilesDir
 }
+// getExternalStoragePublicDirectory(type): the shared folder for one
+// DIRECTORY_* kind — Bigscreen names its local-film folder this way
+// ("Movies") or as the literal "/sdcard/Movies". Same short spelling as the
+// rest of this file; kl_guest_path maps the /sdcard prefix onto the writable
+// container (Documents/android-files on visionOS), and the directory is
+// created the way getExternalFilesDir does — the caller asks where to look,
+// so a path that does not exist yet is a listing that finds nothing.
+static klj_val klj_Environment_getExternalStoragePublicDirectory(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    const char *type = n > 0 && a[0].l ? klj_str(a[0].l) : NULL;
+    char path[1024];
+    kl_public_dir_for_type(type, path, sizeof path);
+    char kp[1024];
+    klj_mkdir_p(kl_guest_path(path, kp, sizeof kp));
+    // Delete-flag without a cable: devicectl cannot delete from the container,
+    // so a __delete__.txt list inside Movies names films to unlink. Honored
+    // here because the guest opens its film browser through this call.
+    if (type && !strcmp(type, "Movies"))
+        kl_movies_process_delete_flag(kp);
+    KLJ_LOG("getExternalStoragePublicDirectory(%s) -> %s", type ? type : "null", path);
+    return (klj_val){.l = klj_new_file(path)};
+}
 
 // The guest's writable data volume is the app container on this host.
 // Return its real directory so StatFs measures available storage accurately.
@@ -2560,6 +2583,11 @@ static const char *klj_stream_bytes(klj_stream *st) {
 // "Compute shader (Internal-Skinning): Kernel (11) size exceeds device
 // limits", then "Kernel at index (11) is invalid" every frame, and only the
 // wrist gear of the player's hands drawn (on device, 2026-10-16).
+// Bigscreen Beta (x2497738113633933, Unity 2020.3.33f1) is the same case one
+// step further on: "Shader Internal-Skinning.main: GLSL compilation failed"
+// and immediately behind it a null dereference inside libunity on the main
+// guest thread — its loading screen had just reached its first skinned
+// content, and the run died there (on device, 2026-10-16).
 // KL_UNITY_BOOT_EXTRA="k=v;k=v" overrides the per-target default; "" for none.
 // ...and every Unity title under the profile for untested games (kl_driver.c).
 // boot.config is read before Unity picks its graphics API, so this cannot be
@@ -2573,7 +2601,8 @@ static const char *klj_boot_config_extra(void) {
         (strcmp(t, "x5361030930653377") == 0 ||
          strcmp(t, "x7532973430077887") == 0 ||
          strcmp(t, "x4015163475201433") == 0 ||
-         strcmp(t, "x9863010250399155") == 0)) ||
+         strcmp(t, "x9863010250399155") == 0 ||
+         strcmp(t, "x2497738113633933") == 0)) ||
         (kl_untested_profile() && kl_driver_kind() == KL_GUEST_UNITY)
         ? "disable-gpu-skinning=1" : "";
     return kl_env_str("KL_UNITY_BOOT_EXTRA", dflt);
@@ -3225,6 +3254,7 @@ const klj_binding klj_bind_services[] = {
     {"android/os/Environment", "getDataDirectory", "()Ljava/io/File;", klj_Environment_getDataDirectory},
     {"android/os/Environment", "getExternalStorageState", "()Ljava/lang/String;", klj_Environment_getExternalStorageState},
     {"android/os/Environment", "getExternalStorageDirectory", "()Ljava/io/File;", klj_Environment_getExternalStorageDirectory},
+    {"android/os/Environment", "getExternalStoragePublicDirectory", "(Ljava/lang/String;)Ljava/io/File;", klj_Environment_getExternalStoragePublicDirectory},
     {"android/os/Environment", "isExternalStorageManager", "()Z", klj_Environment_isExternalStorageManager},
     // android.os.StatFs — free space, measured rather than invented. See the
     // implementation for why f_frsize is the multiplier and why the int forms

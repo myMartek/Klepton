@@ -136,3 +136,6 @@ __pycache__/
 # release of vivecraft-visionos (tools/vivecraft_seed.py). Mojang's and the
 # mods' authors', never part of this tree.
 /visionos/prebuilt/
+
+# Unpacked per-game trees (APK entpackt, inkl. generischer x<Targets>): nie einchecken
+/x[0-9]*/

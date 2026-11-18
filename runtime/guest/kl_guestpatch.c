@@ -995,6 +995,134 @@ static const kl_gp_word k_sourcevr_hl2_gravity_gloves[] = {
     { 0x2c1418, 0xaa1403e2, 0x30aa5182, "ConVar default: mov x2, x20 (\"0\") -> adr x2, 0x215e49 (\"1\")" },
 };
 
+// Bigscreen (libil2cpp.so, Beta 0.950.2, store target x2497738113633933):
+// VRSDK reads as Oculus, so the theater menu takes the overlay route.
+//
+// Measured: BigUIBrowser.UpdateActiveStates (@0x103724C) takes the overlay
+// path only when GetVRSDK (@0xC47BD4) returns OVR (1) and the desktop-only
+// HACK flag is false; otherwise the menu renders in-eye, where the opaque
+// film overlay covers it. GetVRSDK caches VRSDKFromString (@0xC4AB74), which
+// compares XRSettings.loadedDeviceName with exact equality against
+// "Oculus"/"WindowsMR"/"OpenVR"/"OpenXR" (stringliteral 0x312E210 et al).
+// This host reports "oculus display" (mprobe f1200/1500/1800), which matches
+// none, so the guest computes NONE (0) — on a Quest the loader reports
+// "Oculus" and the same code returns OVR (1). Force the cached getter to OVR:
+// this Android APK only ever runs on Oculus-family devices, so no other input
+// can reach it. A/B: KL_GUEST_PATCH_OFF=bigscreen-vrsdk-ovr.
+//   0x0c47bd4  stp x20, x19, [sp, #-0x20]! -> mov w0, #1
+//   0x0c47bd8  stp x29, x30, [sp, #0x10]  -> ret
+static const kl_gp_word k_bigscreen_vrsdk_ovr[] = {
+    { 0x0c47bd4, 0xa9be4ff4, 0x52800020, "mov w0, #1  (GetVRSDK -> OVR)" },
+    { 0x0c47bd8, 0xa9017bfd, 0xd65f03c0, "ret" },
+};
+
+// Bigscreen (libil2cpp.so, Beta 0.950.2, store target x2497738113633933):
+// a failed automatic login is not announced with a modal popup.
+//
+// This is the second of the two modal messages a start on this host can
+// produce; the first comes from the Oculus branch (see the next row). The code
+// path: Accounts.AutomaticLogin fails, <AttemptLogin>d__15::MoveNext keeps the
+// exception in LoginPage.FailedLoginException (+0x80), and
+// <CreateAutomaticAccount>d__17::MoveNext sets FailedAutoLogin (+0x88) at
+// 0x0daed80 before it opens page 25. LoginPage.Show reads the flag here and
+// calls OnLoginFailed, which turns the exception into text (CloudException.
+// GetErrorList) and ends in BigUI.ShowPopupMessage: "Unable to automatically
+// log in! ... Cannot connect to Bigscreen or Meta ...".
+//
+// Not the message measured on the device: with a token AttemptLogin runs and
+// succeeds, and without one the Oculus branch returns before AttemptLogin is
+// called, so this site never spoke in the runs of 2026-10-28. The row stays as
+// the catch for a rejected refresh token, where this site is what would speak.
+//
+// The branch goes over the CALL, not over the function: its target is the
+// str xzr/strb wzr pair after it, so FailedLoginException and FailedAutoLogin
+// are still cleared and the object is left exactly as a dismissed popup would
+// leave it. What is lost is the popup's own work: ToggleButtonsDisabled(false)
+// — Show already made that call with the same arguments at 0x0d7bbf8 — the
+// same call on [this+0x70] it makes at 0x0d7bbfc, and one LogException line.
+//
+// OnLoginFailed itself is NOT the site to patch: <Login>d__24::MoveNext calls
+// it too (0x0bb56c8) for a manual login the user just typed, and that error
+// must stay visible. This cbz is the only one an automatic failure reaches.
+// A/B: KL_GUEST_PATCH_OFF=bigscreen-no-autologin-popup.
+//   0x0d7be6c  cbz w8, 0xd7be88 (no failed auto-login)
+//              -> b 0xd7be80 (clear the two failure fields, skip the popup)
+static const kl_gp_word k_bigscreen_no_autologin_popup[] = {
+    { 0x0d7be6c, 0x340000e8, 0x14000005, "cbz FailedAutoLogin -> b over OnLoginFailed" },
+    { 0x0d7be68, 0x39422268, 0x39422268, "fingerprint only (ldrb w8, LoginPage.FailedAutoLogin)" },
+    { 0x0d7be7c, 0x9400002d, 0x9400002d, "fingerprint only (bl LoginPage.OnLoginFailed)" },
+    { 0x0d7be84, 0x3902227f, 0x3902227f, "fingerprint only (strb wzr, FailedAutoLogin = false)" },
+};
+
+// Bigscreen (libil2cpp.so, Beta 0.950.2, store target x2497738113633933):
+// the Oculus-user step of the connection flow does not stop the user with a
+// modal popup.
+//
+// StartConnectionFlow ends in <CheckInternetConnection>d__11::MoveNext. When
+// the reachability check passes (0x0dae5cc) and BIG_APP_LOADER.
+// RequiresOculusPlatform() answers yes (0x0dae5e0, true here because
+// bigscreen-vrsdk-ovr makes VRWrapper.IsOculusSDK answer Oculus), the coroutine
+// calls InitializeOculusPlatform instead of AttemptLogin. That path always ends
+// in GetOculusUser, and GetOculusUser always fails on this host: the synthetic
+// Oculus Platform has no Horizon account, so ovr_User_GetOrgScopedID answers
+// ERROR (see kl_ovrplat.c) and GetOculusUserData throws "Oculus platform org
+// scoped id not found." <GetOculusUser>b__14_0 catches that, shows the modal
+// message and enters the offline state, which is the login page the user needs
+// anyway — the popup only stands between them and that page.
+//
+// Measured 2026-10-28 on the first start in a fresh container: the message was
+// on screen; the start right after (same build, same container, same
+// OrgScopedID failures in both logs) reached the login page without it. The
+// branch runs either way, so whether the message is seen depends on when the UI
+// is ready for it — which is exactly the kind of thing a user must not have to
+// race. With this row in place the same first start in a fresh container
+// (uninstall, reinstall, no settings.xml) showed the login page with no
+// message, while the log still carried both OrgScopedID errors.
+//
+// Only the CALL goes. EnterOfflineState, the page it opens (GoToPage/EndState)
+// and the exception log line stay exactly as they are, so what remains is the
+// offline start the app already performs — silent. ShowPopupMessage itself is
+// not patched: 126 other call sites reach it, and the manual-login errors
+// among them (LoginPage.OnLoginFailed via <Login>d__24) must stay visible.
+// A/B: KL_GUEST_PATCH_OFF=bigscreen-no-oculus-popup.
+//   0x0b89cd8  bl BigUI::ShowPopupMessage -> nop
+static const kl_gp_word k_bigscreen_no_oculus_popup[] = {
+    { 0x0b89cd8, 0x9412af3d, 0xd503201f, "bl BigUI::ShowPopupMessage -> nop" },
+    { 0x0b89cc4, 0xf9405d08, 0xf9405d08, "fingerprint only (ldr x8, [x8, #0xb8])" },
+    { 0x0b89cd4, 0xf9419101, 0xf9419101, "fingerprint only (ldr x1, [x8, #0x320] - the message)" },
+    { 0x0b89cdc, 0xf9400288, 0xf9400288, "fingerprint only (ldr x8, [x20])" },
+    { 0x0b89cfc, 0x1405d2d8, 0x1405d2d8, "fingerprint only (b App::EnterOfflineState)" },
+};
+
+// Bigscreen (libil2cpp.so, Beta 0.950.2, store target x2497738113633933):
+// the My Room menu's Hosting entry opens the room settings page.
+//
+// Symptom, measured on the device 2026-11-12: the main menu's "My Room" nav
+// entry does nothing. Every other nav entry works. The click runs, the button
+// plays its haptic, BigLogger prints "NullReferenceException" ~0.1 s after the
+// release, and no page opens.
+//
+// Cause: NavMenu_MyRoom.OnEditRoomSelected (0x0d4eb84) picks the settings page
+// by VRWrapper.IsQuest1(): Quest 1 -> BigUIState.EditRoom (38), every other
+// headset -> BigUIState.EditRoomPageNext (400). This host reports
+// SYSTEM_HEADSET "Oculus Quest 2", so it takes 400, and BigUI.GoToPage(400,
+// false, true, false) throws in its async continuation. Reproduced both ways
+// on the device with KL_PROBE_SCRIPT: GoToPage(38) opens the room settings
+// page, GoToPage(400) logs the NRE and shows nothing.
+//
+// Why 400 throws is still unknown — the row is the workaround, not the
+// explanation. What is lost is the newer EditRoomPageNext layout (0x190).
+// A/B: KL_GUEST_PATCH_OFF=bigscreen-hosting-editroom.
+//   0x0d4ec44  mov w1, #0x190 (EditRoomPageNext) -> mov w1, #0x26 (EditRoom)
+static const kl_gp_word k_bigscreen_hosting_editroom[] = {
+    { 0x0d4ec44, 0x52803201, 0x528004c1, "mov w1, #0x190 -> #0x26 (EditRoomPageNext -> EditRoom)" },
+    { 0x0d4ec40, 0xb4000120, 0xb4000120, "fingerprint only (cbz x0, <raise>) - this branch's BigUI null check" },
+    { 0x0d4ec48, 0xa9417bfd, 0xa9417bfd, "fingerprint only (ldp x29, x30, [sp, #0x10])" },
+    { 0x0d4ec4c, 0x320003e3, 0x320003e3, "fingerprint only (mov w3, #1)" },
+    { 0x0d4ec18, 0x528004c1, 0x528004c1, "fingerprint only (mov w1, #0x26 - the Quest 1 branch)" },
+    { 0x0d4ec1c, 0x1400000b, 0x1400000b, "fingerprint only (b 0xd4ec48)" },
+};
+
 static const kl_gp_patch k_patches[] = {
     { "sourcevr-hl2-weapon-angle", "libclient.so",
       "the weapon angle's default and the middle of its slider are 27 (PS VR2 Sense grip), range 12..42",
@@ -1113,6 +1241,22 @@ static const kl_gp_patch k_patches[] = {
     { "vrchat-spatializer-storm", "libil2cpp.so",
       "the absent Oculus spatializer is skipped, not thrown on, per frame",
       k_vrc_ospstorm, sizeof k_vrc_ospstorm / sizeof *k_vrc_ospstorm },
+    { "bigscreen-vrsdk-ovr", "libil2cpp.so",
+      "VRSDK reads as Oculus so the theater menu takes the overlay route",
+      k_bigscreen_vrsdk_ovr,
+      sizeof k_bigscreen_vrsdk_ovr / sizeof *k_bigscreen_vrsdk_ovr },
+    { "bigscreen-no-autologin-popup", "libil2cpp.so",
+      "a failed automatic login opens the login page without the Meta/Bigscreen error popup",
+      k_bigscreen_no_autologin_popup,
+      sizeof k_bigscreen_no_autologin_popup / sizeof *k_bigscreen_no_autologin_popup },
+    { "bigscreen-no-oculus-popup", "libil2cpp.so",
+      "the missing Oculus org-scoped id enters offline state without the modal message",
+      k_bigscreen_no_oculus_popup,
+      sizeof k_bigscreen_no_oculus_popup / sizeof *k_bigscreen_no_oculus_popup },
+    { "bigscreen-hosting-editroom", "libil2cpp.so",
+      "the My Room menu's Hosting entry opens the room settings page, not the page that throws",
+      k_bigscreen_hosting_editroom,
+      sizeof k_bigscreen_hosting_editroom / sizeof *k_bigscreen_hosting_editroom },
 };
 #define KL_GP_N (sizeof k_patches / sizeof k_patches[0])
 
