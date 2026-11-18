@@ -273,6 +273,12 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
 void kl_reproject_set_srgb_decode(int on);
 int  kl_reproject_srgb_decode(void);
 
+// The per-title sRGB default, testable by target name (`make
+// bigscreen_gamma`): which guests write sRGB code values into a non-sRGB eye
+// and need the decode. klr_srgb_target_default answers for this process's
+// own title; this answers for any.
+int kl_reproject_srgb_default_for_target(const char *t);
+
 // The chroma key, as the panel and the environment set it — see the struct
 // field above. `rgb` is the key colour in the same space the composite samples
 // in, `dmin`/`dmax` the HSV distance band. `rgb` may be NULL to leave the

@@ -980,7 +980,11 @@ kl_avdemux *kl_avdemux_open(const char *container, long long offset, long long s
             (__bridge CMFormatDescriptionRef)t.formatDescriptions.firstObject;
         if (!fmt) { free(m); return NULL; }
         FourCharCode sub = CMFormatDescriptionGetMediaSubType(fmt);
-        int hevc = (sub == kCMVideoCodecType_HEVC);
+        // Both HEVC sample entries: 'hvc1' (kCMVideoCodecType_HEVC) and
+        // 'hev1' (ffmpeg's spelling — the Night-House remux refused with
+        // "could not read parameter sets" because only hvc1 matched and the
+        // HEVC track fell into the H.264 parameter path, 2026-10-27).
+        int hevc = (sub == kCMVideoCodecType_HEVC || sub == 'hev1');
         m->mime = hevc ? "video/hevc" : "video/avc";
         if (!demux_build_psets(m, fmt, hevc)) {
             fprintf(stderr, "  [avdemux] %s: could not read parameter sets\n", real);

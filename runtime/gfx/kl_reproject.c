@@ -127,13 +127,21 @@ void kl_reproject_set_srgb_decode(int on) {
 // the env still overrides either way. Catan VR (x3882524545155280, Unity 2018.4,
 // legacy VR, RGBA16F eye texture) is the same case: its menu looked washed out,
 // "brightness is very high" (2026-10-17).
+int kl_reproject_srgb_default_for_target(const char *t) {
+    if (!t) return 0;
+    return strcmp(t, "x2544573735586536") == 0 || strcmp(t, "x3882524545155280") == 0 ||
+           strcmp(t, "x2497738113633933") == 0;   // Bigscreen (Unity 2020.3 Gamma, RGBA8 eye 0x8058)
+}
+
 static int klr_srgb_target_default(void) {
     static int v = -1;
     if (v < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
         if (!t) return 0;                      // not known yet: ask again later
-        v = strcmp(t, "x2544573735586536") == 0 || strcmp(t, "x3882524545155280") == 0;
+        v = kl_reproject_srgb_default_for_target(t);
+        if (v)
+            fprintf(stderr, "  [reproject] sRGB decode ON (Gamma-title default: %s)\n", t);
     }
     return v;
 }
@@ -1085,7 +1093,7 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
     if (ov->shape != 0 && !cylinder) return u;
     if (cylinder) {
         if (!(ov->cyl[0] > 0.0f) || !(ov->cyl[1] > 0.0f) || !(ov->cyl[2] > 0.0f)) return u;
-    } else if (!(ov->size[0] > 0.0f) || !(ov->size[1] > 0.0f)) return u;
+    } else if (!(fabsf(ov->size[0]) > 0.0f) || !(fabsf(ov->size[1]) > 0.0f)) return u;
 
     // Which eyes were named. LEFT(1) and RIGHT(2) are how a guest shows
     // different pixels to each eye — two quads, one per eye — so drawing one of
@@ -1093,7 +1101,8 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
     if (ov->eye_visibility == 1 && eye != 0) return u;
     if (ov->eye_visibility == 2 && eye != 1) return u;
 
-    u.half_size = simd_make_float2(ov->size[0] * 0.5f, ov->size[1] * 0.5f);
+    u.half_size = simd_make_float2(fabsf(ov->size[0]) * 0.5f,
+                                     fabsf(ov->size[1]) * 0.5f);
     if (cylinder) {
         // ArcWidth is a length along the surface, so the angle it spans is
         // that over the radius — capped at the whole turn. A segment every
@@ -1119,6 +1128,16 @@ kl_overlay_uniforms kl_overlay_build(const kl_ovrp_overlay *ov, int eye,
                                      (float)r[1] / (float)ov->tex_h,
                                      (float)r[2] / (float)ov->tex_w,
                                      (float)r[3] / (float)ov->tex_h);
+
+    // A negative size axis is a mirror, not an error: Bigscreen's film quads
+    // arrive with both axes negated and the Quest renders them. The geometry
+    // above already uses the extent, so reproduce the mirror by walking the
+    // rect back from the far edge on negated axes (same transform the
+    // KL_OVERLAY_FLIP_* switches use, which the shader supports).
+    if (!cylinder) {
+        if (ov->size[0] < 0.0f) { u.uv_rect.x += u.uv_rect.z; u.uv_rect.z = -u.uv_rect.z; }
+        if (ov->size[1] < 0.0f) { u.uv_rect.y += u.uv_rect.w; u.uv_rect.w = -u.uv_rect.w; }
+    }
 
     // KL_OVERLAY_FLIP_X: mirror the sampled U. AC Nexus's menu panels read
     // horizontally mirrored ("backwards" text) - the guest fills them for a quad
