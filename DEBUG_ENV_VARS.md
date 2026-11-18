@@ -675,7 +675,8 @@ answers GL and kl_glfb never initializes.
   Chapter 2, whose textures were all purple without it) — Unreal's texture
   streaming needs it — and `x3231001163584154` (Warhammer 40,000: Battle
   Sister, a Unity title that copies textures into 2D arrays while loading a
-  level), else 0. Copies between 2D textures and 2D-array slices are handled;
+  level) and `x3327317663977182` (Ven VR Adventure, Unity: failed copies at
+  every scene change, magenta flashes between scenes), else 0. Copies between 2D textures and 2D-array slices are handled;
   a compressed source must be a 2D texture (the shadow is kept per 2D
   level); the call itself always goes through a thunk that reads its stack
   arguments the way the guest pushed them.
@@ -716,7 +717,8 @@ answers GL and kl_glfb never initializes.
   Default 1; 0 passes the guest's divisor through unchanged.
 - `KL_GLFB_EYE_CLEAR=0|1` — a provider-backed eye texture is cleared to opaque
   black once when it is bound, so a first frame cannot show what the memory
-  held. Default 1 for Unreal guests, else 0.
+  held. Default 1 for Unreal guests and `x3327317663977182` (Ven VR Adventure,
+  Unity: a new eye swapchain at every scene change flashed magenta), else 0.
 - `KL_GLFB_LOG_UNITS=1` — log texture-unit traffic (the "Invalid texture
   unit!" neighbourhood — see `KL_POKE_CAP` under Viewer).
 
@@ -967,6 +969,12 @@ The guest's own memory management, and the three seams that used to disable it.
 - `KL_NEXUS_FRAME_BUDGET_MS=<ms>` — the length to spin to instead, default 0
   (no spin). 17.0 is the game's own rule (85% of two display periods) at
   100 Hz and, with `KL_GUEST_FRESH_POSE`, gives exactly half the display rate.
+- `KL_VEN_NO_RT_SHADOWS=0|1` — (`runtime/diag/kl_mprobe.c`) Ven VR Adventure
+  without realtime shadows: the active URP asset's `shadowDistance` is held at
+  0 through IL2CPP, checked every 120 frames. In the Multi Pass this game falls
+  back to (it is built for multiview), the right eye lacked part of the
+  realtime-light shadows; baked shadows are unaffected. Default 1 for
+  `x3327317663977182`, else 0.
 - `KL_FS_REL_SDCARD=0|1` — resolve a relative path that begins with `sdcard/`
   (or another spelling of external storage) as the absolute one, as it is on a
   device where the app's working directory is `/`. AC Nexus opens its animator
@@ -4061,7 +4069,9 @@ except its own control vars (next section).
   `x157074645514372` (MADiSON VR) and
   `x2285803881494677` (Gun Club VR, with `KL_UNITY_QUIT_TEARDOWN`) and
   `x2933720383334150` (Gloomy Eyes, with `KL_UNITY_QUIT_TEARDOWN`: its main
-  menu's Exit left a dark picture and the app open), else 0: no
+  menu's Exit left a dark picture and the app open) and
+  `x3327317663977182` (Ven VR Adventure, with `KL_UNITY_QUIT_TEARDOWN`: its
+  quit froze the last picture and left the app open), else 0: no
   other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
 - `KL_UNITY_QUIT_TEARDOWN=0|1` — (`runtime/guest/kl_driver.c`) when
   `nativeRender` first answers false, end Unity the way Android does before
@@ -4071,9 +4081,16 @@ except its own control vars (next section).
   `nativeRender` is never called again after it. Default 1 for
   `x2285803881494677` (Gun Club VR build 410: its in-game Exit kept its settings
   across a restart only with the save in front, as its fix was sent in) and
-  `x157074645514372` (MADiSON VR) and `x2933720383334150` (Gloomy Eyes), else
+  `x157074645514372` (MADiSON VR) and `x2933720383334150` (Gloomy Eyes) and
+  `x3327317663977182` (Ven VR Adventure), else
   0. Persistence when visionOS force-quits
   the app is not covered.
+- `KL_UNITY_QUIT_LIMIT_MS=<ms>` — (`runtime/guest/kl_driver.c`) with
+  `KL_UNITY_QUIT_TEARDOWN`, how long `nativeDone` gets before the app leaves
+  anyway (`exit(0)`, after the thread account of `KL_TRACE_CONDDUMP` if that
+  is on). Default 1200 for `x3327317663977182` (Ven VR Adventure: its
+  `OnApplicationQuit` ran, then `nativeDone` never returned and the last
+  picture stood), else 0 = no limit.
 - `KL_SYNC_GUEST=1` — drive the guest inline on the compositor thread, i.e.
   P5b's shape before the guest moved to its own thread. The clock P5.4's device numbers were taken
   against, and the A/B for anything that looks like a pacing regression.

@@ -1670,7 +1670,11 @@ static int guest_quit_exits(void) {
                                                    || strcmp(t, "x2436558143118760") == 0
                                                    || strcmp(t, "x157074645514372") == 0
                                                    || strcmp(t, "x2285803881494677") == 0
-                                                   || strcmp(t, "x2933720383334150") == 0));
+                                                   || strcmp(t, "x2933720383334150") == 0
+                                                   // Ven VR Adventure: quitting froze the
+                                                   // last picture, the app stayed open
+                                                   // (owner on the headset, 2026-11-16).
+                                                   || strcmp(t, "x3327317663977182") == 0));
     }
     return v;
 }

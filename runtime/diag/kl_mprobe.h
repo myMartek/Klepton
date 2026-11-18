@@ -29,6 +29,10 @@ void kl_mprobe_nexus_frame_budget(unsigned frame);
 // before Unity's teardown on quit. See kl_mprobe.c.
 void kl_mprobe_gunclub_save_preferences(void);
 
+// Ven VR Adventure only, self-gated on the target: no realtime shadows (URP
+// shadow distance held at 0). See kl_mprobe.c.
+void kl_mprobe_ven_no_rt_shadows(unsigned frame);
+
 #endif
 
 // User-initiated visionOS selection ray, in Unity-handed head-local metres.

@@ -1598,6 +1598,69 @@ void kl_mprobe_nexus_frame_budget(unsigned frame) {
     }
 }
 
+// Ven VR Adventure (x3327317663977182, Unity 2019.4, URP) only: no realtime
+// shadows. The game is built for multiview, which the GL path here cannot serve
+// it yet (objects went missing with it on, 2026-11-16), and in the Multi Pass
+// it falls back to, the right eye lacked part of the realtime-light shadows
+// while the left had them (owner on the headset, first mission). Baked shadows
+// were right in both. So, at the owner's request, the realtime ones are taken
+// out of both eyes: the active URP asset's shadowDistance is held at 0, which
+// is how URP turns its shadow passes off. Checked every 120 frames, because a
+// quality level or scene change can bring another asset in. Nothing is stored:
+// the asset in memory is changed, never the game's files or settings.
+// KL_VEN_NO_RT_SHADOWS=0 leaves the game's shadows as they are.
+void kl_mprobe_ven_no_rt_shadows(unsigned frame) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_VEN_NO_RT_SHADOWS", t && strcmp(t, "x3327317663977182") == 0);
+    }
+    if (!on || frame < 60 || frame % 120) return;
+    if (!mprobe_init()) { on = 0; return; }
+    static const MethodInfo *m_cur, *m_get, *m_set;
+    static int r;
+    if (!r) {
+        r = 1;
+        m_cur = find_method("UnityEngine.Rendering", "GraphicsSettings",
+                            "get_currentRenderPipeline", 0);
+        if (!m_cur)
+            m_cur = find_method("UnityEngine.Rendering", "GraphicsSettings",
+                                "get_renderPipelineAsset", 0);
+        m_get = find_method("UnityEngine.Rendering.Universal",
+                            "UniversalRenderPipelineAsset", "get_shadowDistance", 0);
+        m_set = find_method("UnityEngine.Rendering.Universal",
+                            "UniversalRenderPipelineAsset", "set_shadowDistance", 1);
+        if (!m_cur || !m_get || !m_set) {
+            fprintf(stderr, "  [ven] realtime shadows: URP asset not reachable as "
+                            "expected — left as they are\n");
+            on = 0;
+            return;
+        }
+    }
+    Il2CppObject *asset = invoke(m_cur, NULL, "GraphicsSettings.currentRenderPipeline");
+    if (!asset) return;
+    Il2CppClass *k = il.object_get_class(asset);
+    const char *kn = k ? il.class_get_name(k) : "";
+    if (!kn || strcmp(kn, "UniversalRenderPipelineAsset")) {
+        static int said;
+        if (!said++)
+            fprintf(stderr, "  [ven] realtime shadows: the pipeline asset is a %s, "
+                            "not URP's — left as they are\n", kn ? kn : "?");
+        return;
+    }
+    Il2CppObject *exc = NULL;
+    Il2CppObject *box = il.runtime_invoke(m_get, asset, NULL, &exc);
+    if (exc || !box) return;
+    float dist = *(float *)il.object_unbox(box);
+    if (dist <= 0.0f) return;
+    float zero = 0.0f;
+    void *args[1] = { &zero };
+    invoke_on(asset, m_set, args, "UniversalRenderPipelineAsset.set_shadowDistance");
+    fprintf(stderr, "  [ven] realtime shadows off: URP shadow distance %.1f -> 0 "
+                    "(frame %u; KL_VEN_NO_RT_SHADOWS=0 keeps them)\n", (double)dist, frame);
+}
+
 // KL_PROBE_LINES=1 — every KL_PROBE_LINES_EVERY frames (default 300) from frame
 // 600: each LineRenderer the game has switched on, by name with its first
 // three ancestors, whether it renders and is visible, its point count, first

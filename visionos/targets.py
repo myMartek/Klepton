@@ -1495,6 +1495,13 @@ STORE_DEFAULTS = {
     # mission looks the same with it once they are there.
     "x8012387035448196": {"foveation": True, "vk_foveation": "high",
                           "test_on": "KL_GUEST_PACE_DIV,KL_VK_ASYNC_PIPES"},
+    # Ven VR Adventure 1.44 (Unity 2019.4.13f1, OpenGL ES, Stereo eye layout).
+    # Foveation off by default: its owner on the headset (2026-11-16) found it
+    # has to be off for the game to look right. "foveation_reset" calls back a
+    # stored "on" once. Its quit and loading-screen fixes are by target name in
+    # kl_app.c (KL_UNITY_QUIT_EXITS), kl_driver.c (KL_UNITY_QUIT_TEARDOWN) and
+    # kl_glfb.c (KL_GLFB_EYE_CLEAR).
+    "x3327317663977182": {"foveation": False, "foveation_reset": 1},
 }
 
 
