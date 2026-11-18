@@ -4078,12 +4078,16 @@ except its own control vars (next section).
   quit froze the last picture and left the app open), else 0: no
   other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
 - `KL_OVRP_CONFIRM_QUIT=0|1` — (`runtime/xr/kl_ovrp.c`) answer
-  `ovrp_ShowSystemUI(ConfirmQuit)` — `OVRManager.PlatformUIConfirmQuit()`, a
-  game handing its quit to the headset's system dialog — as confirmed: true is
-  returned, the guest frame loop ends after that frame and the app leaves, as
-  on a Quest once the player says yes. Other system UIs answer false. Default 1
-  for `x3688751474502123` (Cosmodread: its main menu's Quit did nothing), else
-  0: the name keeps its old answer.
+  `ovrp_ShowSystemUI(ConfirmQuit)` / `ovrp_ShowSystemUI2(ConfirmQuit)` —
+  `OVRManager.PlatformUIConfirmQuit()`, a game handing its quit to the
+  headset's system dialog — as confirmed: `ovrp_GetAppShouldQuit(2)` reads 1
+  from then on, so the game quits itself, as on a Quest once the player says
+  yes. Other system UIs answer false. Default 1 for `x2567459230020142` (Until
+  You Fall) and `x3688751474502123` (Cosmodread), else 0.
+- `KL_OVRP_CONFIRM_QUIT_ENDS=0|1` — (`runtime/xr/kl_ovrp.c`) with the above, a
+  confirmed quit also ends the guest frame loop after that frame and the app
+  leaves (for a game that waits for the system to end it). Default 1 for
+  `x3688751474502123` (Cosmodread: its main menu's Quit did nothing), else 0.
 - `KL_UNITY_QUIT_TEARDOWN=0|1` — (`runtime/guest/kl_driver.c`) when
   `nativeRender` first answers false, end Unity the way Android does before
   the loop stops: Gun Club VR's own public static `TBMPrefs.Save()` through

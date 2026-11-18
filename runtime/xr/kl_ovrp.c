@@ -556,21 +556,38 @@ static uint64_t klovrp_SetAppEngineInfo(const char *name, const char *version,
 // game asked for, and ShouldQuit reads 1 from then on. KL_UNITY_QUIT_EXITS /
 // _TEARDOWN then end the app as on Android.
 //   KL_OVRP_CONFIRM_QUIT=0|1 overrides the per-target default.
+//
+// Cosmodread (x3688751474502123, community fix 114) asks the same way through the
+// bool form, ovrp_ShowSystemUI, and then does nothing more itself — on a Quest the
+// system ends the app once the player confirms. For it the confirmed request also
+// ends the run: the guest frame loop leaves at its next frame (kl_app.c,
+// kl_ovrp_quit_requested), as for Application.Quit() under KL_UNITY_QUIT_EXITS.
+//   KL_OVRP_CONFIRM_QUIT_ENDS=0|1 overrides that per-target default.
+// (Fixes 112 and 114 brought one function each for this; they are one here.)
 static int g_confirm_quit;
+static volatile int g_ovrp_quit_requested;
+int kl_ovrp_quit_requested(void) { return g_ovrp_quit_requested; }
 static int klovrp_confirm_quit_on(void) {
     static int v = -1;
     if (v < 0) {
         const char *t = kl_driver_target_name();
         if (!t && !getenv("KL_OVRP_CONFIRM_QUIT")) return 0;   // not kept until known
-        v = kl_env_on("KL_OVRP_CONFIRM_QUIT", t && strcmp(t, "x2567459230020142") == 0);
+        v = kl_env_on("KL_OVRP_CONFIRM_QUIT", t && (strcmp(t, "x2567459230020142") == 0 ||
+                                                    strcmp(t, "x3688751474502123") == 0));
     }
     return v;
+}
+static int klovrp_confirm_quit_ends(void) {
+    const char *t = kl_driver_target_name();
+    return kl_env_on("KL_OVRP_CONFIRM_QUIT_ENDS", t && strcmp(t, "x3688751474502123") == 0);
 }
 static int klovrp_confirm_quit(int ui) {
     if (ui != 1 /* PlatformUI.ConfirmQuit */ || !klovrp_confirm_quit_on()) return 0;
     if (!__atomic_exchange_n(&g_confirm_quit, 1, __ATOMIC_RELAXED))
         fprintf(stderr, "  [ovrp] ShowSystemUI(ConfirmQuit): the game's quit button — "
-                        "taken as confirmed, ShouldQuit now reads 1 (KL_OVRP_CONFIRM_QUIT)\n");
+                        "taken as confirmed, ShouldQuit now reads 1 (KL_OVRP_CONFIRM_QUIT)%s\n",
+                klovrp_confirm_quit_ends() ? "; the run ends after this frame (KL_OVRP_CONFIRM_QUIT_ENDS)" : "");
+    if (klovrp_confirm_quit_ends()) g_ovrp_quit_requested = 1;
     return 1;
 }
 // Result form (1.21+): Success either way, as before.
@@ -7924,40 +7941,6 @@ static uint64_t klovrp_GetAppHasInputFocus(char *out) {
     return OVRP_SUCCESS;
 }
 
-// OVRPlugin 1.1 ABI:
-//   ovrpBool ovrp_ShowSystemUI(ovrpUI ui)          ConfirmQuit = 1
-// OVRManager.PlatformUIConfirmQuit() is how a game built on the Oculus
-// Integration hands its quit to the headset: it asks the system for its
-// "Quit?" dialog and does nothing more itself, because on a Quest the system
-// ends the app once the player confirms. Cosmodread (x3688751474502123) quits
-// from its main menu only this way ("Showing PlatformUIConfirmQuit" in its
-// log), so with the old UNSUPPORTED answer its Quit button did nothing.
-//
-// There is no system dialog to show here, and the player has already chosen
-// Quit in the game's own menu, so the confirmed outcome is what is reported:
-// the request is recorded, true is answered, and the guest frame loop ends at
-// its next frame (kl_app.c, kl_ovrp_quit_requested) — the same leaving as a
-// game that called Application.Quit() under KL_UNITY_QUIT_EXITS. Any other
-// ovrpUI (the global menu, its tutorial) is still not shown: false.
-//   KL_OVRP_CONFIRM_QUIT, default 1 for x3688751474502123 only; see
-//   kl_ovrp_gated_out.
-static volatile int g_ovrp_quit_requested;
-
-int kl_ovrp_quit_requested(void) { return g_ovrp_quit_requested; }
-
-static int32_t klovrp_ShowSystemUI(int32_t ui) {
-    ovrp_hit("ovrp_ShowSystemUI");
-    if (ui != 1) {
-        fprintf(stderr, "  [ovrp] ShowSystemUI(%d): no system UI here — false\n", (int)ui);
-        return 0;
-    }
-    if (!g_ovrp_quit_requested)
-        fprintf(stderr, "  [ovrp] ShowSystemUI(ConfirmQuit): the game asked the system "
-                        "to quit it — the run ends after this frame (KL_OVRP_CONFIRM_QUIT)\n");
-    g_ovrp_quit_requested = 1;
-    return OVRP_TRUE;
-}
-
 // OVRPlugin 1.28 ABI:
 //   ovrpResult ovrp_GetDominantHand(ovrpHandedness *dominantHand)
 // visionOS does not expose the Meta account's handedness preference. Use the
@@ -13715,7 +13698,6 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_GetDominantHand", (void *)klovrp_GetDominantHand},
     {"ovrp_GetAppAsymmetricFov", (void *)klovrp_GetAppAsymmetricFov},
     {"ovrp_GetAppHasInputFocus", (void *)klovrp_GetAppHasInputFocus},
-    {"ovrp_ShowSystemUI", (void *)klovrp_ShowSystemUI},
     {"ovrp_GetNativeXrApiType", (void *)klovrp_GetNativeXrApiType},
     {"ovrp_GetSystemDisplayAvailableFrequencies", (void *)klovrp_GetSystemDisplayAvailableFrequencies},
     {"ovrp_SetupEyeTexture2", (void *)klovrp_SetupEyeTexture2},
@@ -14343,10 +14325,6 @@ static int kl_ovrp_gated_out(const char *name) {
     if (!strcmp(name, "ovrp_GetBoundaryConfigured") || !strcmp(name, "ovrp_GetBoundaryGeometry2") ||
         !strcmp(name, "ovrp_GetBoundaryGeometry3"))
         return !klovrp_boundary(NULL);
-    if (strcmp(name, "ovrp_ShowSystemUI") == 0) {
-        const char *t = kl_driver_target_name();
-        return !kl_env_on("KL_OVRP_CONFIRM_QUIT", t && strcmp(t, "x3688751474502123") == 0);
-    }
     if (strcmp(name, "ovrp_GetTrackingCalibratedOrigin") == 0) {
         const char *t = kl_driver_target_name();
         return !t || strcmp(t, "x2677344882310094") != 0;
