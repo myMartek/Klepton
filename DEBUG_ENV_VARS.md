@@ -2185,7 +2185,8 @@ puts the camera on the ground with its hands underneath it.
   (`x3647259232032222`), whose Quit button ends in it once
   `moh-exit-no-rhi-teardown` lets `FEngineLoop::Exit` through, and for The 7th
   Guest VR (`x5223884527630557`), whose Quit button tears down Vulkan and then
-  calls it; ignored, the last picture froze. The bounded quit
+  calls it; ignored, the last picture froze; and for Journey to Foundation
+  (`x4822681107767272`), which does the same. The bounded quit
   that came with the surface around it (`KL_UE4_QUIT_LIMIT`,
   `KL_UE4_QUIT_TRACE`) is not taken.
 - `KL_UE4_CXX_ALLOC=0|1` — (`kl_ue4.c`) bind libc++_shared's own calls to

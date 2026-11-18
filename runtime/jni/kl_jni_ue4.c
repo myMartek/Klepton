@@ -1120,7 +1120,11 @@ static klj_val klj_GA_forceQuit(void *env, void *self, const klj_val *a, int n) 
     // where ForceQuit is still a bail worth staying alive for.
     const char *t = kl_driver_target_name();
     if (kl_env_on("KL_UE4_FORCE_QUIT", t && (strcmp(t, "x3647259232032222") == 0 ||
-                                             strcmp(t, "x5223884527630557") == 0))) {
+                                             strcmp(t, "x5223884527630557") == 0 ||
+                                             // Journey to Foundation: its Quit tears
+                                             // down Vulkan, then ForceQuit; ignored,
+                                             // the picture froze (2026-11-16)
+                                             strcmp(t, "x4822681107767272") == 0))) {
         fprintf(stderr, "  [ue4] ForceQuit obeyed (KL_UE4_FORCE_QUIT): the game quit — ending the run\n");
         fflush(stderr);
         kl_ue4_note_force_quit();
