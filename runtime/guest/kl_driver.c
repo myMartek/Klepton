@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "klepton.h"
@@ -594,6 +595,16 @@ void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) 
         // cuffs were drawn (2026-10-17).
         kl_egl_set_gles_version(3, 0);
         fprintf(stderr, "  [gl] Catan VR: GLES 3.0 capability profile (ANGLE backend)\n");
+    }
+    if (t && !strcmp(t->name, "x2567459230020142")) {
+        // Until You Fall (Unity 2019.3.15f1): the same story despite
+        // disable-gpu-skinning=1 in its boot.config. Told 3.2, it still made
+        // compute shaders, glCreateShader(COMPUTE) was refused (shader 0, "GLSL
+        // compilation failed, no infolog provided" x39 a session), and on the
+        // headset there were no hands, no menu pointer, and objects out of
+        // place (2026-11-16).
+        kl_egl_set_gles_version(3, 0);
+        fprintf(stderr, "  [gl] Until You Fall: GLES 3.0 capability profile (ANGLE backend)\n");
     }
     if (t && !strcmp(t->name, "x3919415921458774")) {
         // Gods of Gravity (Unity 2021.3.45f2): told 3.2, its wand models came
@@ -1279,7 +1290,9 @@ static int unity_quit_teardown(void) {
                        strcmp(t, "x157074645514372") == 0 ||
                        strcmp(t, "x2933720383334150") == 0 ||
                        // Ven VR Adventure: pause and teardown, as Gloomy Eyes.
-                       strcmp(t, "x3327317663977182") == 0));
+                       strcmp(t, "x3327317663977182") == 0 ||
+                       // Until You Fall: pause and teardown, as Gloomy Eyes.
+                       strcmp(t, "x2567459230020142") == 0));
     }
     return v;
 }
@@ -1330,9 +1343,26 @@ static void *unity_quit_limit_thread(void *arg) {
     return NULL;
 }
 
+// When the teardown began (CLOCK_MONOTONIC ns), 0 when none is running. Read
+// from the compositor's thread (kl_app.c), which leaves the app once a teardown
+// has not come back in time: Until You Fall's nativeDone runs the game's own
+// OnApplicationQuit ("Application Shutdown", its save) and then never returns
+// (2026-11-16), which left the last picture standing with the app open.
+static uint64_t g_teardown_ns;
+static uint64_t kldrv_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+unsigned kl_driver_quit_teardown_ms(void) {
+    uint64_t t0 = __atomic_load_n(&g_teardown_ns, __ATOMIC_RELAXED);
+    return t0 ? (unsigned)((kldrv_now_ns() - t0) / 1000000ull) : 0;
+}
+
 static void unity_quit_teardown_run(void) {
     fprintf(stderr, "[guest] nativeRender returned false: saving and tearing down "
                     "(KL_UNITY_QUIT_TEARDOWN)\n");
+    __atomic_store_n(&g_teardown_ns, kldrv_now_ns(), __ATOMIC_RELAXED);
     kl_mprobe_gunclub_save_preferences();
     unity_lifecycle_call("nativePause");
     unsigned limit = unity_quit_limit_ms();
@@ -1344,6 +1374,7 @@ static void unity_quit_teardown_run(void) {
     }
     unity_lifecycle_call("nativeDone");
     g_quit_done_returned = 1;
+    __atomic_store_n(&g_teardown_ns, 0, __ATOMIC_RELAXED);
     g_render = NULL;
 }
 

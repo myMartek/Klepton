@@ -1567,8 +1567,38 @@ static struct {
     pthread_t       thread;
 } g_guest = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
 
+// KL_UNITY_QUIT_TEARDOWN_MS=<ms>: a quit teardown (kl_driver.c) that has not
+// come back after this long is taken as the end of the guest, as if its loop
+// had ended on the game's own quit, so the compositor leaves the app. The
+// teardown is running on the guest thread and cannot be interrupted; it is the
+// app that stops waiting for it. Until You Fall's nativeDone runs its
+// OnApplicationQuit (its save) and then hangs (2026-11-16): default 1000 for
+// x2567459230020142 (the owner's choice; its "Application Shutdown" line comes
+// within half a second of the teardown starting), else 0 (wait as before).
+static unsigned guest_quit_teardown_limit_ms(void) {
+    static int v = -1;
+    if (v < 0) {
+        if (!g_target || !g_target->name) return 0;
+        v = kl_env_int("KL_UNITY_QUIT_TEARDOWN_MS",
+                       strcmp(g_target->name, "x2567459230020142") == 0 ? 1000 : 0);
+        if (v < 0) v = 0;
+    }
+    return (unsigned)v;
+}
+
 int kl_app_guest_state(void) {
+    unsigned limit = guest_quit_teardown_limit_ms();
+    unsigned ms = limit ? kl_driver_quit_teardown_ms() : 0;
     pthread_mutex_lock(&g_guest.mu);
+    if (limit && ms >= limit && g_guest.state > 0) {
+        g_guest.state = -1;
+        g_guest.asked_quit = 1;
+        pthread_mutex_unlock(&g_guest.mu);
+        fprintf(stderr, "[guest] quit teardown has not returned after %u ms — "
+                        "leaving without it (KL_UNITY_QUIT_TEARDOWN_MS)\n", ms);
+        fflush(NULL);
+        return -1;
+    }
     int s = g_guest.state;
     pthread_mutex_unlock(&g_guest.mu);
     return s;
@@ -1674,7 +1704,11 @@ static int guest_quit_exits(void) {
                                                    // Ven VR Adventure: quitting froze the
                                                    // last picture, the app stayed open
                                                    // (owner on the headset, 2026-11-16).
-                                                   || strcmp(t, "x3327317663977182") == 0));
+                                                   || strcmp(t, "x3327317663977182") == 0
+                                                   // Until You Fall: its main menu's
+                                                   // quit button did nothing (owner,
+                                                   // 2026-11-16); with KL_UNITY_QUIT_TEARDOWN.
+                                                   || strcmp(t, "x2567459230020142") == 0));
     }
     return v;
 }
