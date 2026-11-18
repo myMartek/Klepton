@@ -201,6 +201,16 @@ void *klb_dlsym(void *handle, const char *name); // ...and its dlsym
 // library (libil2cpp arrives twice over), and JNI_OnLoad is not idempotent.
 static void klj_run_jni_onload(void *handle, const char *what) {
     if (!handle) return;
+    // A core system-library handle (libc.so, libm.so, ...) owns no JNI_OnLoad:
+    // dlsym falls through to the global guest search and would re-run an
+    // unrelated library's init on the loading thread. Bigscreen loads "c" on
+    // a voice worker thread and re-enters libmain's init there, then faults
+    // in libunity+0x53c088 on a thread Unity never attached (2026-10-21,
+    // x2497738113633933).
+    if (kl_dl_is_core_shim(handle)) {
+        KLJ_LOG("%s: core shim handle — no JNI_OnLoad to run", what);
+        return;
+    }
     static void *done[32];
     static unsigned done_n;
     for (unsigned i = 0; i < done_n; i++) if (done[i] == handle) return;

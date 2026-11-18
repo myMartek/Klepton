@@ -1434,8 +1434,26 @@ int klb_sysinfo(void *out) {
 // once rather than every frame.
 static _Atomic int g_lowmem_armed = 1;
 static _Atomic uint64_t g_lowmem_fired;
+// The OS dispatch source runs on a global queue — a foreign thread, where a
+// managed call into the guest faults (Bigscreen room crash, 2026-10-24:
+// nativeLowMemory into libil2cpp from the pressure block). Delivery is
+// deferred to kl_mem_pressure_poll, which runs between frames on the thread
+// that just ran one. The urgency survives the deferral: the next frame is
+// microseconds out, and the flag bypasses the hysteresis exactly once, the
+// way the immediate call did.
+static _Atomic int g_lowmem_os_level;   // 0 none, 1 warning, 2 critical
 
 void kl_mem_pressure_fire(const char *why) {
+    // No delivery before initJni returned: the engine is half-constructed and
+    // a nativeLowMemory call into it faults (startup crash, 2026-10-21).
+    // Nothing is cached yet either, so dropping is also semantically right.
+    if (!kl_driver_initjni_done()) {
+        static _Atomic int said;
+        if (atomic_fetch_add(&said, 1) == 0)
+            fprintf(stderr, "  [mem] pressure (%s) during boot — dropped "
+                            "(guest not ready)\n", why ? why : "?");
+        return;
+    }
     if (!kl_jni_low_memory()) {
         static _Atomic int said;
         if (atomic_fetch_add(&said, 1) == 0)
@@ -1452,6 +1470,9 @@ void kl_mem_pressure_fire(const char *why) {
 
 // Cheap enough for once a frame: one task_info call.
 void kl_mem_pressure_poll(void) {
+    int os = atomic_exchange(&g_lowmem_os_level, 0);
+    if (os && atomic_exchange(&g_lowmem_armed, 0))
+        kl_mem_pressure_fire(os > 1 ? "system critical" : "system warning");
     int at = kl_env_int("KL_LOWMEM_AT", 80);
     if (at <= 0) return;
     int clear = kl_env_int("KL_LOWMEM_CLEAR", 70);
@@ -1493,12 +1514,14 @@ void kl_mem_pressure_init(void) {
         dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
     if (!src) return;
     dispatch_source_set_event_handler(src, ^{
-        // The OS asked, so it is delivered whatever the hysteresis says — this
-        // source only fires when the system means it.
-        kl_mem_pressure_fire(
-            dispatch_source_get_data(src) & DISPATCH_MEMORYPRESSURE_CRITICAL
-                ? "system critical" : "system warning");
-        atomic_store(&g_lowmem_armed, 0);
+        // Never delivered here: the handler thread is foreign to the guest
+        // (see g_lowmem_os_level). Record the highest urgency seen; the frame
+        // poll delivers it on the Unity thread and disarms there, so it fires
+        // once. Disarming here as well would leave the poll's exchange
+        // reading 0 and the OS warning would never arrive.
+        int level = (dispatch_source_get_data(src) & DISPATCH_MEMORYPRESSURE_CRITICAL) ? 2 : 1;
+        int prev = atomic_load(&g_lowmem_os_level);
+        if (level > prev) atomic_store(&g_lowmem_os_level, level);
     });
     dispatch_resume(src);   // deliberately never cancelled: it lives as long as
                             // the process, and there is nothing to release it to
@@ -4363,10 +4386,24 @@ int kl_ioctl(int fd, unsigned long req, uintptr_t arg) {
     switch (req) {
     case LX_FIONREAD: return ioctl(fd, FIONREAD, (void *)arg);
     case LX_FIONBIO:  return ioctl(fd, FIONBIO,  (void *)arg);
-    default:
+    default: {
         fcntl_warn_once("ioctl", (long)req);
+        // Diagnostic for the Bigscreen voice-net crash (2026-10-21, x2497738113633933):
+        // SIOCGIFCONF (0x8912) + SIOCGIFFLAGS-ish (0x8921) arrive right before
+        // bind(45001) and then a null-deref in libunity+0x53c088 on a worker
+        // thread. Log WHO asks, behaviour unchanged (ENOTTY).
+        if (req == 0x8912 || req == 0x8921) {
+            static _Atomic unsigned said2;
+            if (atomic_fetch_add(&said2, 1) < 4) {
+                size_t off = 0;
+                const char *img = kl_addr_image(__builtin_return_address(0), &off);
+                fprintf(stderr, "  [klepton] ioctl(fd=%d, 0x%lx) from %s+%#zx (arg=%p) -> ENOTTY\n",
+                        fd, req, img ? img : "?", off, (void *)arg);
+            }
+        }
         errno = ENOTTY;
         return -1;
+    }
     }
 }
 

@@ -245,9 +245,9 @@ typedef struct {
 // buffer queue holds EMPTY buffers the guest enqueues to be FILLED (the reverse
 // of playback), and a feeder pulls the mic, resamples/maps into each buffer, and
 // fires the callback so the guest reads it and re-enqueues. 16-bit PCM sinks only
-// — the one shape a voice recorder ever asks for — and untested against a real
-// guest, since every guest measured here (Steam Link included) records over
-// AAudio, which is the fully-exercised path.
+// — the one shape a voice recorder ever asks for. Bigscreen 0.950.2 is the guest
+// that exercises it (Unity 2020.3 records over OpenSL); everyone else measured
+// here, Steam Link included, records over AAudio.
 typedef struct kl_sl_recorder {
     const struct SLObjectItf_ *obj_vt;      // must stay first: this IS the handle
     const struct SLRecordItf_ *rec_vt;
@@ -274,6 +274,7 @@ typedef struct kl_sl_recorder {
     size_t   in_hold_cap, in_have;
     double   in_pos;
     unsigned long filled;
+    uint64_t pos_frames;                     // frames handed to the guest so far
 } kl_sl_recorder;
 
 static kl_sl_engine g_engine;
@@ -895,6 +896,7 @@ static void *rec_feeder(void *arg) {
         pthread_mutex_unlock(&r->lock);
 
         r->filled++;
+        r->pos_frames += (uint64_t)frames;
         if (cb) cb((SLBufferQueueItf)&r->bq_vt, cb_ctx);
 
         pthread_mutex_lock(&r->lock);
@@ -948,23 +950,37 @@ static const struct SLBufferQueueItf_ g_rec_bq_vt = {
 // knobs answer success with a zero, as the play vtable's spare slots do.
 static SLresult rec_SetRecordState(SLRecordItf self, SLuint32 state) {
     kl_sl_recorder *r = KL_SL_REC_R(self);
+    // Khronos defines 0/1/2 and real OpenSL rejects anything else, but Unity
+    // 2020.3's Android audio input passes 3 for "record" (measured on device with
+    // Bigscreen 0.950.2). Keeping the raw value left the feeder waiting for a 2
+    // that never came: four buffers enqueued, not one sample read.
+    int recording = state >= SL_RECORDSTATE_RECORDING;
+    SLuint32 want = recording ? SL_RECORDSTATE_RECORDING : state;
     pthread_mutex_lock(&r->lock);
-    r->state = state;
+    r->state = want;
     pthread_cond_signal(&r->wake);
     // Stopping/pausing is synchronous with respect to the callback, so the guest
     // may free what it touches the moment this returns (and never wait on
     // ourselves if called from inside the callback).
-    if (state != SL_RECORDSTATE_RECORDING && r->started &&
+    if (!recording && r->started &&
         !pthread_equal(pthread_self(), r->thread))
         while (r->in_cb) pthread_cond_wait(&r->cb_done, &r->lock);
+    unsigned long pending = r->count;
     pthread_mutex_unlock(&r->lock);
-    fprintf(stderr, "  [sl] record state -> %s\n",
-            state == SL_RECORDSTATE_RECORDING ? "RECORDING" :
-            state == SL_RECORDSTATE_PAUSED    ? "PAUSED" : "STOPPED");
+    fprintf(stderr, "  [sl] record state -> %s (raw %u, queue %lu)\n",
+            recording ? "RECORDING" :
+            state == SL_RECORDSTATE_PAUSED ? "PAUSED" : "STOPPED",
+            (unsigned)state, pending);
     return SL_RESULT_SUCCESS;
 }
 static SLresult rec_GetRecordState(SLRecordItf self, SLuint32 *st) {
     if (st) *st = KL_SL_REC_R(self)->state;
+    return SL_RESULT_SUCCESS;
+}
+static SLresult rec_GetPosition(SLRecordItf self, SLuint32 *ms) {
+    kl_sl_recorder *r = KL_SL_REC_R(self);
+    unsigned rate = r->rate ? r->rate : 48000;
+    if (ms) *ms = (SLuint32)((r->pos_frames * 1000ull) / rate);
     return SL_RESULT_SUCCESS;
 }
 static SLresult rec_SetU32(SLRecordItf s, SLuint32 v)  { (void)s; (void)v; return SL_RESULT_SUCCESS; }
@@ -973,7 +989,7 @@ static SLresult rec_Reg(SLRecordItf s, void *c, void *x) { (void)s; (void)c; (vo
 static SLresult rec_Clear(SLRecordItf s) { (void)s; return SL_RESULT_SUCCESS; }
 static const struct SLRecordItf_ g_rec_vt = {
     rec_SetRecordState, rec_GetRecordState, rec_SetU32 /*SetDurationLimit*/,
-    rec_GetU32 /*GetPosition*/, rec_Reg /*RegisterCallback*/,
+    rec_GetPosition, rec_Reg /*RegisterCallback*/,
     rec_SetU32 /*SetCallbackEventsMask*/, rec_GetU32 /*GetCallbackEventsMask*/,
     rec_SetU32 /*SetMarkerPosition*/, rec_Clear /*ClearMarkerPosition*/,
     rec_GetU32 /*GetMarkerPosition*/, rec_SetU32 /*SetPositionUpdatePeriod*/,

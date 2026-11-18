@@ -860,7 +860,8 @@ static void sink_env(void) {
     // 2026-10-23: "some audio effects might be missing").
     g_mix_all  = kl_env_on("KL_AUDIO_MIX_SOURCES", target_is(t, "steamlink-vr") ||
                                                     target_is(t, "x9269393463181825") ||
-                                                    target_is(t, "x6565887093433499"));
+                                                    target_is(t, "x6565887093433499") ||
+                                                    target_is(t, "x2497738113633933"));
     // Whether a MIXING writer lets go of g_wlock while it waits for room.
     // Holding it across the 2 ms naps serialises the sources: each one's wait
     // for ITS cursor blocks every other source's write for a whole buffer
@@ -872,7 +873,8 @@ static void sink_env(void) {
     g_mix_unlock = kl_env_on("KL_AUDIO_MIX_UNLOCK", target_is(t, "steamlink-vr") ||
                                                     target_is(t, "x2104963472963790") ||
                                                     target_is(t, "x9269393463181825") ||
-                                                    target_is(t, "x6565887093433499"));
+                                                    target_is(t, "x6565887093433499") ||
+                                                    target_is(t, "x2497738113633933"));
     // See pacing_reader. LES MILLS BODYCOMBAT.
     g_smooth   = kl_env_on("KL_AUDIO_SMOOTH", target_is(t, "x4015163475201433"));
     g_steal_ms = kl_env_int("KL_AUDIO_STEAL_MS", 2000);

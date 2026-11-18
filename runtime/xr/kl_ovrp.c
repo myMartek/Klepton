@@ -24,6 +24,9 @@
 // klovrp_EndFrame). Up here rather than beside SetupEyeTexture2 now that the
 // timewarp bookkeeping needs it too.
 #include "kl_glfb.h"
+// A fresh texture from tightly packed RGBA8, with the pixel-unpack state it
+// shares with the guest pinned for the upload (kl_gltex.c).
+#include "kl_gltex.h"
 // kl_egl_sym (the GL gateway the eye textures are allocated through) and
 // kl_egl_swap_count (whether eglSwapBuffers is this guest's presentation
 // signal at all — see klovrp_end_frame_impl).
@@ -32,6 +35,7 @@
 #include "kl_openxr.h"
 #include "kl_metrics.h"
 #include "kl_hands.h"
+#include "../jni/kl_jni_bigscreen.h"   // local-file film frames (Bigscreen)
 
 #define KL_OVRP_MAX 512
 static struct { const char *name; unsigned calls; } g_ovrp[KL_OVRP_MAX];
@@ -5294,6 +5298,14 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // before the record announces the stage (the same ordering argument as the
     // Vulkan branch above: nothing else puts the compositor behind it).
     klovrp_mirror_array_eyes(layer_submits, layer_submit_count);
+    // DIAG film triage: the enqueue path (OVROverlay panels such as Bigscreen's
+    // film layer 9) is published via kl_ovrp_overlays_external but only mirrored
+    // to compositor storage by klovrp_mirror_enq_gl, which legacy ovrp_EndFrame
+    // calls and EndFrame4 never did — so every enqueued panel reached the
+    // compositor with no MTLTexture ("not composited"). Mirror here too, on the
+    // submitting thread while its GL context is current, before the record
+    // below announces the stage.
+    klovrp_mirror_enq_gl();
     // KL_OVRP_GL_EYE_FENCE=0|1 — fence a GL guest's eye drawing here, on its
     // submitting thread, before the record announces the stage. For a guest
     // that renders straight into its eye textures and stops swapping once
@@ -8794,7 +8806,12 @@ static int klovrp_enq_owns_overlays(void) {
     static int v = -1;
     if (v < 0) {
         const char *t = kl_driver_target_name();
-        v = kl_env_on("KL_OVRP_ENQ_OWNS_OVERLAYS", t && !strcmp(t, "x5812519008825194"));
+        // AC Nexus blinked (eye-only EndFrame4 wiped the enqueue set); Bigscreen
+        // x2497738113633933 does the same (film/menu via EnqueueSubmitLayer2,
+        // EndFrame4 carries eye only) — FLICKOVER 1<->0 every ~12 frames.
+        v = kl_env_on("KL_OVRP_ENQ_OWNS_OVERLAYS",
+                      (t && !strcmp(t, "x5812519008825194")) ||
+                      (t && !strcmp(t, "x2497738113633933")));
     }
     return v && __atomic_load_n(&g_enq_frames_since, __ATOMIC_RELAXED) < KLOVRP_ENQ_LIVE_FRAMES;
 }
@@ -8814,8 +8831,7 @@ static int klovrp_enq_retire(void) {
     return v;
 }
 
-static void klovrp_record_overlays(const void *layer_submits, int count) {
-    const ovrp_layer_submit *const *list = layer_submits;
+static void klovrp_record_overlays(const void *layer_submits, int count) {    const ovrp_layer_submit *const *list = layer_submits;
     kl_ovrp_overlay tmp[KLOVRP_MAX_LAYERS];
     int n = 0;
     for (int i = 0; list && i < count && n < KLOVRP_MAX_LAYERS; i++) {
@@ -10823,6 +10839,89 @@ static int g_enq_seen[KLOVRP_MAX_LAYERS], g_enq_seen_n;
 static int g_enq_pub[KLOVRP_MAX_LAYERS], g_enq_pub_n;
 static unsigned long long g_enq_pub_tex[KLOVRP_MAX_LAYERS];   // texL as submitted
 static pthread_mutex_t g_enq_pub_mu = PTHREAD_MUTEX_INITIALIZER;
+// Bigscreen menu-triage probe (2026-10-24): one predicate for the three
+// logging sites (enqueue batches below, guest route in kl_mprobe, composite
+// sets in Swift). Target-gated default-ON during triage — a manually started
+// device app has no environment to opt in through — KL_PROBE_BIGSCREEN=0
+// opts out, anything else opts in.
+int kl_probe_bigscreen(void) {
+    static int on = -2;
+    if (on == -2) {
+        const char *t = kl_driver_target_name();
+        int isbs = t && !strcmp(t, "x2497738113633933");
+        const char *raw = kl_env_str("KL_PROBE_BIGSCREEN", NULL);
+        on = raw ? kl_env_on("KL_PROBE_BIGSCREEN", 0) : (isbs ? 1 : 0);
+    }
+    return on;
+}
+
+// Menu-yields-film: raw want from the probe, debounced published state for
+// the compositor. Asymmetric: a single menu-open probe hides at once (the
+// film-over-menu second from cadence plus symmetric debounce is the
+// complaint), while unhide still needs two consecutive menu-closed probes
+// so one gap in the page census does not flash the film back over the menu.
+// __atomic: probe writes on the frame thread, compositor reads.
+static int g_bsmenu_want, g_bsmenu_want_n, g_bsmenu_pub, g_bsfilm_alive;
+void kl_bigscreen_menu_set(int open, int ineye_alive) {
+    int want = (open && ineye_alive) ? 1 : 0;
+    __atomic_store_n(&g_bsfilm_alive, ineye_alive ? 1 : 0, __ATOMIC_RELAXED);
+    if (want == 1) {
+        __atomic_store_n(&g_bsmenu_want, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_bsmenu_want_n, 2, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_bsmenu_pub, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    int last = __atomic_load_n(&g_bsmenu_want, __ATOMIC_RELAXED);
+    int n = __atomic_load_n(&g_bsmenu_want_n, __ATOMIC_RELAXED);
+    if (last != 0) {
+        __atomic_store_n(&g_bsmenu_want, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_bsmenu_want_n, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    if (n < 2) __atomic_store_n(&g_bsmenu_want_n, n + 1, __ATOMIC_RELAXED);
+    if (n + 1 >= 2) __atomic_store_n(&g_bsmenu_pub, 0, __ATOMIC_RELAXED);
+}
+int kl_bigscreen_menu_open(void) {
+    return __atomic_load_n(&g_bsmenu_pub, __ATOMIC_RELAXED);
+}
+// 1 = skip this overlay: menu open, in-eye alive, and this is the film quad
+// (shape 0, world-locked). Equirects (shape 5, backdrop) and head-locked
+// covers are never the film.
+int kl_bigscreen_hide_film(int shape, int head_locked) {
+    if (!kl_bigscreen_menu_open()) return 0;
+    if (!__atomic_load_n(&g_bsfilm_alive, __ATOMIC_RELAXED)) return 0;
+    if (shape != 0 || head_locked) return 0;
+    return 1;
+}
+int kl_bigscreen_menu_selftest(void) {
+#define REQUIRE(x) do { if (!(x)) { fprintf(stderr, "menu selftest failed: %s\n", #x); return 0; } } while (0)
+    kl_bigscreen_menu_set(0, 0); kl_bigscreen_menu_set(0, 0);
+    REQUIRE(kl_bigscreen_menu_open() == 0);
+    REQUIRE(kl_bigscreen_hide_film(0, 0) == 0);
+    // Hide is fast: a single menu-open probe hides (the ~1 s film-over-menu
+    // from the 60-frame cadence plus 2-probe debounce is the complaint).
+    kl_bigscreen_menu_set(1, 1);
+    REQUIRE(kl_bigscreen_menu_open() == 1);
+    REQUIRE(kl_bigscreen_hide_film(0, 0) == 1);
+    REQUIRE(kl_bigscreen_hide_film(5, 0) == 0);
+    REQUIRE(kl_bigscreen_hide_film(0, 1) == 0);
+    kl_bigscreen_menu_set(1, 0); kl_bigscreen_menu_set(1, 0);
+    REQUIRE(kl_bigscreen_menu_open() == 0);
+    REQUIRE(kl_bigscreen_hide_film(0, 0) == 0);
+    // Re-hide is fast again...
+    kl_bigscreen_menu_set(1, 1);
+    REQUIRE(kl_bigscreen_menu_open() == 1);
+    // ...while unhide still needs stability (single gap probes from the
+    // page census must not flash the film back over the menu).
+    kl_bigscreen_menu_set(0, 1);
+    REQUIRE(kl_bigscreen_menu_open() == 1);
+    kl_bigscreen_menu_set(0, 1);
+    REQUIRE(kl_bigscreen_menu_open() == 0);
+    kl_bigscreen_menu_set(0, 0); kl_bigscreen_menu_set(0, 0);
+    REQUIRE(kl_bigscreen_menu_open() == 0);
+    return 1;
+#undef REQUIRE
+}
 static void klovrp_enq_flush(void) {
     // An EMPTY set is published too: a frame in which every panel was hidden
     // has to take the previous frame's panels down, not leave them standing.
@@ -10878,6 +10977,7 @@ static void klovrp_enq_age(void) {
                         "taken down\n", KLOVRP_ENQ_LIVE_FRAMES);
 }
 
+static void klovrp_mirror_bsfilm(const int *ids, int n);
 static void klovrp_mirror_enq_gl(void) {
     if (kl_vulkan_guest_active() || !kl_glfb_has_mtl_layer_provider()) return;
     int ids[KLOVRP_MAX_LAYERS], n;
@@ -10902,6 +11002,319 @@ static void klovrp_mirror_enq_gl(void) {
         if (!gf) gf = KL_OVRP_TEXFMT_EYE;
         kl_glfb_mirror_layer(ids[i], 0, src, -1,
                              l->desc.texture_size.w, l->desc.texture_size.h, gf);
+    }
+    klovrp_mirror_bsfilm(ids, n);
+}
+
+// Bigscreen local-file film (2026-10-24): a film session holds decoded BGRA
+// frames in the JNI module; the film quad is the submitted non-eye layer
+// seen most often (the theater screen is up every frame, panels come and
+// go). The newest frame is uploaded into our own GL texture, which is then
+// mirrored under the film id — after the normal pass, so ours wins the row
+// and the existing resolve path composites it. No Swift change, no guest
+// texture touched. Skipped while the menu hides the film. Fully gated on the
+// Bigscreen target: other guests never reach this.
+static uint32_t g_bsfilm_tex;
+static int g_bsfilm_tw, g_bsfilm_th;
+static unsigned long long g_bsfilm_uploaded;
+static pthread_mutex_t g_bsfilm_mu = PTHREAD_MUTEX_INITIALIZER;
+// Once the guest samples the film texture itself (GetVideoTextureId), the
+// mirror below stands down: the submitted layer already carries the film and
+// our copy would only paint the same pixels a frame late over it.
+static int g_bsfilm_guest_draws;
+void klovrp_bsfilm_note_guest_draws(void) { g_bsfilm_guest_draws = 1; }
+
+// Upload one decoded BGRA frame into the shared film texture and return its
+// GL name (0 when there is no frame or no GL yet). Whoever arrives first per
+// serial wins — the guest through GetVideoTextureId or the mirror hook — so
+// each frame uploads exactly once even though both sample it.
+uint32_t klovrp_bsfilm_upload(const unsigned char *bgra, int w, int h,
+                              unsigned long long serial) {
+    if (!kl_probe_bigscreen() || !bgra || !serial || w <= 0 || h <= 0)
+        return g_bsfilm_tex;
+    static void (*gl_GenTextures)(int32_t, uint32_t *);
+    static void (*gl_BindTexture)(uint32_t, uint32_t);
+    static void (*gl_TexParameteri)(uint32_t, uint32_t, int32_t);
+    static void (*gl_TexImage2D)(uint32_t, int32_t, int32_t, int32_t, int32_t,
+                                 int32_t, uint32_t, uint32_t, const void *);
+    static void (*gl_TexSubImage2D)(uint32_t, int32_t, int32_t, int32_t, int32_t,
+                                    int32_t, uint32_t, uint32_t, const void *);
+    static void (*gl_GetIntegerv)(uint32_t, int32_t *);
+    static int resolved;
+    if (!resolved) {
+        resolved = 1;
+        gl_GenTextures   = kl_egl_sym("glGenTextures");
+        gl_BindTexture   = kl_egl_sym("glBindTexture");
+        gl_TexParameteri = kl_egl_sym("glTexParameteri");
+        gl_TexImage2D    = kl_egl_sym("glTexImage2D");
+        gl_TexSubImage2D = kl_egl_sym("glTexSubImage2D");
+        gl_GetIntegerv   = kl_egl_sym("glGetIntegerv");
+    }
+    if (!gl_GenTextures || !gl_BindTexture || !gl_TexImage2D ||
+        !gl_TexSubImage2D || !gl_TexParameteri) return g_bsfilm_tex;
+    if (!kl_egl_current_context()) return g_bsfilm_tex;
+    pthread_mutex_lock(&g_bsfilm_mu);
+    if (serial != g_bsfilm_uploaded) {
+        int32_t save_tex = 0;
+        if (gl_GetIntegerv) gl_GetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &save_tex);
+        if (!g_bsfilm_tex) {
+            gl_GenTextures(1, &g_bsfilm_tex);
+            if (g_bsfilm_tex) {
+                gl_BindTexture(0x0DE1 /* TEXTURE_2D */, g_bsfilm_tex);
+                gl_TexParameteri(0x0DE1, 0x2801 /* MIN_FILTER */, 0x2601 /* LINEAR */);
+                gl_TexParameteri(0x0DE1, 0x2800 /* MAG_FILTER */, 0x2601);
+                gl_TexParameteri(0x0DE1, 0x2802 /* WRAP_S */, 0x812F /* CLAMP_TO_EDGE */);
+                gl_TexParameteri(0x0DE1, 0x2803 /* WRAP_T */, 0x812F);
+            }
+        }
+        if (g_bsfilm_tex) {
+            // RGBA swizzle: BGRA_EXT uploads fail on this ANGLE backend
+            // (glerr 0x502, black texture), so shuffle to RGBA once per frame
+            // and upload core-format.
+            static unsigned char *rgba;
+            static size_t rgba_n;
+            size_t need = (size_t)w * h * 4;
+            if (need != rgba_n) {
+                free(rgba);
+                rgba = need ? malloc(need) : NULL;
+                rgba_n = rgba ? need : 0;
+            }
+            if (rgba && need == rgba_n) {
+                const unsigned char *s = bgra;
+                unsigned char *d = rgba;
+                for (size_t i = 0; i < need; i += 4) {
+                    d[i + 0] = s[i + 2];
+                    d[i + 1] = s[i + 1];
+                    d[i + 2] = s[i + 0];
+                    d[i + 3] = s[i + 3];
+                }
+                gl_BindTexture(0x0DE1, g_bsfilm_tex);
+                if (g_bsfilm_tw != w || g_bsfilm_th != h) {
+                    gl_TexImage2D(0x0DE1, 0, 0x8058 /* RGBA8 */, w, h, 0,
+                                  0x1908 /* RGBA */, 0x1401 /* UNSIGNED_BYTE */, rgba);
+                    g_bsfilm_tw = w;
+                    g_bsfilm_th = h;
+                } else {
+                    gl_TexSubImage2D(0x0DE1, 0, 0, 0, w, h,
+                                     0x1908, 0x1401, rgba);
+                }
+            }
+            g_bsfilm_uploaded = serial;
+        }
+        gl_BindTexture(0x0DE1, (uint32_t)save_tex);
+    }
+    uint32_t tex = g_bsfilm_tex;
+    pthread_mutex_unlock(&g_bsfilm_mu);
+    return tex;
+}
+static int g_bsfilm_frames[KLOVRP_MAX_LAYERS];
+static int g_bsfilm_id = -1;
+
+// Per-entry thumbnail texture for MediaInfo: same BGRA contract as the film
+// texture, but a fresh GL texture per call. The guest wraps each payload's id
+// in its own Texture2D, so entries must not share an id — a single shared
+// texture made every clip alias the last upload (2026-10-30). The caller keeps
+// the texture for the session. 0 = no GL/context/bad args.
+//
+// The upload lives in kl_gltex.c, which pins the pixel-unpack state the guest
+// shares with us. The guest-facing part is the wrap mode: REPEAT, because the
+// reference path never sets one and that is GL's default (see bsthumb_wrap).
+static kl_gltex_ops g_bsthumb_ops;
+
+// KL_BS_THUMB_WRAP selects the sampler wrap mode of the thumbnail texture.
+// REPEAT is the default because it is what the reference implementation
+// actually has: the Java layer that made these textures on Quest never called
+// glTexParameteri(WRAP_*) at all, and GL's default is REPEAT (2026-10-31).
+// Measured on device with the ramp pattern: the guest samples v across exactly
+// 0..1 but u outside that range, so with CLAMP_TO_EDGE every fragment lands on
+// texel column 0 and the card shows that one column stretched across it — the
+// stripes. With REPEAT the picture is correct; the user verified it.
+// `KL_BS_THUMB_WRAP=clamp` restores the old behaviour as the A/B.
+static int bsthumb_wrap(void) {
+    static int w = -1;
+    if (w < 0) {
+        const char *s = kl_env_str("KL_BS_THUMB_WRAP", NULL);
+        w = (s && strcmp(s, "clamp") == 0) ? 0x812F /* GL_CLAMP_TO_EDGE */
+                                           : 0x2901 /* GL_REPEAT */;
+        fprintf(stderr, "  [ovrp] bigscreen thumbnail wrap: %s\n",
+                w == 0x2901 ? "REPEAT" : "CLAMP_TO_EDGE");
+    }
+    return w;
+}
+
+static void bsthumb_ops_init(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    g_bsthumb_ops.gen_textures    = kl_egl_sym("glGenTextures");
+    g_bsthumb_ops.delete_textures = kl_egl_sym("glDeleteTextures");
+    g_bsthumb_ops.bind_texture    = kl_egl_sym("glBindTexture");
+    g_bsthumb_ops.tex_parameteri  = kl_egl_sym("glTexParameteri");
+    g_bsthumb_ops.tex_image2d     = kl_egl_sym("glTexImage2D");
+    g_bsthumb_ops.pixel_storei    = kl_egl_sym("glPixelStorei");
+    g_bsthumb_ops.get_integerv    = kl_egl_sym("glGetIntegerv");
+    g_bsthumb_ops.bind_buffer     = kl_egl_sym("glBindBuffer");
+    g_bsthumb_ops.get_error       = kl_egl_sym("glGetError");
+}
+
+// Once, before the first upload: the ambient unpack state the guest left
+// behind. This is the value the restore puts back, so a wrong answer here is
+// what wrote GL_INVALID_VALUE into the guest's stream — this line is how that
+// was seen, and it stays as the check for the next pname the shim forgets.
+static void bsthumb_state_log(void) {
+    static int said;
+    if (said || !g_bsthumb_ops.get_integerv) return;
+    said = 1;
+    int32_t row = -1, skip_rows = -1, skip_px = -1, align = -1, pbo = -1, tex = -1;
+    g_bsthumb_ops.get_integerv(0x0CF2 /* UNPACK_ROW_LENGTH */, &row);
+    g_bsthumb_ops.get_integerv(0x0CF3 /* UNPACK_SKIP_ROWS */, &skip_rows);
+    g_bsthumb_ops.get_integerv(0x0CF4 /* UNPACK_SKIP_PIXELS */, &skip_px);
+    g_bsthumb_ops.get_integerv(0x0CF5 /* UNPACK_ALIGNMENT */, &align);
+    g_bsthumb_ops.get_integerv(0x88EF /* PIXEL_UNPACK_BUFFER_BINDING */, &pbo);
+    g_bsthumb_ops.get_integerv(0x8069 /* TEXTURE_BINDING_2D */, &tex);
+    fprintf(stderr, "  [ovrp] bigscreen thumbnail unpack state: row %d skip %d/%d "
+                    "align %d pbo %d tex %d\n", row, skip_rows, skip_px, align, pbo, tex);
+}
+
+// KL_BS_THUMB_CHECK: read the just-uploaded texture back and compare it with
+// the CPU buffer. A match proves the upload reached the texture, so stripes on
+// screen would come from the guest's sampling rather than from us. Off by
+// default: the readback stalls the frame boundary.
+static void bsthumb_check(uint32_t tex, const unsigned char *rgba, int w, int h) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_BS_THUMB_CHECK", 0);
+    if (!on) return;
+    static void (*gen_fbo)(int32_t, uint32_t *);
+    static void (*del_fbo)(int32_t, const uint32_t *);
+    static void (*bind_fbo)(uint32_t, uint32_t);
+    static void (*fbo_tex)(uint32_t, uint32_t, uint32_t, uint32_t, int32_t);
+    static uint32_t (*check_fbo)(uint32_t);
+    static void (*read_px)(int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, void *);
+    static int resolved;
+    if (!resolved) {
+        resolved = 1;
+        gen_fbo   = kl_egl_sym("glGenFramebuffers");
+        del_fbo   = kl_egl_sym("glDeleteFramebuffers");
+        bind_fbo  = kl_egl_sym("glBindFramebuffer");
+        fbo_tex   = kl_egl_sym("glFramebufferTexture2D");
+        check_fbo = kl_egl_sym("glCheckFramebufferStatus");
+        read_px   = kl_egl_sym("glReadPixels");
+    }
+    if (!gen_fbo || !del_fbo || !bind_fbo || !fbo_tex || !check_fbo || !read_px ||
+        !g_bsthumb_ops.get_integerv || !g_bsthumb_ops.pixel_storei) return;
+    unsigned char *back = malloc((size_t)w * (size_t)h * 4);
+    if (!back) return;
+    int32_t save_fb = 0, save_read = 0, pack_align = 4, pack_row = 0, pack_pbo = 0;
+    g_bsthumb_ops.get_integerv(0x8CA6 /* FRAMEBUFFER_BINDING */, &save_fb);
+    g_bsthumb_ops.get_integerv(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &save_read);
+    g_bsthumb_ops.get_integerv(0x0D05 /* PACK_ALIGNMENT */, &pack_align);
+    g_bsthumb_ops.get_integerv(0x0D02 /* PACK_ROW_LENGTH */, &pack_row);
+    g_bsthumb_ops.get_integerv(0x88ED /* PIXEL_PACK_BUFFER_BINDING */, &pack_pbo);
+    if (pack_pbo && g_bsthumb_ops.bind_buffer)
+        g_bsthumb_ops.bind_buffer(0x88EB /* PIXEL_PACK_BUFFER */, 0);
+    uint32_t fbo = 0;
+    gen_fbo(1, &fbo);
+    if (fbo) {
+        bind_fbo(0x8D40 /* FRAMEBUFFER */, fbo);
+        fbo_tex(0x8D40, 0x8CE0 /* COLOR_ATTACHMENT0 */, 0x0DE1 /* TEXTURE_2D */, tex, 0);
+        if (check_fbo(0x8D40) == 0x8CD5 /* FRAMEBUFFER_COMPLETE */) {
+            g_bsthumb_ops.pixel_storei(0x0D05, 1);
+            g_bsthumb_ops.pixel_storei(0x0D02, 0);
+            read_px(0, 0, w, h, 0x1908 /* RGBA */, 0x1401 /* UNSIGNED_BYTE */, back);
+            size_t n = (size_t)w * (size_t)h * 4, diff = 0, first = 0;
+            for (size_t i = 0; i < n; i++)
+                if (back[i] != rgba[i]) { if (!diff) first = i; diff++; }
+            fprintf(stderr, "  [ovrp] bigscreen thumbnail tex %u readback: "
+                            "%zu/%zu bytes differ (first at %zu)\n", tex, diff, n, first);
+        } else {
+            fprintf(stderr, "  [ovrp] bigscreen thumbnail tex %u readback: "
+                            "framebuffer incomplete\n", tex);
+        }
+        bind_fbo(0x8D40, (uint32_t)save_fb);
+        if (save_read != save_fb) bind_fbo(0x8CA8 /* READ_FRAMEBUFFER */, (uint32_t)save_read);
+        del_fbo(1, &fbo);
+    }
+    g_bsthumb_ops.pixel_storei(0x0D05, pack_align);
+    g_bsthumb_ops.pixel_storei(0x0D02, pack_row);
+    if (pack_pbo && g_bsthumb_ops.bind_buffer)
+        g_bsthumb_ops.bind_buffer(0x88EB /* PIXEL_PACK_BUFFER */, (uint32_t)pack_pbo);
+    free(back);
+}
+
+uint32_t klovrp_bsinfo_thumb_upload(const unsigned char *bgra, int w, int h,
+                                    int info_id) {
+    if (!kl_probe_bigscreen() || !bgra || w <= 0 || h <= 0) return 0;
+    bsthumb_ops_init();
+    if (!g_bsthumb_ops.gen_textures || !g_bsthumb_ops.bind_texture ||
+        !g_bsthumb_ops.tex_image2d || !g_bsthumb_ops.tex_parameteri ||
+        !g_bsthumb_ops.pixel_storei) return 0;
+    if (!kl_egl_current_context()) return 0;
+
+    // Same RGBA swizzle as the film texture (BGRA_EXT fails here).
+    static unsigned char *rgba;
+    static size_t rgba_n;
+    size_t need = (size_t)w * (size_t)h * 4;
+    if (need != rgba_n) {
+        free(rgba);
+        rgba = need ? malloc(need) : NULL;
+        rgba_n = rgba ? need : 0;
+    }
+    if (!rgba || need != rgba_n) return 0;
+    const unsigned char *s = bgra;
+    unsigned char *d = rgba;
+    for (size_t i = 0; i < need; i += 4) {
+        d[i + 0] = s[i + 2];
+        d[i + 1] = s[i + 1];
+        d[i + 2] = s[i + 0];
+        d[i + 3] = s[i + 3];
+    }
+    bsthumb_state_log();
+    uint32_t tex = kl_gltex_upload_rgba8(&g_bsthumb_ops, rgba, w, h,
+                                        bsthumb_wrap());
+    if (!tex) {
+        fprintf(stderr, "  [ovrp] bigscreen thumbnail upload failed for "
+                        "MediaInfo %d (%dx%d)\n", info_id, w, h);
+        return 0;
+    }
+    fprintf(stderr, "  [ovrp] bigscreen thumbnail tex %u for MediaInfo %d "
+                    "(%dx%d)\n", tex, info_id, w, h);
+    bsthumb_check(tex, rgba, w, h);
+    return tex;
+}
+static void klovrp_mirror_bsfilm(const int *ids, int n) {
+    if (!kl_probe_bigscreen()) return;
+    for (int i = 0; i < n; i++)
+        if (ids[i] >= 0 && ids[i] < KLOVRP_MAX_LAYERS) g_bsfilm_frames[ids[i]]++;
+    int best = -1, bestn = 0;
+    for (int i = 0; i < KLOVRP_MAX_LAYERS; i++)
+        if (g_bsfilm_frames[i] > bestn) { bestn = g_bsfilm_frames[i]; best = i; }
+    if (best != g_bsfilm_id) g_bsfilm_id = best;
+    // Upload first: this boundary thread provably holds GL (the menu mirror
+    // beside it composites), while the guest's query thread may not. The
+    // mirror below stays gated — data provision is not presentation.
+    uint32_t tex = 0;
+    {
+        int w = 0, h = 0;
+        unsigned long long serial = 0;
+        const unsigned char *bgra = kl_bigscreen_film_frame(&w, &h, &serial);
+        if (bgra && serial && w > 0 && h > 0)
+            tex = klovrp_bsfilm_upload(bgra, w, h, serial);
+    }
+    // MediaInfo thumbnails ride the same boundary for the same reason.
+    kl_bigscreen_info_boundary();
+    // The guest samples the film texture itself now (GetVideoTextureId): the
+    // submitted layer already carries the film, so our copy stands down —
+    // unless a local session plays, in which case the film is mirrored under
+    // its quad regardless of room chrome (same reason as hide_film above).
+    if (best < 0 || g_bsfilm_guest_draws || kl_bigscreen_menu_open()) return;
+    if (!tex) return;
+    {
+        int w = g_bsfilm_tw, h = g_bsfilm_th;
+        struct klovrp_layer *fl = klovrp_layer(best);
+        const char *fn = NULL;
+        uint32_t gf = fl ? klovrp_gl_format(fl->desc.format, &fn) : 0;
+        if (!gf) gf = KL_OVRP_TEXFMT_EYE;
+        kl_glfb_mirror_layer(best, 0, tex, -1, w, h, gf);
     }
 }
 //

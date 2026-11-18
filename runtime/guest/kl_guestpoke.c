@@ -350,6 +350,21 @@ static const struct poke_cap_row k_poke_caps[] = {
     // 0xec1ee4 — 32 on a Quest as well. The units above 31 came from the
     // location answers instead; see KL_GLFB_BIND_PINS in kl_glfb.c.
     { "6000.3.22f1", 0x1796e40, 0xec, 0, "x2773034772778845" },
+    // Unity 2020.3.33f1 — Bigscreen Beta 0.950.2 (x2497738113633933, 2026-10-16).
+    // 3.16 million "Invalid texture unit!" in 86 seconds at the cap of 32; the
+    // world loaded and the sound was there, but every surface came out black
+    // and every glyph a filled white box. Measured by the recipe above against
+    // this build's libunity:
+    //   0x134b244  "OpenGL Error: Invalid texture unit!"
+    //   0x7415c0   bl 0x56f1b0            ; the singleton getter
+    //   0x7415c4   ldr w8, [x0, #0xe8]    ; the cap
+    //   0x7415c8   cmp w8, w22 / b.ls     ; reject units >= cap
+    //   0x56f1b0   adrp x8, 0x17ec000 / ldr x0, [x8, #0x580]
+    // 0x17ec580 lands in the RW LOAD's BSS (file-backed end 0x177d178, memory
+    // end 0x1873060), a singleton pointer filled at runtime. The 12-byte unit
+    // cache starts at 0x28 and its active-unit field is at 0x330, leaving
+    // exactly 64 safe entries — the ceiling this row is clamped to below.
+    { "2020.3.33f1", 0x17ec580, 0xe8, 1, "x2497738113633933" },
 };
 #define POKE_NROWS (sizeof k_poke_caps / sizeof k_poke_caps[0])
 
@@ -447,6 +462,20 @@ void kl_guest_poke_texture_unit_cap(void) {
             return;
         }
         if (poke_n > 64) poke_n = 64;
+    }
+    // Bigscreen Beta: the same two guards, from the instructions in its row's
+    // comment (getter 0x56f1b0, the cap check 0x7415c4), and the same 64-slot
+    // ceiling the unit cache was measured to hold.
+    if (row->target && !strcmp(row->target, "x2497738113633933")) {
+        static const uint32_t getter[] = {0xb00093e8, 0xf942c100};
+        static const uint32_t limit[] = {0xb940e808, 0x6b16011f};
+        if (kl_span(u) < 0x7415cc ||
+            memcmp(ub + 0x56f1b0, getter, sizeof getter) ||
+            memcmp(ub + 0x7415c4, limit, sizeof limit)) {
+            if (first) fprintf(stderr, "  [poke] Bigscreen texture cap: SKIPPED (binary guard mismatch)\n");
+            return;
+        }
+        if (poke_n > 64) poke_n = 64; // the measured engine cache has 64 slots
     }
 
     if ((size_t)POKE_SINGLETON + sizeof(void *) > kl_span(u)) {

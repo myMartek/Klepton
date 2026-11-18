@@ -807,6 +807,7 @@ static int kl_core_shim_claims(const char *path) {
 }
 
 static int kl_core_shim_is_handle(void *h) { return h == (void *)&g_core_shim_handle; }
+int kl_dl_is_core_shim(void *h) { return kl_core_shim_is_handle(h); }
 
 void *klb_dlopen(const char *path, int flags) {
     (void)flags;
@@ -983,6 +984,48 @@ static void *klb_dlsym_null(const char *name) {
     return NULL;
 }
 
+// Diagnostic for the Bigscreen room-crash (2026-10-21, x2497738113633933):
+// a managed P/Invoke (DllImport __InternalDynamic) resolves its native entry
+// and then faults in libunity+0x53c088. Successful resolutions are normally
+// silent; with KL_TRACE_DLSYM name them with their caller, so the crashing
+// entry point lands in the log. Callers keep their exact lookup; this logs.
+static void kl_dlsym_log_hit(const char *name, void *s) {
+    if (!kl_env_on("KL_TRACE_DLSYM", kl_dlsym_trace_default())) return;
+    size_t off = 0;
+    const char *who = kl_addr_image(__builtin_return_address(0), &off);
+    size_t soff = 0;
+    const char *simp = kl_addr_image(s, &soff);
+    fprintf(stderr, "  [dlsym] '%s' -> %p (%s+%#zx) (asked from %s+%#zx)\n",
+            name ? name : "(null)", s, simp ? simp : "?", soff,
+            who ? who : "(host)", off);
+}
+
+// Bigscreen room-crash fix (2026-10-21, x2497738113633933). Root cause:
+// managed code resolves UnityPluginLoad from libVuplexWebViewAndroid via
+// DllImport __InternalDynamic and calls it on a guest worker thread Unity
+// never registered, so Unity's thread-local lookup returns NULL and the
+// engine faults at libunity+0x53c088 (ldr x8,[x0], x0=0). Answering this
+// one entry with NULL makes Unity skip the plugin load (no managed
+// exception surfaces; WebView texture sharing is host-stubbed anyway), and
+// the room stays up. Round 1 blamed the Oculus spatializer's
+// UnityGetAudioEffectDefinitions and was refuted (crash byte-identical).
+// Narrowly scoped: this symbol from this image only; everything else
+// resolves exactly as before.
+static int kl_dl_refuse_crash_candidate(const char *name, void *v) {
+    if (!name || !v) return 0;
+    if (strcmp(name, "UnityPluginLoad") != 0) return 0;
+    const char *t = kl_driver_target_name();
+    if (!t || strcmp(t, "x2497738113633933") != 0) return 0;
+    size_t off = 0;
+    const char *img = kl_addr_image(v, &off);
+    if (img && strstr(img, "VuplexWebView")) {
+        fprintf(stderr, "  [dlsym] '%s' from %s refused (diagnostic NULL)\n",
+                name, img);
+        return 1;
+    }
+    return 0;
+}
+
 void *klb_dlsym(void *handle, const char *name) {
     if (kl_extension_is_handle(handle)) {
         void *symbol = kl_extension_symbol(name);
@@ -1006,14 +1049,22 @@ void *klb_dlsym(void *handle, const char *name) {
     // fault — which is the whole point of serving the handle rather than NULL.
     if (kl_core_shim_is_handle(handle)) {
         void *s = kl_shim_lookup(name);
-        if (s) return s;
+        if (s) { kl_dlsym_log_hit(name, s); return s; }
         s = kl_guest_sym_global(name);
         if (!s) snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
+        else if (kl_dl_refuse_crash_candidate(name, s)) {
+            snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
+            return klb_dlsym_null(name);
+        }
+        else kl_dlsym_log_hit(name, s);
         return s;
     }
     if (handle == NULL || handle == (void *)-1) {    // RTLD_DEFAULT / RTLD_NEXT
         void *s = kl_shim_lookup(name);
-        if (s) return s;
+        if (s) {
+            kl_dlsym_log_hit(name, s);
+            return s;
+        }
         for (int i = 0; i < g_nimgs; i++) {
             void *v = kl_sym(g_imgs[i].img, name);
             if (!v) continue;
@@ -1021,7 +1072,11 @@ void *klb_dlsym(void *handle, const char *name) {
             // exports up this way, and must get the same wrappers the handle
             // path hands out (kl_avpro_interpose). No other title does.
             if (kl_driver_deovr_avpro()) { void *w = kl_avpro_interpose(name, v); if (w) return w; }
-            return v;
+            if (kl_dl_refuse_crash_candidate(name, v)) {
+                snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
+                return klb_dlsym_null(name);
+            }
+            kl_dlsym_log_hit(name, v); return v;
         }
         s = kl_extension_symbol(name);
         if (s) return s;
@@ -1045,7 +1100,12 @@ void *klb_dlsym(void *handle, const char *name) {
     if (!v) { snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
               return klb_dlsym_null(name); }
     { void *w = kl_extension_interpose(handle, name, v); if (w) return w; }
-    { void *w = kl_dl_interpose(name, v); if (w) return w; }
+    { void *w = kl_dl_interpose(name, v); if (w) { kl_dlsym_log_hit(name, w); return w; } }
+    if (kl_dl_refuse_crash_candidate(name, v)) {
+        snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
+        return klb_dlsym_null(name);
+    }
+    kl_dlsym_log_hit(name, v);
     return v;
 }
 

@@ -142,8 +142,13 @@ void       *klj_new_object_data(const char *class_name, void *data);
 void       *klj_own(void *obj, void (*destroy)(void *));
 void       *klj_host_cache(void *obj);   // a jobject the host keeps in a static
 const char *klj_str(void *s);
+void       *kl_jni_new_string(const char *utf8);
 klj_array  *klj_arr(void *a);
 void       *klj_new_array(char kind, const char *elem_cls, int len);
+// A native the GUEST registered via RegisterNatives (its own lib's function
+// pointer, callable in-process): fn or NULL. Used to deliver Unity events
+// back through UnityPlayer.nativeUnitySendMessage, which Java never runs.
+void       *klj_find_guest_native(const char *cls, const char *name);
 klj_direct_buffer *klj_direct(void *buf);
 void       *klj_want(void *clazz, const char *name, const char *sig, char kind);
 klj_val     klj_call(void *env, void *self, void *mid, kl_va *va, char want);
@@ -205,7 +210,7 @@ extern const klj_binding klj_bind_haptics[];
 extern const klj_binding *const klj_binding_tables[];
 // One title's own answers, asked before the tables: each looks at the target
 // first and is NULL for every other (kl_jni_firebase.c, kl_jni_vivox.c,
-// kl_jni_vertigo.c, kl_jni_ghosttown.c).
+// kl_jni_vertigo.c, kl_jni_ghosttown.c, kl_jni_bigscreen.c).
 const klj_binding *klj_firebase_binding(const char *cls, const char *name, const char *sig);
 const klj_binding *klj_vivox_binding(const char *cls, const char *name, const char *sig);
 const klj_binding *klj_vertigo_binding(const char *cls, const char *name, const char *sig);
@@ -215,6 +220,10 @@ const klj_binding *klj_ghosttown_binding(const char *cls, const char *name, cons
 // Video Manager methods are answered by the host player (runtime/media/
 // kl_avpro.m). VRChat and others ship the same plugin; they keep the old path.
 const klj_binding *klj_avpro_table(void);
+
+// Bigscreen's own JNI table (runtime/jni/kl_jni_bigscreen.c), walked after the
+// shared ones: NULL for every other target.
+const klj_binding *klj_bigscreen_binding(const char *cls, const char *name, const char *sig);
 // The UnityPlayer if a lifecycle call has made it, NULL before — for a caller on
 // another thread, which must not be the one to make it (kl_jni_softinput.c).
 void *klj_unity_player_made(void);

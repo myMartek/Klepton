@@ -86,7 +86,7 @@ typedef struct { void *context; klm_image_cb onImageAvailable; } klm_listener;
 // guest asked for, which is how a wrong assumption gets noticed.
 #define KLM_FMT_MAX 32
 typedef struct {
-    struct { char *key; char *sval; int32_t ival; int is_str; } kv[KLM_FMT_MAX];
+    struct { char *key; char *sval; int32_t ival; int is_str; int is_float; } kv[KLM_FMT_MAX];
     int n;
 } klm_format;
 
@@ -113,7 +113,20 @@ static void klm_AMediaFormat_setInt32(void *fmt, const char *key, int32_t v) {
     if (!f || !key) return;
     int i = klm_fmt_slot(f, key);
     if (i < 0) return;
-    f->kv[i].ival = v; f->kv[i].is_str = 0;
+    f->kv[i].ival = v; f->kv[i].is_str = 0; f->kv[i].is_float = 0;
+}
+
+static void klm_AMediaFormat_setFloat(void *fmt, const char *key, float v) {
+    klm_format *f = fmt;
+    if (!f || !key) return;
+    int i = klm_fmt_slot(f, key);
+    if (i < 0) return;
+    // Held, not interpreted (see the bag comment above): bit-exact so a
+    // later getFloat reads back exactly what the guest stored. Needed since
+    // 2026-10-21, when a video room's AMediaCodec path called this and the
+    // missing import aborted the app (x2497738113633933).
+    memcpy(&f->kv[i].ival, &v, sizeof v);
+    f->kv[i].is_str = 0; f->kv[i].is_float = 1;
 }
 
 static void klm_AMediaFormat_setString(void *fmt, const char *key, const char *v) {
@@ -125,7 +138,7 @@ static void klm_AMediaFormat_setString(void *fmt, const char *key, const char *v
     // and in its own std::string temporaries.
     free(f->kv[i].sval);
     f->kv[i].sval = v ? strdup(v) : NULL;
-    f->kv[i].is_str = 1;
+    f->kv[i].is_str = 1; f->kv[i].is_float = 0;
 }
 
 static const char *klm_fmt_string(klm_format *f, const char *key) {
@@ -149,7 +162,7 @@ static bool klm_AMediaFormat_getInt32(void *fmt, const char *key, int32_t *out) 
     klm_format *f = fmt;
     if (!f || !key || !out) return false;
     for (int i = 0; i < f->n; i++)
-        if (!strcmp(f->kv[i].key, key) && !f->kv[i].is_str) { *out = f->kv[i].ival; return true; }
+        if (!strcmp(f->kv[i].key, key) && !f->kv[i].is_str && !f->kv[i].is_float) { *out = f->kv[i].ival; return true; }
     return false;
 }
 static bool klm_AMediaFormat_getInt64(void *fmt, const char *key, int64_t *out) {
@@ -159,8 +172,14 @@ static bool klm_AMediaFormat_getInt64(void *fmt, const char *key, int64_t *out) 
     return true;
 }
 static bool klm_AMediaFormat_getFloat(void *fmt, const char *key, float *out) {
+    klm_format *f = fmt;
+    if (!f || !key || !out) return false;
+    for (int i = 0; i < f->n; i++) {
+        if (strcmp(f->kv[i].key, key)) continue;
+        if (f->kv[i].is_float) { memcpy(out, &f->kv[i].ival, sizeof *out); return true; }
+    }
     int32_t v;
-    if (!out || !klm_AMediaFormat_getInt32(fmt, key, &v)) return false;
+    if (!klm_AMediaFormat_getInt32(fmt, key, &v)) return false;
     *out = (float)v;
     return true;
 }
@@ -2099,6 +2118,7 @@ static const struct { const char *name; void *fn; } g_media[] = {
     M("AMediaFormat_delete",    klm_AMediaFormat_delete),
     M("AMediaFormat_setInt32",  klm_AMediaFormat_setInt32),
     M("AMediaFormat_setString", klm_AMediaFormat_setString),
+    M("AMediaFormat_setFloat",  klm_AMediaFormat_setFloat),
     M("AMediaFormat_getInt32",  klm_AMediaFormat_getInt32),
     M("AMediaFormat_getInt64",  klm_AMediaFormat_getInt64),
     M("AMediaFormat_getFloat",  klm_AMediaFormat_getFloat),

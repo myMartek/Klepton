@@ -1170,6 +1170,10 @@ static unsigned g_shader_pins_n;
 // Beat Saber 1.45 (beatsaber140) the ninth: repeated "Invalid texture unit!"
 // and the Billie Eilish environment's water black and featureless, restored
 // with the pins on (fix 95, its sender's headset; not run here).
+// Bigscreen Beta (x2497738113633933, Unity 2020.3.33f1) the tenth: samplers at
+// 405..416, ~300k "Invalid texture unit!" a run, the avatar bodies black and
+// every glyph a filled white box (on device, 2026-10-16; ported 2026-10-22
+// from the pre-toolchain-714 tree onto this file's generalized pins).
 // ...and every Unity title under the profile for untested games (kl_driver.c):
 // seven of the eight Unity fixes for this error were these pins, and a guest
 // without the error has its samplers where its own shader text puts them, which
@@ -1191,7 +1195,8 @@ static int klfb_bind_pins(void) {
                                                   strcmp(t, "x2285803881494677") == 0 ||
                                                   strcmp(t, "x9863010250399155") == 0 ||
                                                   strcmp(t, "x438100") == 0 ||
-                                                  strcmp(t, "x3684804704932159") == 0)) ||
+                                                  strcmp(t, "x3684804704932159") == 0 ||
+                                                  strcmp(t, "x2497738113633933") == 0)) ||
                                            (kl_untested_profile() && kl_driver_kind() == KL_GUEST_UNITY));
     }
     return v;
@@ -1500,6 +1505,11 @@ static void klfb_pins_link(uint32_t program) {
 // the guest's per-draw path.
 static __thread uint32_t g_cur_prog;
 
+// DIAG (Bigscreen film triage, 2026-10-24): the SurfaceTexture's guest texture
+// (set by kl_glfb_image_bind_texture at latch time). klfb_BindTexture reports
+// guest binds of it so we see which program, if any, draws the video.
+static uint32_t g_video_tex = 0;
+
 // The guest's location -> the linker's. Unpinned locations pass through: a
 // guest that pins some uniforms and looks up others is asking about ours in
 // the second case, and rewriting those would be the same bug in the mirror.
@@ -1660,6 +1670,9 @@ static int klfb_rewrite_texel_buffers(char *buf, size_t cap) {
 // rewritten — a buffer the shader writes, a member that is not a uint array,
 // or any other use of NAME_buf leaves the shader as it was.
 #define KLFB_SB_MAXB 8
+static int kl_glfb_ssbo_single(void);   // defined with the ssbo gate, below
+static int kl_glfb_ssbo_const(void);    // diagnostic override, defined there too
+static const char *klfb_shader_src(uint32_t shader);   // captured sources, below
 // Skip whitespace, then match `lit`. Returns the position after it, or NULL.
 static char *klfb_sb_lit(char *q, const char *lit) {
     while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
@@ -1735,9 +1748,133 @@ static int klfb_sb_uses(char *buf, size_t cap, const char *name, int binding, in
     }
     return n;
 }
+// Single-sampler use rewrite: `NAME_buf[I].value[J]` becomes
+// `kl_sbfT(kl_ssboT, B*KLFB_SBT_PARTW + int(I)*K + int(J))`, one partition per
+// binding. Mirrors klfb_sb_uses above; kept separate so the per-binding path
+// stays byte-identical for the titles that use it.
+#define KLFB_SBT_PARTW 8192
+#define KLFB_SBT_TEXW  256
+#define KLFB_SBT_TEXH  256
+#define KLFB_SBT_UNIT  56
+static int klfb_sb_uses_T(char *buf, size_t cap, const char *name, int binding, int words) {
+    char head[80];
+    snprintf(head, sizeof head, "%s_buf", name);
+    size_t hl = strlen(head);
+    int base = binding * KLFB_SBT_PARTW;
+    for (char *p = buf; (p = strstr(p, head)); ) {
+        if ((p > buf && KLFB_IDENT(p[-1])) || KLFB_IDENT(p[hl])) { p += hl; continue; }
+        if (strncmp(p + hl, "[]", 2) == 0) { p += hl + 2; continue; }      // the declaration
+        if (p[hl] != '[') return -1;
+        char *c1 = klfb_sb_close(p + hl);
+        if (!c1 || strncmp(c1 + 1, ".value[", 7) != 0) return -1;
+        char *c2 = klfb_sb_close(c1 + 7);
+        if (!c2) return -1;
+        size_t l1 = (size_t)(c1 - (p + hl + 1)), l2 = (size_t)(c2 - (c1 + 8));
+        size_t need = l1 + l2 + 64;
+        char *ins = malloc(need);
+        if (!ins) return -1;
+        snprintf(ins, need, "kl_sbfT(kl_ssboT, %d + int(%.*s) * %d + int(%.*s))",
+                 base, (int)l1, p + hl + 1, words, (int)l2, c1 + 8);
+        char *after = klfb_splice(buf, cap, p, (size_t)(c2 + 1 - p), ins);
+        free(ins);
+        if (!after) return -1;
+        p = after;
+    }
+    return 0;
+}
+// Storage-block records for program-interface reflection (below): Unity asks
+// how many blocks a program has (ACTIVE_RESOURCES) before it binds any. The
+// linked program no longer declares them — rewritten to texture reads — so
+// the answer comes from these records instead of the driver. Without them
+// Unity sees zero blocks, binds nothing, and the tables read zero.
+struct klfb_sbr_tab { uint32_t key; uint8_t n; char name[8][64]; int8_t binding[8]; int16_t words[8]; };
+static struct klfb_sbr_tab g_sbr_shader[256], g_sbr_prog[256];
+static struct klfb_sbr_tab *klfb_sbr_slot(struct klfb_sbr_tab *tab, uint32_t key) {
+    struct klfb_sbr_tab *free = NULL;
+    for (unsigned k = 0; k < 256; k++) {
+        unsigned i = (key + k) & 255;
+        if (tab[i].key == key) return &tab[i];
+        if (!free && !tab[i].key) free = &tab[i];
+    }
+    return free;
+}
+static void klfb_sbr_note(uint32_t shader, char names[][64], int *bindings, int *words, int nb) {
+    if (!shader || nb <= 0) return;
+    struct klfb_sbr_tab *s = klfb_sbr_slot(g_sbr_shader, shader);
+    if (!s) return;
+    s->key = shader; s->n = 0;
+    for (int k = 0; k < nb && k < 8; k++) {
+        snprintf(s->name[s->n], sizeof s->name[0], "%s", names[k]);
+        s->binding[s->n] = (int8_t)bindings[k];
+        s->words[s->n] = (int16_t)(words[k] > 32767 ? 32767 : words[k]);
+        s->n++;
+    }
+}
+// At link: the union of the attached shaders' blocks becomes the program's.
+static void klfb_sbr_link(uint32_t prog) {
+    if (!prog) return;
+    static void (*r_attached)(uint32_t, int32_t, int32_t *, uint32_t *) = NULL;
+    if (!r_attached) r_attached = (void *)asym("glGetAttachedShaders");
+    if (!r_attached) return;
+    uint32_t sh[16]; int32_t n = 0;
+    r_attached(prog, 16, &n, sh);
+    if (n <= 0) return;
+    struct klfb_sbr_tab *p = klfb_sbr_slot(g_sbr_prog, prog);
+    if (!p) return;
+    p->key = prog; p->n = 0;
+    for (int32_t s = 0; s < n; s++) {
+        struct klfb_sbr_tab *src = klfb_sbr_slot(g_sbr_shader, sh[(unsigned)s]);
+        if (!src || src->key != sh[(unsigned)s]) continue;
+        for (unsigned k = 0; k < src->n && p->n < 8; k++) {
+            unsigned m;
+            for (m = 0; m < p->n; m++) if (!strcmp(p->name[m], src->name[k])) break;
+            if (m < p->n) continue;
+            snprintf(p->name[p->n], sizeof p->name[0], "%s", src->name[k]);
+            p->binding[p->n] = src->binding[k];
+            p->words[p->n] = src->words[k];
+            p->n++;
+        }
+    }
+    if (p->n) {
+        static int said;
+        if (said < 8 || p->n > 1) {
+            if (p->n <= 1) said++;
+            fprintf(stderr, "  [glfb] ssbo reflect: program %u declares %u storage block(s):", prog, p->n);
+            for (unsigned k = 0; k < p->n; k++)
+                fprintf(stderr, " %s=%d", p->name[k], p->binding[k]);
+            fprintf(stderr, "\n"); }
+        // Dump the rewritten sources once for a multi-block program: the use
+        // sites (index math) and the albedo path decide data vs mapping.
+        static int said_dump;
+        if (p->n > 1 && !said_dump++) {
+            for (int32_t s = 0; s < n; s++) {
+                const char *src = klfb_shader_src(sh[(unsigned)s]);
+                if (!src) {
+                    fprintf(stderr, "  [glfb] ssbo src: program %u shader %u (no captured source)\n",
+                            prog, sh[(unsigned)s]);
+                    continue;
+                }
+                fprintf(stderr, "  [glfb] ssbo src: program %u shader %u (%zu bytes) ----\n",
+                        prog, sh[(unsigned)s], strlen(src));
+                fputs(src, stderr);
+                fputc('\n', stderr);
+                fprintf(stderr, "  [glfb] ssbo src: ---- end ----\n");
+            }
+        }
+    } else p->key = 0;
+}
+static void klfb_sbr_forget(uint32_t prog) {
+    if (!prog) return;
+    struct klfb_sbr_tab *p = klfb_sbr_slot(g_sbr_prog, prog);
+    if (p && p->key == prog) { p->key = 0; p->n = 0; }
+}
+static struct klfb_sbr_tab *klfb_sbr_prog(uint32_t prog) {
+    struct klfb_sbr_tab *p = klfb_sbr_slot(g_sbr_prog, prog);
+    return (p && p->key == prog) ? p : NULL;
+}
 // Returns the number of blocks rewritten; 0 leaves `buf` exactly as it was
 // (every check is made before the first change).
-static int klfb_rewrite_ro_ssbo(char *buf, size_t cap) {
+static int klfb_rewrite_ro_ssbo(char *buf, size_t cap, uint32_t shader) {
     if (!strstr(buf, "layout(std430")) return 0;
     struct { char name[64]; int binding, words; } b[KLFB_SB_MAXB];
     int nb = 0;
@@ -1754,16 +1891,53 @@ static int klfb_rewrite_ro_ssbo(char *buf, size_t cap) {
         p = end;
     }
     if (!nb || strlen(buf) + grow >= cap) return 0;
+    int single = kl_glfb_ssbo_single();
     for (int i = 0; i < nb; i++) {
         char *p = strstr(buf, "layout(std430"), *end;
         int binding, words; char name[64];
         if (!p || !klfb_sb_parse(buf, p, &binding, name, &words, &end)) return 0;   // cannot happen
+        if (single) {
+            // One sampler for every block (Metal stage limit is 16 samplers;
+            // per-binding kl_sbN needs 6 more than the avatar shader's own 15
+            // and never links). The first block carries the declaration, the
+            // rest are removed outright; binding B lives in rows B*32...
+            // KL_GLFB_SSBO_CONST=1 replaces the fetch with a zero-detecting
+            // fetch (diagnostic: pipeline vs data, see kl_glfb_ssbo_const):
+            // zero words read back as 1.0 (neutral multiply), nonzero words
+            // pass through — except the hidden-flags binding (5, words
+            // 40960..49151), which always passes through so nothing is
+            // wrongly discarded. Atlas-visible bodies prove texelFetch
+            // returns zero (sampling broken); black bodies prove nonzero
+            // data arrives (mapping/data at fault).
+            int use_const = kl_glfb_ssbo_const();
+            char decl[384];
+            if (use_const)
+                snprintf(decl, sizeof decl, "%s",
+                         i ? "" : "uniform highp sampler2D kl_ssboT;\n"
+                                 "uint kl_sbfT(highp sampler2D s, int i) { uint v = floatBitsToUint(texelFetch(s, ivec2(i & 255, i >> 8), 0).r); if (i >= 40960 && i < 49152) return v; return v == 0u ? 1065353216u : v; }\n");
+            else
+                snprintf(decl, sizeof decl, "%s",
+                         i ? "" : "uniform highp sampler2D kl_ssboT;\n"
+                                 "uint kl_sbfT(highp sampler2D s, int i) { return floatBitsToUint(texelFetch(s, "
+                                 "ivec2(i & 255, i >> 8), 0).r); }\n");
+            if (!klfb_splice(buf, cap, p, (size_t)(end - p), decl)) return 0;
+            if (klfb_sb_uses_T(buf, cap, name, binding, words) < 0) return 0;
+            continue;
+        }
         char decl[256];
         snprintf(decl, sizeof decl, "uniform highp usampler2D kl_sb%d;\n%s", binding,
                  i ? "" : "uint kl_sbf(highp usampler2D s, int i) { return texelFetch(s, "
                           "ivec2(i & " KLFB_TB_MASK ", i >> " KLFB_TB_SHIFT "), 0).x; }\n");
         if (!klfb_splice(buf, cap, p, (size_t)(end - p), decl)) return 0;
         if (klfb_sb_uses(buf, cap, name, binding, words, 1) < 0) return 0;
+    }
+    {
+        char nn[8][64]; int bb[8], ww[8];
+        for (int k = 0; k < nb && k < 8; k++) {
+            snprintf(nn[k], sizeof nn[k], "%s", b[k].name);
+            bb[k] = b[k].binding; ww[k] = b[k].words;
+        }
+        klfb_sbr_note(shader, nn, bb, ww, nb);
     }
     return nb;
 }
@@ -2750,11 +2924,14 @@ int kl_glfb_compute_stub(void) {
 }
 // Read-only storage buffers as textures (klfb_rewrite_ro_ssbo, klfb_ssbo_apply).
 // KL_GLFB_SSBO_TEX=0/1; on for Garden of the Sea (x3684804704932159), the one
-// title it was written for, and Arizona Sunshine (x2190353671014400): told the
-// ES 3.1 storage limits are zero, much of its world was Unity's magenta error
-// shader; told the minimums without this, every one of its multiview shaders
-// failed on "'std430' : invalid layout qualifier" and it hung on its logo
-// (2026-10-31). While it is on, the shader-storage binding points are kept
+// title it was written for, Arizona Sunshine (x2190353671014400) and Bigscreen
+// Beta (x2497738113633933), whose remote-avatar shaders read the same shape
+// (_SkinTones / _CustomColors / _IrisOffsets / _MicAmplitudes / _Gradients /
+// _HiddenAvatarFlags; ported 2026-10-22). Arizona Sunshine needed it because
+// told the ES 3.1 storage limits are zero, much of its world was Unity's magenta
+// error shader; told the minimums without this, every one of its multiview
+// shaders failed on "'std430' : invalid layout qualifier" and it hung on its
+// logo (2026-10-31). While it is on, the shader-storage binding points are kept
 // here as they are for the compute kernels above.
 int kl_glfb_ssbo_tex(void) {
     static int on = -1;
@@ -2763,12 +2940,43 @@ int kl_glfb_ssbo_tex(void) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
         on = kl_env_on("KL_GLFB_SSBO_TEX", t && (strcmp(t, "x3684804704932159") == 0 ||
-                                                 strcmp(t, "x2190353671014400") == 0));
+                                                 strcmp(t, "x2190353671014400") == 0 ||
+                                                 strcmp(t, "x2497738113633933") == 0));
     }
+    return on;
+}
+// Single-sampler SSBO form (kl_ssboT + 32-row partitions per binding, see
+// klfb_rewrite_ro_ssbo): Bigscreen Beta only. Its avatar shader carries 15
+// real samplers, and the per-binding kl_sbN form needs 6 more — 21 exceeds
+// the Metal stage limit of 16, so the program never links (magenta avatars,
+// 2026-10-22). One shared sampler keeps it at 16. Off by default for every
+// other title; KL_GLFB_SSBO_SINGLE overrides either way.
+static int kl_glfb_ssbo_single(void) {
+    static int on = -1;
+    if (!kl_glfb_ssbo_tex()) return 0;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_GLFB_SSBO_SINGLE", t && strcmp(t, "x2497738113633933") == 0);
+    }
+    return on;
+}
+// Diagnostic/override: read a constant instead of the tables. Returns white
+// for every table word while active (default ON for this target until the
+// data question is settled; KL_GLFB_SSBO_CONST=0 disables). If bodies turn
+// white the pipeline (link/units/mapping) is correct and the buffer contents
+// are at fault; if they stay black the fault is downstream (normals/vertex).
+// Diagnostic override, now OFF by default (it served the black-avatar
+// triage: real fetch proven working with R32F, 2026-10-24). KL_GLFB_SSBO_CONST=1
+// re-enables the zero-detecting fetch.
+static int kl_glfb_ssbo_const(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_GLFB_SSBO_CONST", 0);
     return on;
 }
 static void klfb_tbm_want(uint32_t buf);            // the kept bytes, below
 static void klfb_ssbo_forget(uint32_t prog);        // the program table, below
+static void klfb_ssboT_forget(uint32_t prog);       // single-sampler path, below
 static klfb_cs_obj *klfb_cs_find(klfb_cs_obj *tab, uint32_t name) {
     if (!name) return NULL;
     for (int i = 0; i < KLFB_CS_MAX; i++) if (tab[i].name == name) return &tab[i];
@@ -3228,6 +3436,9 @@ static void klfb_BindBufferBase(uint32_t target, uint32_t index, uint32_t buffer
         g_cs_generic = buffer;
         if (kl_glfb_ssbo_tex()) klfb_tbm_want(buffer);
         if (index < KLFB_CS_BINDINGS) { g_cs_ssbo[index].buf = buffer; g_cs_ssbo[index].off = 0; g_cs_ssbo[index].size = -1; }
+        static int said;
+        if (said < 8) { said++;
+            fprintf(stderr, "  [glfb] ssbo bind: Base(binding=%u, buffer=%u)\n", index, buffer); }
         return;
     }
     if (g_real_BindBufferBase) g_real_BindBufferBase(target, index, buffer);
@@ -3237,9 +3448,47 @@ static void klfb_BindBufferRange(uint32_t target, uint32_t index, uint32_t buffe
         g_cs_generic = buffer;
         if (kl_glfb_ssbo_tex()) klfb_tbm_want(buffer);
         if (index < KLFB_CS_BINDINGS) { g_cs_ssbo[index].buf = buffer; g_cs_ssbo[index].off = off; g_cs_ssbo[index].size = size; }
+        static int said;
+        if (said < 8) { said++;
+            fprintf(stderr, "  [glfb] ssbo bind: Range(binding=%u, buffer=%u, off=%ld, size=%ld)\n",
+                    index, buffer, (long)off, (long)size); }
         return;
     }
     if (g_real_BindBufferRange) g_real_BindBufferRange(target, index, buffer, off, size);
+}
+// ES 3.1 multi-bind (plural Base/Range): ANGLE's ES 3.0 context has neither
+// name, so the guest resolves NULL and skips the binds — for Bigscreen that
+// is the whole avatar table setup (black bodies; only singular unbinds were
+// ever seen). Fan out to the singular wrappers, which record SSBO bindings
+// and forward everything else to the real entry points.
+// KL_GLFB_MULTIBIND=1/0 overrides; on by default for Bigscreen Beta only.
+static int klfb_multibind_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_GLFB_MULTIBIND", t && strcmp(t, "x2497738113633933") == 0);
+    }
+    return on;
+}
+static void klfb_BindBuffersBase(uint32_t target, uint32_t first, int32_t count, const uint32_t *buffers) {
+    static int said;
+    if (said < 4) { said++;
+        fprintf(stderr, "  [glfb] ssbo bind: plural Base(first=%u, count=%d)\n", first, count); }
+    if (count < 0) return;
+    for (int32_t k = 0; k < count; k++)
+        klfb_BindBufferBase(target, first + (uint32_t)k, buffers ? buffers[k] : 0);
+}
+static void klfb_BindBuffersRange(uint32_t target, uint32_t first, int32_t count, const uint32_t *buffers,
+                                  const intptr_t *offsets, const intptr_t *sizes) {
+    static int said;
+    if (said < 4) { said++;
+        fprintf(stderr, "  [glfb] ssbo bind: plural Range(first=%u, count=%d)\n", first, count); }
+    if (count < 0) return;
+    for (int32_t k = 0; k < count; k++) {
+        intptr_t off = offsets ? offsets[k] : 0, size = sizes ? sizes[k] : -1;
+        klfb_BindBufferRange(target, first + (uint32_t)k, buffers ? buffers[k] : 0, off, size);
+    }
 }
 #define KLFB_GL_COPY_WRITE 0x8F37
 // Bind `buffer` to GL_COPY_WRITE_BUFFER and return what was there.
@@ -4108,7 +4357,7 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
             // `binding =` the storage rewrite names its texture after.
             if (kl_glfb_ssbo_tex()) {
                 if (!klfb_cs_find(g_cs_shaders, shader)) klfb_sb_refl_note(shader, buf);
-                int nsb = klfb_rewrite_ro_ssbo(buf, cap);
+                int nsb = klfb_rewrite_ro_ssbo(buf, cap, shader);
                 int nbf = klfb_rewrite_bfe(buf, cap);
                 if (nsb > 0 || nbf > 0) {
                     off = strlen(buf);
@@ -4371,6 +4620,8 @@ static void klfb_ProgramBinary(uint32_t program, uint32_t format,
     }
     if (!g_real_ProgramBinary) return;
     klfb_ssbo_forget(program);
+    klfb_ssboT_forget(program);
+    klfb_sbr_forget(program);
     g_real_ProgramBinary(program, format, binary, length);
     klfb_vfx_mark_names(program);          // KL_GLFB_SKIP_VFX: cached programs have no source
 
@@ -4629,6 +4880,8 @@ static void klfb_LinkProgram(uint32_t program) {
     if (!g_real_LinkProgram) return;
     klfb_zflip_forget(program);
     klfb_ssbo_forget(program);
+    klfb_ssboT_forget(program);
+    klfb_sbr_forget(program);
     pthread_mutex_lock(&g_compile_lock);
     uint64_t slow_t0 = klfb_slow_ms() ? klfb_slow_now() : 0;
     // KL_DOCTOR_LINK_LOG=1 (Doctor Who only, default 0): each link's stages,
@@ -4656,6 +4909,7 @@ static void klfb_LinkProgram(uint32_t program) {
     }
     klfb_pins_bind(program);
     g_real_LinkProgram(program);
+    klfb_sbr_link(program);
     klfb_cs_linked(program);
     klfb_vfx_mark(program);
     if (slow_t0) {
@@ -5722,6 +5976,8 @@ static void (*g_real_DeleteProgram)(uint32_t);
 static void klfb_DeleteProgram(uint32_t p) {
     klfb_census_killed(KLC_PROG, 1);
     klfb_ssbo_forget(p);
+    klfb_ssboT_forget(p);
+    klfb_sbr_forget(p);
     klfb_cs_forget(g_cs_progs, p);
     if (g_real_DeleteProgram) g_real_DeleteProgram(p);
 }
@@ -6204,11 +6460,16 @@ static void *klfb_MapBufferRange(uint32_t target, intptr_t offset, intptr_t leng
     }
     // A REAL map of a buffer whose bytes are being kept (klfb_tbm): remember
     // where the guest is writing, so the unmap can take the bytes with it.
+    // Small write-only maps are wanted up front: a static table filled once
+    // through a map that precedes its first tracked bind would otherwise
+    // leave no kept copy (Bigscreen avatar tables, 2026-10-24).
     if (p && length > 0 && (access & 0x0002 /* MAP_WRITE */) && g_tbm_n) {
         int kept = 0;
         for (int i = 0; i < KLFB_MAX_EMAPS && !kept; i++)
             kept = g_emaps[i].active && g_emaps[i].shadow == p;   // it IS a shadow
         uint32_t bound = klfb_bound_buffer(target);
+        if (!kept && bound && length <= 64 * 1024 && !(access & 0x0001 /* MAP_READ */))
+            klfb_tbm_want(bound);
         pthread_mutex_lock(&g_tbm_mu);
         int want = !kept && bound && klfb_tbm_ix(bound) >= 0;
         pthread_mutex_unlock(&g_tbm_mu);
@@ -6317,7 +6578,17 @@ static void klfb_BufferData(uint32_t target, intptr_t size, const void *data,
     if (g_real_BufferData_t) g_real_BufferData_t(target, size, data, usage);
     if (glfb_errscan()) klfb_buffer_refused("glBufferData", target, size, usage);
     { int ks = klfb_tb_tgtslot(target);
-      if (ks >= 0 && size >= 0) klfb_tbm_respecify(g_tb_bound_buf[ks], (size_t)size, data); }
+      if (ks >= 0 && size >= 0) {
+          // SSBO initial uploads happen here, potentially BEFORE the first
+          // indexed bind that would mark the buffer wanted. Small buffers are
+          // wanted regardless of target: a static table created with data on
+          // any target and bound only later would otherwise leave no kept
+          // copy (Bigscreen avatar tables, 2026-10-24). Bounded: 64 KiB with
+          // data, and deleted buffers drop their copy.
+          if (target == KLFB_GL_SSBO || (data && size > 0 && size <= 64 * 1024))
+              klfb_tbm_want(g_tb_bound_buf[ks]);
+          klfb_tbm_respecify(g_tb_bound_buf[ks], (size_t)size, data);
+      } }
     if (klfb_trace_buf())
         fprintf(stderr, "  [glfb] glBufferData(0x%x, size=%ld, %s, usage=0x%x)\n",
                 target, (long)size, data ? "data" : "NULL", usage);
@@ -9615,6 +9886,227 @@ static int klfb_mirror_resolve(int need_layer) {
     return 1;
 }
 
+// DIAG + fix (Bigscreen film, 2026-10-24): overlay sources that are video or
+// otherwise not FBO-readable (YCbCr/external textures such as the film's 294)
+// make glBlitFramebuffer raise 0x506, so the layer stays black (film) or shows
+// its uninitialised storage (a purple square during loading). Fall back to
+// sampling the source with a dedicated passthrough program. Only runs when the
+// blit already failed, so working layers never take it. Returns the GL error
+// of the draw, or 0.
+static uint32_t klfb_mirror_draw(uint32_t src_tex, uint32_t dst_tex, int w, int h,
+                                 int opaque, int layer) {
+    static uint32_t prog, vao, vbo, fb;
+    static int32_t loc_tex, loc_opaque, loc_pos, loc_uv;
+    static int tried, ok_program;
+    static uint32_t (*r_CreateShader)(uint32_t);
+    static void (*r_ShaderSource)(uint32_t, int32_t, const char *const *,
+                                 const int32_t *);
+    static void (*r_CompileShader)(uint32_t);
+    static void (*r_GetShaderiv)(uint32_t, uint32_t, int32_t *);
+    static uint32_t (*r_CreateProgram)(void);
+    static void (*r_AttachShader)(uint32_t, uint32_t);
+    static void (*r_LinkProgram)(uint32_t);
+    static void (*r_GetProgramiv)(uint32_t, uint32_t, int32_t *);
+    static void (*r_UseProgram)(uint32_t);
+    static int32_t (*r_GetUniformLocation)(uint32_t, const char *);
+    static int32_t (*r_GetAttribLocation)(uint32_t, const char *);
+    static void (*r_Uniform1i)(int32_t, int32_t);
+    static void (*r_Uniform1f)(int32_t, float);
+    static void (*r_GenVertexArrays)(int32_t, uint32_t *);
+    static void (*r_BindVertexArray)(uint32_t);
+    static void (*r_GenBuffers)(int32_t, uint32_t *);
+    static void (*r_BindBuffer)(uint32_t, uint32_t);
+    static void (*r_BufferData)(uint32_t, long, const void *, uint32_t);
+    static void (*r_VertexAttribPointer)(uint32_t, int32_t, uint32_t, uint8_t,
+                                        int32_t, const void *);
+    static void (*r_EnableVertexAttribArray)(uint32_t);
+    static void (*r_DrawArrays)(uint32_t, int32_t, int32_t);
+    static void (*r_ActiveTexture)(uint32_t);
+    static void (*r_BindTexture)(uint32_t, uint32_t);
+    static void (*r_TexParameteri)(uint32_t, uint32_t, int32_t);
+    static void (*r_GetTexParameteriv)(uint32_t, uint32_t, int32_t *);
+    static void (*r_Viewport)(int32_t, int32_t, int32_t, int32_t);
+    if (!tried) {
+        tried = 1;
+        r_CreateShader        = asym("glCreateShader");
+        r_ShaderSource        = asym("glShaderSource");
+        r_CompileShader       = asym("glCompileShader");
+        r_GetShaderiv         = asym("glGetShaderiv");
+        r_CreateProgram       = asym("glCreateProgram");
+        r_AttachShader        = asym("glAttachShader");
+        r_LinkProgram         = asym("glLinkProgram");
+        r_GetProgramiv        = asym("glGetProgramiv");
+        r_UseProgram          = asym("glUseProgram");
+        r_GetUniformLocation  = asym("glGetUniformLocation");
+        r_GetAttribLocation   = asym("glGetAttribLocation");
+        r_Uniform1i           = asym("glUniform1i");
+        r_Uniform1f           = asym("glUniform1f");
+        r_GenVertexArrays     = asym("glGenVertexArrays");
+        r_BindVertexArray     = asym("glBindVertexArray");
+        r_GenBuffers          = asym("glGenBuffers");
+        r_BindBuffer          = asym("glBindBuffer");
+        r_BufferData          = asym("glBufferData");
+        r_VertexAttribPointer = asym("glVertexAttribPointer");
+        r_EnableVertexAttribArray = asym("glEnableVertexAttribArray");
+        r_DrawArrays          = asym("glDrawArrays");
+        r_ActiveTexture       = asym("glActiveTexture");
+        r_BindTexture         = asym("glBindTexture");
+        r_TexParameteri       = asym("glTexParameteri");
+        r_GetTexParameteriv   = asym("glGetTexParameteriv");
+        r_Viewport            = asym("glViewport");
+        if (r_CreateShader && r_CreateProgram && r_UseProgram && r_DrawArrays &&
+            r_GenVertexArrays && r_GenBuffers && r_VertexAttribPointer &&
+            r_BindVertexArray && r_BindBuffer && r_BufferData) {
+            const char *vs =
+                "#version 300 es\n"
+                "in vec2 aPos; in vec2 aUV; out vec2 vUV;\n"
+                "void main(){ vUV = aUV; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+            const char *fs =
+                "#version 300 es\n"
+                "precision highp float;\n"
+                "in vec2 vUV; uniform sampler2D uTex; uniform float uOpaque;\n"
+                "out vec4 o;\n"
+                "void main(){\n"
+                "  vec4 c = texture(uTex, vUV);\n"
+                "  o = vec4(c.rgb, mix(c.a, 1.0, uOpaque));\n"
+                "}\n";
+            uint32_t v = r_CreateShader(0x8B31 /* VERTEX_SHADER */);
+            uint32_t f = r_CreateShader(0x8B30 /* FRAGMENT_SHADER */);
+            int32_t okv = 0, okf = 0, okl = 0;
+            r_ShaderSource(v, 1, &vs, NULL); r_CompileShader(v);
+            r_ShaderSource(f, 1, &fs, NULL); r_CompileShader(f);
+            if (r_GetShaderiv) { r_GetShaderiv(v, 0x8B81, &okv);
+                                 r_GetShaderiv(f, 0x8B81, &okf); }
+            else okv = okf = 1;
+            prog = r_CreateProgram();
+            r_AttachShader(prog, v); r_AttachShader(prog, f);
+            r_LinkProgram(prog);
+            if (r_GetProgramiv) r_GetProgramiv(prog, 0x8B82 /* LINK_STATUS */, &okl);
+            else okl = 1;
+            if (okv && okf && okl && prog) {
+                loc_tex    = r_GetUniformLocation(prog, "uTex");
+                loc_opaque = r_GetUniformLocation(prog, "uOpaque");
+                loc_pos    = r_GetAttribLocation(prog, "aPos");
+                loc_uv     = r_GetAttribLocation(prog, "aUV");
+                r_GenVertexArrays(1, &vao);
+                r_GenBuffers(1, &vbo);
+                r_GenFramebuffers(1, &fb);
+                if (loc_pos >= 0 && loc_uv >= 0 && vao && vbo && fb)
+                    ok_program = 1;
+            }
+            if (!ok_program)
+                fprintf(stderr, "  [glfb] mirror draw: shader unavailable "
+                                "(vs=%d fs=%d link=%d) — layer stays black\n",
+                        okv, okf, okl);
+        }
+    }
+    if (!ok_program) return 0x506;
+
+    int32_t s_prog = 0, s_vao = 0, s_vbo = 0, s_at = 0, s_tex2d = 0, s_vp[4];
+    int32_t s_draw_fb = 0;
+    a_glGetIntegerv(0x8B8D /* CURRENT_PROGRAM */, &s_prog);
+    a_glGetIntegerv(0x85B5 /* VERTEX_ARRAY_BINDING */, &s_vao);
+    a_glGetIntegerv(0x8894 /* ARRAY_BUFFER_BINDING */, &s_vbo);
+    a_glGetIntegerv(0x84E0 /* ACTIVE_TEXTURE */, &s_at);
+    r_ActiveTexture(0x84C0 /* TEXTURE0 */);
+    a_glGetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &s_tex2d);
+    a_glGetIntegerv(0x0BA2 /* VIEWPORT */, s_vp);
+    a_glGetIntegerv(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &s_draw_fb);
+    int blend_was = r_IsEnabled ? (int)r_IsEnabled(0x0BE2 /* BLEND */) : 0;
+    int depth_was = r_IsEnabled ? (int)r_IsEnabled(0x0B71 /* DEPTH_TEST */) : 0;
+    int cull_was  = r_IsEnabled ? (int)r_IsEnabled(0x0B44 /* CULL_FACE */) : 0;
+    int sciss_was = r_IsEnabled ? (int)r_IsEnabled(0x0C11 /* SCISSOR_TEST */) : 0;
+    if (blend_was && r_Disable) r_Disable(0x0BE2);
+    if (depth_was && r_Disable) r_Disable(0x0B71);
+    if (cull_was  && r_Disable) r_Disable(0x0B44);
+    if (sciss_was && r_Disable) r_Disable(0x0C11);
+
+    r_BindFramebuffer(0x8CA9 /* DRAW_FRAMEBUFFER */, fb);
+    r_FramebufferTexture2D(0x8CA9, 0x8CE0, 0x0DE1, dst_tex, 0);
+    if (r_CheckFramebufferStatus &&
+        r_CheckFramebufferStatus(0x8CA9) != 0x8CD5) {
+        r_BindFramebuffer(0x8CA9, (uint32_t)s_draw_fb);
+        if (s_at != 0x84C0) r_ActiveTexture((uint32_t)s_at);
+        return 0x506;
+    }
+
+    if (a_glGetError) while (a_glGetError()) {}
+    r_Viewport(0, 0, w, h);
+    static const float quad[16] = {
+        -1.0f, -1.0f, 0.0f, 0.0f,
+         1.0f, -1.0f, 1.0f, 0.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f,
+         1.0f,  1.0f, 1.0f, 1.0f,
+    };
+    r_BindVertexArray(vao);
+    r_BindBuffer(0x8892 /* ARRAY_BUFFER */, vbo);
+    r_BufferData(0x8892, (long)sizeof quad, quad, 0x88E0 /* DYNAMIC_DRAW */);
+    r_EnableVertexAttribArray((uint32_t)loc_pos);
+    r_VertexAttribPointer((uint32_t)loc_pos, 2, 0x1406 /* FLOAT */, 0,
+                          4 * (int)sizeof(float), (const void *)0);
+    r_EnableVertexAttribArray((uint32_t)loc_uv);
+    r_VertexAttribPointer((uint32_t)loc_uv, 2, 0x1406, 0,
+                          4 * (int)sizeof(float),
+                          (const void *)(2 * sizeof(float)));
+    r_UseProgram(prog);
+    r_ActiveTexture(0x84C0 /* TEXTURE0 */);
+    r_BindTexture(0x0DE1, src_tex);
+    uint32_t bind_err = a_glGetError ? a_glGetError() : 0;
+    int32_t s_min = 0x2601, s_mag = 0x2601;
+    if (r_GetTexParameteriv) {
+        r_GetTexParameteriv(0x0DE1, 0x2801 /* MIN_FILTER */, &s_min);
+        r_GetTexParameteriv(0x0DE1, 0x2800 /* MAG_FILTER */, &s_mag);
+    }
+    if (r_TexParameteri) {
+        r_TexParameteri(0x0DE1, 0x2801, 0x2601 /* LINEAR */);
+        r_TexParameteri(0x0DE1, 0x2800, 0x2601);
+    }
+    if (loc_tex >= 0) r_Uniform1i(loc_tex, 0);
+    if (loc_opaque >= 0) r_Uniform1f(loc_opaque, opaque ? 1.0f : 0.0f);
+    r_DrawArrays(0x0005 /* TRIANGLE_STRIP */, 0, 4);
+    uint32_t draw_err = a_glGetError ? a_glGetError() : 0;
+
+    if (r_TexParameteri) {
+        r_TexParameteri(0x0DE1, 0x2801, s_min);
+        r_TexParameteri(0x0DE1, 0x2800, s_mag);
+    }
+    r_FramebufferTexture2D(0x8CA9, 0x8CE0, 0x0DE1, 0, 0);
+    r_BindFramebuffer(0x8CA9, (uint32_t)s_draw_fb);
+    r_UseProgram((uint32_t)s_prog);
+    r_BindVertexArray((uint32_t)s_vao);
+    r_BindBuffer(0x8892, (uint32_t)s_vbo);
+    r_ActiveTexture(0x84C0);
+    r_BindTexture(0x0DE1, (uint32_t)s_tex2d);
+    if (s_at != 0x84C0) r_ActiveTexture((uint32_t)s_at);
+    r_Viewport(s_vp[0], s_vp[1], s_vp[2], s_vp[3]);
+    if (blend_was && r_Enable) r_Enable(0x0BE2);
+    if (depth_was && r_Enable) r_Enable(0x0B71);
+    if (cull_was  && r_Enable) r_Enable(0x0B44);
+    if (sciss_was && r_Enable) r_Enable(0x0C11);
+    // Bounded per layer: the first draws of each layer say bind and draw
+    // errors separately (a bound-but-black video texture draws 0x0), then
+    // only a change speaks again.
+    {
+        static uint8_t budget[128];
+        static uint32_t last[128];
+        static int init;
+        if (!init) {
+            init = 1;
+            for (unsigned i = 0; i < 128; i++) last[i] = 0xFFFFFFFFu;
+        }
+        unsigned li = (layer >= 0 && layer < 128) ? (unsigned)layer : 127u;
+        if (budget[li] < 3 || last[li] != (bind_err ^ (draw_err * 0x1f))) {
+            if (budget[li] < 3) budget[li]++;
+            last[li] = bind_err ^ (draw_err * 0x1f);
+            fprintf(stderr, "  [glfb] mirror draw layer=%d src=%u dst=%u: "
+                            "bind 0x%x draw 0x%x\n",
+                    layer, src_tex, dst_tex, bind_err, draw_err);
+        }
+    }
+    if (bind_err && !draw_err) return bind_err;
+    return draw_err;
+}
+
 // One texture (or one array slice of one) into another, same size, same format.
 // Returns the GL error, or 0.
 //
@@ -10189,6 +10681,14 @@ int kl_glfb_mirror_layer(int layer, int stage, uint32_t src_tex, int src_layer,
         if (!said++)
             fprintf(stderr, "  [glfb] mirror layer=%d stage=%d: glBlitFramebuffer -> "
                             "GL error 0x%x\n", layer, stage, e);
+        // DIAG + fix (Bigscreen film, 2026-10-24): video/external sources are
+        // not blit-readable. Sample-draw instead; the film's texture is opaque
+        // (YCbCr has no alpha), anything else keeps its own alpha.
+        if (src_layer < 0) {
+            uint32_t de = klfb_mirror_draw(src_tex, m->tex, w, h,
+                                           src_tex == g_video_tex, layer);
+            return de == 0;
+        }
         return 0;
     }
     return 1;
@@ -11202,6 +11702,9 @@ int kl_glfb_image_bind(void *image) {
 int kl_glfb_image_bind_texture(void *image, uint32_t texture) {
     void (*bind)(uint32_t, uint32_t) = asym("glBindTexture");
     if (!texture || !bind || !a_glGetIntegerv) return 0;
+    // Remember the SurfaceTexture's guest texture: the film's texture is
+    // opaque (YCbCr has no alpha), which the mirror-draw path needs to know.
+    if (texture != g_video_tex) g_video_tex = texture;
     int32_t previous = 0;
     a_glGetIntegerv(GL_TEXTURE_BINDING_2D_, &previous);
     bind(GL_TEXTURE_2D_IMG_, texture);
@@ -14048,6 +14551,13 @@ static void klfb_GetProgramInterfaceiv(uint32_t program, uint32_t iface,
         case KLFB_IF_UNIFORM:        src = KLFB_ACTIVE_UNIFORMS; break;
         case KLFB_IF_UNIFORM_BLOCK:  src = KLFB_ACTIVE_UNIFORM_BLOCKS; break;
         case KLFB_IF_PROGRAM_INPUT:  src = KLFB_ACTIVE_ATTRIBUTES; break;
+        case KLFB_IF_SHADER_STORAGE_BLOCK: {
+            // Answered from our own records: the linked program no longer
+            // declares the blocks (rewritten to texture reads).
+            struct klfb_sbr_tab *t = klfb_sbr_prog(program);
+            *params = t ? t->n : 0;
+            return;
+        }
         default:
             klfb_res_log_unhandled("glGetProgramInterfaceiv", iface, pname);
             return;
@@ -14057,6 +14567,16 @@ static void klfb_GetProgramInterfaceiv(uint32_t program, uint32_t iface,
         case KLFB_IF_UNIFORM:        src = KLFB_ACTIVE_UNIFORM_MAX_LENGTH; break;
         case KLFB_IF_UNIFORM_BLOCK:  src = KLFB_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH; break;
         case KLFB_IF_PROGRAM_INPUT:  src = KLFB_ACTIVE_ATTRIBUTE_MAX_LENGTH; break;
+        case KLFB_IF_SHADER_STORAGE_BLOCK: {
+            struct klfb_sbr_tab *t = klfb_sbr_prog(program);
+            int32_t best = 0;
+            if (t) for (unsigned k = 0; k < t->n; k++) {
+                int32_t l = (int32_t)strlen(t->name[k]) + 1;
+                if (l > best) best = l;
+            }
+            *params = best;
+            return;
+        }
         default:
             klfb_res_log_unhandled("glGetProgramInterfaceiv", iface, pname);
             return;
@@ -14219,6 +14739,31 @@ static void klfb_GetProgramResourceiv(uint32_t program, uint32_t iface,
                 v = 0; ok = 1;
                 break;
             }
+        } else if (iface == KLFB_IF_SHADER_STORAGE_BLOCK) {
+            // Answered from our own records (see klfb_sbr_note): the driver
+            // never saw these blocks.
+            struct klfb_sbr_tab *t = klfb_sbr_prog(program);
+            if (!t || index >= t->n) { v = 0; ok = 1; }
+            else switch (props[i]) {
+            case KLFB_P_NAME_LENGTH:  v = (int32_t)strlen(t->name[index]) + 1; ok = 1; break;
+            case KLFB_P_ARRAY_SIZE:   v = 1; ok = 1; break;
+            case KLFB_P_BUFFER_BINDING: v = t->binding[index]; ok = 1; break;
+            case KLFB_P_NUM_ACTIVE_VARIABLES: v = 0; ok = 1; break;
+            case KLFB_P_BUFFER_DATA_SIZE: {
+                int b = t->binding[index];
+                intptr_t sz = (b >= 0 && b < KLFB_CS_BINDINGS) ? g_cs_ssbo[b].size : -1;
+                v = sz > 0 ? (int32_t)(sz > 0x7fffffff ? 0x7fffffff : sz)
+                           : (int32_t)t->words[index] * 4;
+                ok = 1; break;
+            }
+            case KLFB_P_REFERENCED_BY_VERTEX:
+            case KLFB_P_REFERENCED_BY_FRAGMENT:
+                v = 1; ok = 1; break;   // referenced: keeps Unity from stripping
+            default:
+                klfb_res_log_unhandled("glGetProgramResourceiv", iface, props[i]);
+                v = 0; ok = 1;
+                break;
+            }
         } else {
             klfb_res_log_unhandled("glGetProgramResourceiv", iface, props[i]);
             ok = 1;
@@ -14261,6 +14806,12 @@ static void klfb_GetProgramResourceName(uint32_t program, uint32_t iface,
         if (r_GetActiveAttrib)
             r_GetActiveAttrib(program, index, bufSize, &len, &size, &type, name);
         if (length) *length = len;
+    } else if (iface == KLFB_IF_SHADER_STORAGE_BLOCK) {
+        struct klfb_sbr_tab *t = klfb_sbr_prog(program);
+        if (t && index < t->n) {
+            snprintf(name, (size_t)(bufSize > 0 ? bufSize : 0), "%s", t->name[index]);
+            if (length) *length = (int32_t)strlen(t->name[index]);
+        }
     } else {
         klfb_res_log_unhandled("glGetProgramResourceName", iface, 0);
     }
@@ -14283,6 +14834,17 @@ static uint32_t klfb_GetProgramResourceIndex(uint32_t program, uint32_t iface,
     if (iface == KLFB_IF_UNIFORM_BLOCK)
         return r_GetUniformBlockIndex ? r_GetUniformBlockIndex(program, name)
                                       : KLFB_INVALID_INDEX;
+    if (iface == KLFB_IF_SHADER_STORAGE_BLOCK) {
+        struct klfb_sbr_tab *t = klfb_sbr_prog(program);
+        int idx = -1;
+        if (t) for (unsigned k = 0; k < t->n; k++)
+            if (!strcmp(t->name[k], name)) { idx = (int)k; break; }
+        static int said;
+        if (said < 16) { said++;
+            fprintf(stderr, "  [glfb] ssbo reflect: ResourceIndex(%s) on program %u -> %d\n",
+                    name, program, idx); }
+        return idx < 0 ? KLFB_INVALID_INDEX : (uint32_t)idx;
+    }
     klfb_res_log_unhandled("glGetProgramResourceIndex", iface, 0);
     return KLFB_INVALID_INDEX;
 }
@@ -14976,8 +15538,328 @@ static uint32_t klfb_sb_tex_for(uint32_t buf, intptr_t off, intptr_t len) {
                 buf, (long)off, (long)len, tex); }
     return tex;
 }
+// ---- single-sampler SSBO path (Bigscreen; see kl_glfb_ssbo_single) -------
+//
+// One R32UI 256x256 texture holds every binding: binding B in rows B*32..,
+// word w of it at (w & 255, B*32 + (w >> 8)) — the layout the single-form
+// rewrite reads. Per draw, each bound store is re-uploaded into its
+// partition when its bytes changed (hash-guarded, like the old prog-48
+// path), and the program's one sampler is pointed at the reserved unit the
+// guest's own allocator never reaches (56, below the raised cap of 64).
+#define KLFB_SBT_PROGS 256
+static struct { uint32_t prog; int32_t sloc; uint64_t hash[KLFB_SB_MAXB]; size_t len[KLFB_SB_MAXB];
+    uint32_t draws; uint8_t up_any; }
+    g_sbt_prog[KLFB_SBT_PROGS];
+static uint32_t g_sbt_tex;
+// File-scope unit: klfb_Uniform1i redirects Unity's kl_ssboT writes here, so
+// the guest's own uniform upload succeeds instead of being refused.
+static int g_sbt_unit = -1;
+// Redirect Unity's write to the tables sampler to the unit we actually bound
+// (2026-10-24): Unity uploads unit 411 for kl_ssboT (its pinned location),
+// the driver refuses it (INVALID_VALUE pending), and Unity's own error check
+// then logs "Invalid texture unit!" once per material upload (~3000/session).
+// After the first draw resolved the sampler, writes to it go to our unit and
+// succeed — no pending error, no spam. Returns the unit or -1.
+static int klfb_ssboT_redirect(int32_t loc) {
+    if (!kl_glfb_ssbo_single() || g_sbt_unit < 0 || !g_cur_prog) return -1;
+    for (unsigned k = 0; k < KLFB_SBT_PROGS; k++) {
+        unsigned i = (g_cur_prog + k) & (KLFB_SBT_PROGS - 1);
+        if (!g_sbt_prog[i].prog) return -1;
+        if (g_sbt_prog[i].prog == g_cur_prog)
+            return (g_sbt_prog[i].sloc == loc) ? g_sbt_unit : -1;
+    }
+    return -1;
+}
+// A program that is (re)linked or deleted loses its entry outright: the next
+// draw re-resolves the sampler and re-uploads every partition. Stale hashes
+// on a recycled program name would skip an upload the new program needs —
+// the prog-49 class of bug was a cache that survived the link it described.
+static void klfb_ssboT_forget(uint32_t prog) {
+    if (!prog) return;
+    for (unsigned k = 0; k < KLFB_SBT_PROGS; k++) {
+        unsigned i = (prog + k) & (KLFB_SBT_PROGS - 1);
+        if (!g_sbt_prog[i].prog) return;
+        if (g_sbt_prog[i].prog == prog) {
+            memset(&g_sbt_prog[i], 0, sizeof g_sbt_prog[i]);
+            g_sbt_prog[i].sloc = -2;
+            return;
+        }
+    }
+}
+static uint64_t klfb_sbt_hash(const void *bytes, size_t len) {
+    uint64_t h = 1469598103934665603ULL;
+    const uint8_t *b = (const uint8_t *)bytes;
+    for (size_t i = 0; i < len; i++) { h ^= b[i]; h *= 1099511628211ULL; }
+    return h;
+}
+// Last resort for buffers the kept-bytes tracker never saw (filled before the
+// first tracked bind): read the live bytes out of GL and seed the tracker, so
+// normal freshness takes over from here. Tables are small; never dump a VBO
+// through here.
+static void *klfb_sbt_readback(uint32_t buf, intptr_t off, intptr_t size, size_t *out_len) {
+    *out_len = 0;
+    if (!buf || off < 0) return NULL;
+    static void (*getsub)(uint32_t, intptr_t, intptr_t, void *) = NULL;
+    static void (*getpar)(uint32_t, uint32_t, int32_t *) = NULL;
+    static int said_resolve;
+    if (!getsub) getsub = asym("glGetBufferSubData");
+    if (!getpar) getpar = asym("glGetBufferParameteriv");
+    if ((!getsub || !getpar || !g_real_BindBuffer) && said_resolve < 4) { said_resolve++;
+        fprintf(stderr, "  [glfb] ssboT readback: missing entry points (sub=%p par=%p bind=%p) — cannot seed buffer %u\n",
+                (void *)getsub, (void *)getpar, (void *)g_real_BindBuffer, buf);
+        return NULL; }
+    uint32_t was = klfb_cs_borrow(buf);
+    if (size < 0 && getpar) {
+        int32_t sz = 0;
+        getpar(KLFB_GL_COPY_WRITE, 0x8764 /* BUFFER_SIZE */, &sz);
+        if (sz > off) size = (intptr_t)sz - off; else size = 0;
+    }
+    void *r = NULL;
+    if (size > 0 && size <= 64 * 1024) {
+        r = malloc((size_t)size);
+        if (r) {
+            while (a_glGetError()) {}
+            getsub(KLFB_GL_COPY_WRITE, off, size, r);
+            uint32_t err = a_glGetError ? a_glGetError() : 0;
+            if (err) {
+                static int said_err;
+                if (said_err < 4) { said_err++;
+                    fprintf(stderr, "  [glfb] ssboT readback: GetBufferSubData(buf=%u,off=%ld,size=%ld) -> error 0x%x\n",
+                            buf, (long)off, (long)size, err); }
+                free(r); r = NULL;
+            }
+            else { *out_len = (size_t)size; klfb_tbm_write(buf, (size_t)off, (size_t)size, r); }
+        }
+    } else {
+        static int said_size;
+        if (said_size < 4) { said_size++;
+            fprintf(stderr, "  [glfb] ssboT readback: buffer %u has unusable size %ld — skipped\n",
+                    buf, (long)size); }
+    }
+    klfb_cs_giveback(was);
+    if (r) {
+        static int said;
+        if (said < 8) { said++;
+            fprintf(stderr, "  [glfb] ssboT: read back %zu bytes of buffer %u from GL (tracker had nothing)\n",
+                    *out_len, buf); }
+    }
+    return r;
+}
+// One-shot GL error probe for the ssboT path (Bigscreen black bodies,
+// 2026-10-24): texelFetch reads zero although uploads look right. Either the
+// texture calls fail (format!), the uniform write is refused (unit!), or the
+// sampler is dropped at draw (stage budget!). Drain glGetError after each
+// site, budget 12 lines so a per-draw failure does not flood the log.
+static void klfb_sbt_err_drain(void) {
+    if (a_glGetError) while (a_glGetError()) {}
+}
+static void klfb_sbt_err(const char *what, uint32_t prog) {
+    static int budget = 16;
+    if (budget <= 0 || !a_glGetError) return;
+    uint32_t e = a_glGetError();
+    while (e && budget > 0) {
+        budget--;
+        fprintf(stderr, "  [glfb] ssboT GL error 0x%x after %s (program %u)\n",
+                e, what, prog);
+        e = a_glGetError();
+    }
+}
+static void klfb_ssboT_apply(void) {
+    uint32_t prog = g_cur_prog;
+    if (!prog) return;
+    unsigned i = 0, k = 0;
+    for (; k < KLFB_SBT_PROGS; k++) {
+        i = (prog + k) & (KLFB_SBT_PROGS - 1);
+        if (!g_sbt_prog[i].prog || g_sbt_prog[i].prog == prog) break;
+    }
+    if (k == KLFB_SBT_PROGS) return;
+    if (!g_sbt_prog[i].prog) { g_sbt_prog[i].prog = prog; g_sbt_prog[i].sloc = -2; }
+    g_sbt_prog[i].draws++;
+    if (g_sbt_prog[i].draws <= 3) {
+        char vec[512]; size_t o = 0;
+        for (int b = 0; b < KLFB_SB_MAXB && o + 48 < sizeof vec; b++) {
+            uint32_t bb = g_cs_ssbo[b].buf;
+            if (!bb) continue;
+            size_t kept = 0;
+            pthread_mutex_lock(&g_tbm_mu);
+            int ix = klfb_tbm_ix(bb);
+            if (ix >= 0) kept = g_tbm[ix].size;
+            pthread_mutex_unlock(&g_tbm_mu);
+            o += (size_t)snprintf(vec + o, sizeof vec - o, " %d:buf%u,off%ld,sz%ld,kept%zu",
+                                  b, bb, (long)g_cs_ssbo[b].off, (long)g_cs_ssbo[b].size, kept);
+        }
+        vec[o] = 0;
+        fprintf(stderr, "  [glfb] ssboT: program %u draw %u binds:%s\n",
+                prog, g_sbt_prog[i].draws, o ? vec : " (none)");
+    }
+    // The unit is dynamic: prefer 56 (below the raised cap, where the guest
+    // binds nothing), but never above what this GL actually offers — a unit
+    // the driver does not have makes every bind a silent no-op. Bigscreen's
+    // avatar shader is the exception (2026-10-24): its 15 atlas samplers sit
+    // on units 0..14 and Metal allows 16 samplers per stage, so unit 56 is
+    // silently dropped by ANGLE (texelFetch reads zero, black bodies) and
+    // unit 15 — the one free slot inside the stage budget — is used instead.
+    if (g_sbt_unit < 0) {
+        int32_t v = 0;
+        if (a_glGetIntegerv) a_glGetIntegerv(0x8B4D /* MAX_COMBINED_TEXTURE_IMAGE_UNITS */, &v);
+        if (v < 17) {
+            static int said;
+            if (!said++) fprintf(stderr, "  [glfb] ssboT: only %d combined units — tables stay unbound\n", v);
+            return;
+        }
+        g_sbt_unit = v > KLFB_SBT_UNIT ? KLFB_SBT_UNIT : (int)(v - 1);
+        { extern const char *kl_driver_target_name(void);
+          const char *t = kl_driver_target_name();
+          if (t && strcmp(t, "x2497738113633933") == 0 && v > 15) g_sbt_unit = 15; }
+    }
+    static int32_t (*loc)(uint32_t, const char *);
+    if (!loc) loc = asym("glGetUniformLocation");
+    if (g_sbt_prog[i].sloc == -2) {
+        int32_t l = loc ? loc(prog, "kl_ssboT") : -1;
+        g_sbt_prog[i].sloc = l;
+        if (l < 0) {
+            int32_t linked = 0;
+            static void (*gp)(uint32_t, uint32_t, int32_t *);
+            if (!gp) gp = asym("glGetProgramiv");
+            if (gp) gp(prog, 0x8B82 /* LINK_STATUS */, &linked);
+            static int said;
+            if (said < 8) { said++;
+                fprintf(stderr, "  [glfb] ssboT: program %u has no kl_ssboT (link %d) — its tables read zero\n",
+                        prog, linked); }
+            return;
+        }
+        static int said2;
+        if (said2 < 4) { said2++;
+            fprintf(stderr, "  [glfb] ssboT: program %u reads its tables through one sampler (location %d, unit %d)\n",
+                    prog, l, g_sbt_unit); }
+    } else if (g_sbt_prog[i].sloc < 0) return;
+    static void (*active)(uint32_t), (*uni)(int32_t, int32_t);
+    static void (*gen)(int32_t, uint32_t *), (*par)(uint32_t, uint32_t, int32_t);
+    static void (*img)(uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, const void *);
+    static void (*sub)(uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, const void *);
+    if (!active) {
+        active = asym("glActiveTexture");
+        uni    = asym("glUniform1i");
+        gen    = asym("glGenTextures");
+        par    = asym("glTexParameteri");
+        img    = asym("glTexImage2D");
+        sub    = asym("glTexSubImage2D");
+        if (!g_real_BindTexture) g_real_BindTexture = asym("glBindTexture");
+    }
+    if (!active || !uni || !gen || !par || !img || !sub || !g_real_BindTexture) return;
+    if (!g_sbt_tex) {
+        klfb_sbt_err_drain();
+        gen(1, &g_sbt_tex);
+        active(0x84C0 /* TEXTURE0 */ + (uint32_t)g_sbt_unit);
+        g_real_BindTexture(0x0DE1 /* TEXTURE_2D */, g_sbt_tex);
+        par(0x0DE1, 0x2800 /* MAG */, 0x2600 /* NEAREST */);
+        par(0x0DE1, 0x2801 /* MIN */, 0x2600 /* NEAREST */);
+        par(0x0DE1, 0x2802 /* WRAP_S */, 0x812F /* CLAMP */);
+        par(0x0DE1, 0x2803 /* WRAP_T */, 0x812F /* CLAMP */);
+        img(0x0DE1, 0, 0x822E /* R32F */, KLFB_SBT_TEXW, KLFB_SBT_TEXH, 0,
+            0x1903 /* RED */, 0x1406 /* FLOAT */, NULL);
+        klfb_sbt_err("TexImage2D R32F", prog);
+        static int said;
+        if (!said++) fprintf(stderr, "  [glfb] ssboT: one %dx%d R32F texture for every binding (KL_GLFB_SSBO_SINGLE)\n",
+                             KLFB_SBT_TEXW, KLFB_SBT_TEXH);
+    }
+    for (int b = 0; b < KLFB_SB_MAXB; b++) {
+        uint32_t buf = g_cs_ssbo[b].buf;
+        size_t len = 0;
+        void *bytes = NULL;
+        if (buf) {
+            intptr_t off = g_cs_ssbo[b].off, size = g_cs_ssbo[b].size;
+            bytes = klfb_tbm_copy(buf, off < 0 ? 0 : (size_t)off, size < 0 ? 0 : (size_t)size, &len);
+            if (!bytes || !len)
+                bytes = klfb_sbt_readback(buf, off, size, &len);
+        }
+        if (!bytes || !len) {
+            // Nothing behind this binding: its partition must read zero, not
+            // whatever the previous program left there.
+            if (bytes) free(bytes);
+            if (g_sbt_prog[i].len[b]) {
+                g_sbt_prog[i].len[b] = 0; g_sbt_prog[i].hash[b] = 0;
+                void *zero = calloc(32 * KLFB_SBT_TEXW, 4);
+                if (zero) {
+                    klfb_sbt_err_drain();
+                    active(0x84C0 /* TEXTURE0 */ + (uint32_t)g_sbt_unit);
+                    g_real_BindTexture(0x0DE1 /* TEXTURE_2D */, g_sbt_tex);
+                    sub(0x0DE1, 0, 0, (int32_t)(b * 32), KLFB_SBT_TEXW, 32,
+                        0x1903 /* RED */, 0x1406 /* FLOAT */, zero);
+                    klfb_sbt_err("TexSubImage2D zero-fill", prog);
+                    free(zero);
+                }
+            }
+            continue;
+        }
+        size_t words = (len + 3) / 4;
+        uint32_t rows = (uint32_t)((words + KLFB_SBT_TEXW - 1) / KLFB_SBT_TEXW);
+        if (rows > 32) {
+            static int said;
+            if (!said++) fprintf(stderr, "  [glfb] ssboT: binding %d store %zu bytes exceeds its 32-row partition — clamped\n",
+                                 b, len);
+            rows = 32;
+        }
+        uint64_t hh = klfb_sbt_hash(bytes, len);
+        int upd = (g_sbt_prog[i].len[b] != len || g_sbt_prog[i].hash[b] != hh);
+        if (upd) {
+            g_sbt_prog[i].len[b] = len; g_sbt_prog[i].hash[b] = hh;
+            uint8_t *pad = NULL;
+            const void *src = bytes;
+            size_t need = (size_t)rows * KLFB_SBT_TEXW * 4;
+            if (need > len) {
+                pad = calloc(1, need);
+                if (pad) { memcpy(pad, bytes, len); src = pad; }
+            }
+            klfb_sbt_err_drain();
+            active(0x84C0 /* TEXTURE0 */ + (uint32_t)g_sbt_unit);
+            g_real_BindTexture(0x0DE1 /* TEXTURE_2D */, g_sbt_tex);
+            sub(0x0DE1, 0, 0, (int32_t)(b * 32), KLFB_SBT_TEXW, (int32_t)rows,
+                0x1903 /* RED */, 0x1406 /* FLOAT */, src);
+            klfb_sbt_err("TexSubImage2D upload", prog);
+            if (pad) free(pad);
+            g_sbt_prog[i].up_any = 1;
+            static int said_up;
+            if (said_up < 32) { said_up++;
+                uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+                if (len >= 16) { memcpy(&w0, bytes, 4); memcpy(&w1, (char *)bytes + 4, 4);
+                                 memcpy(&w2, (char *)bytes + 8, 4); memcpy(&w3, (char *)bytes + 12, 4); }
+                fprintf(stderr, "  [glfb] ssboT: program %u binding %d uploaded %zu bytes from buffer %u [%08x %08x %08x %08x]\n",
+                        prog, b, len, buf, w0, w1, w2, w3); }
+            static uint8_t dumped[KLFB_SB_MAXB];
+            if (!dumped[b] && len > 0 && len <= 2048) {
+                dumped[b] = 1;
+                fprintf(stderr, "  [glfb] ssboT: binding %d full contents (%zu bytes):", b, len);
+                for (size_t w = 0; w < len / 4; w++) {
+                    uint32_t v = 0;
+                    memcpy(&v, (const char *)bytes + w * 4, 4);
+                    if (w % 8 == 0) fprintf(stderr, "\n  [glfb] ssboT:  w%03zu:", w);
+                    fprintf(stderr, " %08x", v);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+        free(bytes);
+    }
+    if (g_sbt_prog[i].draws == 50 && !g_sbt_prog[i].up_any) {
+        char bound[128]; size_t o = 0;
+        for (int b = 0; b < KLFB_SB_MAXB && o + 16 < sizeof bound; b++)
+            if (g_cs_ssbo[b].buf) o += (size_t)snprintf(bound + o, sizeof bound - o, " %d:buf%u", b, g_cs_ssbo[b].buf);
+        bound[o] = 0;
+        fprintf(stderr, "  [glfb] ssboT: program %u drew 50 times, no table uploaded; bound:%s\n",
+                prog, o ? bound : " (none)");
+    }
+    klfb_sbt_err_drain();
+    active(0x84C0 /* TEXTURE0 */ + (uint32_t)g_sbt_unit);
+    g_real_BindTexture(0x0DE1 /* TEXTURE_2D */, g_sbt_tex);
+    uni(g_sbt_prog[i].sloc, (int32_t)g_sbt_unit);
+    klfb_sbt_err("BindTexture+Uniform1i", prog);
+    int u = g_tb_active_unit;
+    active(0x84C0 + (uint32_t)(u >= 0 ? u : 0));
+}
 static void klfb_ssbo_apply(void) {
     if (!kl_glfb_ssbo_tex()) return;
+    if (kl_glfb_ssbo_single()) { klfb_ssboT_apply(); return; }
     uint32_t prog = g_cur_prog;
     if (!prog) return;
     unsigned i = 0, k = 0;
@@ -15044,6 +15926,12 @@ static void klfb_BindBuffer(uint32_t target, uint32_t buffer) {
     if (g_real_BindBuffer) g_real_BindBuffer(target, buffer);
     int s = klfb_tb_tgtslot(target);
     if (s >= 0) g_tb_bound_buf[s] = buffer;
+    if (target == KLFB_GL_SSBO) {
+        static int said;
+        if (said < 8) { said++;
+            fprintf(stderr, "  [glfb] ssbo bind: generic SSBO binding now buffer %u (feeds no index — guest must also Base/Range)\n",
+                    buffer); }
+    }
 }
 // glBufferSubData writes into the bound buffer — if that buffer backs a texel-
 // buffer texture, its emulated 2D copy is now stale; re-upload the current bytes.
@@ -15260,6 +16148,8 @@ static void klfb_Uniform1i(int32_t loc, int32_t v) {
         }
         v &= 31;
     }
+    { int ru = klfb_ssboT_redirect(loc);
+      if (ru >= 0) v = ru; }
     if (g_real_Uniform1i) g_real_Uniform1i(loc, v);
     static int said;
     if (said < 30 && a_glGetError) {
@@ -15270,6 +16160,31 @@ static void klfb_Uniform1i(int32_t loc, int32_t v) {
             if (a_glGetIntegerv) a_glGetIntegerv(0x8B8D, &prog);
             fprintf(stderr, "  [glfb] ERRSRC glUniform1i(loc=%d, %d) -> 0x%x "
                             "(program=%d)\n", loc, v, e, prog);
+            // DIAG (Bigscreen black-avatar triage, 2026-10-22): name what the
+            // program actually holds at/around the failing location. Bounded:
+            // same `said` budget. Mirrors the Uniform1f table below.
+            if (prog > 0) {
+                static void (*r_gpi)(uint32_t, uint32_t, int32_t *);
+                static void (*r_gau)(uint32_t, uint32_t, int32_t, int32_t *,
+                                     int32_t *, uint32_t *, char *);
+                if (!r_gpi) {
+                    r_gpi = asym("glGetProgramiv");
+                    r_gau = asym("glGetActiveUniform");
+                }
+                if (r_gpi && r_gau && g_real_GetUniformLocation) {
+                    int32_t nu = 0;
+                    r_gpi((uint32_t)prog, 0x8B86 /* ACTIVE_UNIFORMS */, &nu);
+                    for (int32_t i = 0; i < nu && i < 64; i++) {
+                        char name[96]; int32_t len = 0, size = 0; uint32_t type = 0;
+                        name[0] = 0;
+                        r_gau((uint32_t)prog, (uint32_t)i, sizeof name, &len, &size, &type, name);
+                        int32_t at = g_real_GetUniformLocation((uint32_t)prog, name);
+                        fprintf(stderr, "  [glfb]   uniform %-28s type 0x%04x size %d at %d%s\n",
+                                name, type, size, at,
+                                (loc >= at && loc < at + (size > 0 ? size : 1)) ? "   <== the target" : "");
+                    }
+                }
+            }
         }
     }
 }
@@ -15606,17 +16521,31 @@ static int glfb_state_pname(uint32_t p) {
     case 0x0B74: case 0x0B45:   // DEPTH_FUNC, CULL_FACE_MODE
     case 0x0B71: case 0x0BE2:   // DEPTH_TEST, BLEND (as integers)
         return 1;
-    // The pixel-store alignments, which a guest reads to put back what it found
-    // after an upload of its own. Answered 0 (the fall-through below), SourceVR's
-    // engine restores an alignment of 0 — not a legal value, so the call is
-    // dropped and whatever the upload had set stays in force (asked 32,920 times
-    // in one Portal session). Answering from the real state looked like the
-    // obvious repair and is NOT the default: with it the game's aiming ring and
-    // some menu pages came out black on the device, and without it they had been
-    // right (2026-10-10; which of this and KL_GLFB_RGB8_RGBA it was is not yet
-    // separated). KL_GLFB_REAL_ALIGNMENT=1 answers from the real state.
-    case 0x0CF5: case 0x0D05:   // UNPACK_ALIGNMENT / PACK_ALIGNMENT
-        return kl_env_on("KL_GLFB_REAL_ALIGNMENT", 0);
+    // The pixel-store state itself. It is ambient and every upload and
+    // readback reads it, so a query answered 0 here is not a missing answer but
+    // a WRONG one. Bigscreen's thumbnail upload saved UNPACK_ALIGNMENT as 0 and
+    // put it back, which is GL_INVALID_VALUE — Unity printed "OPENGL NATIVE
+    // PLUG-IN ERROR: GL_INVALID_VALUE" right after each thumbnail — and because
+    // GL rejects the write the guest was left at the alignment we had set, not
+    // the one it had (2026-10-31). ANGLE owns this state (glPixelStorei is not
+    // shimmed), so the backend is the only thing that can answer it.
+    //
+    // Every other title keeps 852's default: answering 0 (the fall-through
+    // below), SourceVR's engine restores an alignment of 0 — not a legal value,
+    // so the call is dropped and whatever the upload had set stays in force
+    // (asked 32,920 times in one Portal session). Answering from the real state
+    // looked like the obvious repair and is NOT the default there: with it the
+    // game's aiming ring and some menu pages came out black on the device, and
+    // without it they had been right (2026-10-10; which of this and
+    // KL_GLFB_RGB8_RGBA it was is not yet separated).
+    // KL_GLFB_REAL_ALIGNMENT=1 answers from the real state everywhere.
+    case 0x0CF2: case 0x0CF3: case 0x0CF4: case 0x0CF5:   // UNPACK_ROW_LENGTH / SKIP_ROWS / SKIP_PIXELS / ALIGNMENT
+    case 0x0D02: case 0x0D03: case 0x0D04: case 0x0D05: { // PACK_ROW_LENGTH / SKIP_ROWS / SKIP_PIXELS / ALIGNMENT
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        if (t && strcmp(t, "x2497738113633933") == 0) return 1;
+        return (p == 0x0CF5 || p == 0x0D05) ? kl_env_on("KL_GLFB_REAL_ALIGNMENT", 0) : 0;
+    }
     }
     return 0;
 }
@@ -16355,6 +17284,14 @@ void *kl_glfb_sym(const char *name) {
         if (klfb_cimg_on() || g_real_CopyImageSubData)
             return glfb_wrap_traced(name, (void *)klfb_CopyImageSubData);
     }
+    // ES 3.1 multi-bind: ANGLE's 3.0 context has neither name, so without
+    // this the guest resolves NULL and skips the binds (see above).
+    // Bigscreen only: every other title has run with these names resolving
+    // NULL, and a guest that finds them takes a different bind path.
+    if (klfb_multibind_on() && strcmp(name, "glBindBuffersBase") == 0)
+        return glfb_wrap_traced(name, (void *)klfb_BindBuffersBase);
+    if (klfb_multibind_on() && strcmp(name, "glBindBuffersRange") == 0)
+        return glfb_wrap_traced(name, (void *)klfb_BindBuffersRange);
     void *fn = klfb_es32_alias(name);
     if (!fn) fn = asym(name);
     // Extension entry points (glTextureViewOES, …) aren't dlsym-exported by ANGLE; they resolve
@@ -16401,6 +17338,18 @@ static void chunk(FILE *f, const char *t, const uint8_t *d, uint32_t n) {
 unsigned kl_glfb_present(const char *dir) {
     klfb_stn_frame_end();
     if (!g_ready || (!dir && !g_frame_sink && !g_gpu_fence)) return g_presented;
+    // `~/…` is $HOME. On device the app's container UUID changes on every
+    // install, so `~/Documents/cap` is the only capture directory a run can
+    // name before the app has told anyone what it is. Expanded here because
+    // this is the one place every caller's directory arrives.
+    static char home_dir[1024];
+    if (dir && dir[0] == '~') {
+        const char *home = getenv("HOME");
+        if (home) {
+            snprintf(home_dir, sizeof home_dir, "%s%s", home, dir + 1);
+            dir = home_dir;
+        }
+    }
     // A registered GPU fence replaces the readback entirely — the compositor
     // samples the eye texture itself and only needs to know when the guest's
     // frame is done. Same thread rule as the capture below: the sync has to be

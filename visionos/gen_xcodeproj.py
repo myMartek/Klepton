@@ -637,6 +637,7 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonMetalFXPreset.swift", "KleptonMetalFXAlpha.swift",
          "KleptonEyeMax.swift", "KleptonOverlayDepth.swift", "KleptonHologram.swift",
          "KleptonPictureProfile.swift", "KleptonSettingsWindow.swift",
+         "KleptonVRRFloor.swift",
          "KleptonWalkaboutSave.swift",
          "KleptonRealityPresent.swift",
          "KleptonRoomStore.swift", "KleptonRoomSpace.swift", "KleptonBoundary.swift"]

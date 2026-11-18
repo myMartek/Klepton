@@ -135,6 +135,10 @@ int       kl_list_needed(const char *path, char names[][128], int max);
 // Search every registered guest image for an export (kl_dl.c); used by the
 // loader's import binding after the shim misses.
 void     *kl_guest_sym_global(const char *name);
+// Whether a dlopen handle is the synthetic core-system-library handle
+// (libc.so, libm.so, ... in kl_dl.c): it owns no JNI_OnLoad of its own, so
+// running one found through it would re-enter an unrelated library's init.
+int       kl_dl_is_core_shim(void *handle);
 // The image's program headers, as mapped. Every guest lib's first PT_LOAD maps
 // file offset 0 at vaddr 0, so the phdr array is live at base + e_phoff and the
 // load bias is simply the base. This is what dl_iterate_phdr hands the guest's
@@ -169,6 +173,15 @@ void kl_guest_extstorage_map(const char *dir);
 // bytes here on a Unity guest means its VirtualMemory layer's decommit is doing
 // nothing and the footprint is a high-water mark (see klb_madvise).
 void kl_madv_report(void);
+
+// Whether UnityPlayer.initJni has returned (guest/kl_driver.c). Memory
+// pressure arriving before that is dropped by kl_mem_pressure_fire: the
+// engine is half-constructed and the notification faults it.
+int kl_driver_initjni_done(void);
+// Host tests only: pretend initJni has returned, so pressure delivery is armed.
+// The real app sets the flag in boot_unity; a test that drives the JNI registry
+// without booting the guest would otherwise have every pressure event dropped.
+void kl_driver_test_mark_initjni_done(void);
 
 // Memory pressure. The guest is told the room ran out through
 // UnityPlayer.nativeLowMemory, which is where a title drops its caches; nothing

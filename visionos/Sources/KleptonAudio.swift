@@ -250,6 +250,10 @@ enum KleptonAudio {
         if on {
             AVAudioApplication.requestRecordPermission { granted in
                 NSLog("[au] microphone permission \(granted ? "granted" : "denied")")
+                // A denial has to reach the switch: visionOS never asks again, and
+                // a session left in .playAndRecord with a silent capture is worse
+                // than saying so. Back on the main actor, where the setting lives.
+                if !granted { DispatchQueue.main.async { KleptonMic.shared.disableAfterDenial() } }
             }
         }
     }

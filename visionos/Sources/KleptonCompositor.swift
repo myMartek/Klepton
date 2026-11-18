@@ -1621,7 +1621,10 @@ final class KleptonCompositor {
         // 6890x5526, Doom 3 at 5200 — were chosen for the fragment count of the
         // RAW curve, and a floor of 0.50 would hand those games nearly twice the
         // fragments. A game that wants it gets it with a smaller eye, per target.
-        let rateFloor: Float = min(1.0, max(0.0, klEnvFloat("KL_VRR_FLOOR", 0)))
+        // Bigscreen's eye is already small (3072) and its 37.6% foveation
+        // shimmers on room textures and film reflections, so it floors at
+        // 0.50 by default (klVRRFloorDefault); the environment still wins.
+        let rateFloor: Float = min(1.0, max(0.0, klEnvFloat("KL_VRR_FLOOR", klVRRFloorDefault(klTargetName()))))
         var eyeQualityX = displayEyeQualityX
         func bias(_ q: [Float]) -> Double {
             guard let m = q.min(), m > 0 else { return 0 }
@@ -4794,6 +4797,13 @@ final class KleptonCompositor {
                 }
                 continue
             }
+            // Menu-yields-film (Bigscreen): while a room-menu page IsShowing,
+            // the film quad stays down and the in-eye mesh carries the picture,
+            // so the menu draws over it. DRM guard lives in the predicate:
+            // dead in-eye mesh never hides.
+            if kl_probe_bigscreen() != 0 && kl_bigscreen_hide_film(ov.shape, ov.head_locked) != 0 {
+                continue
+            }
             // One uniform per amplified view, exactly as the eye pass does — the
             // array is indexed by [[amplification_id]] and a view with no
             // placement says so with `visible = 0` rather than by not drawing,
@@ -4841,7 +4851,7 @@ final class KleptonCompositor {
             if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
             // ...or, where asked for, the state that lets each quad land over
             // the ones before it whatever their distances.
-            if Self.overlaysInSubmitOrder, let overlayOrderState {
+            else if Self.overlaysInSubmitOrder, let overlayOrderState {
                 enc.setDepthStencilState(overlayOrderState)
             }
             enc.setRenderPipelineState(pipe)

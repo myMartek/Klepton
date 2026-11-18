@@ -1177,6 +1177,21 @@ static void *klj_NewString(void *env, const uint16_t *unicode, kl_jint len) {
 
 static kl_jint klj_UnregisterNatives(void *env, void *clazz) { (void)env; (void)clazz; return 0; }
 
+// A native the guest registered (its own library's in-process entry point).
+// Lets the host deliver events back through UnityPlayer.nativeUnitySendMessage
+// the way the inert Java layer would have.
+void *klj_find_guest_native(const char *cls, const char *name) {
+    if (!cls || !name) return NULL;
+    pthread_mutex_lock(&g_lock);
+    void *fn = NULL;
+    for (unsigned i = 0; i < g_nnatives; i++) {
+        if (strcmp(g_natives[i].cls, cls) == 0 &&
+            strcmp(g_natives[i].name, name) == 0) { fn = g_natives[i].fn; break; }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return fn;
+}
+
 static kl_jint klj_GetJavaVM(void *env, void **vm) { (void)env; *vm = kl_jni_vm(); return 0; }
 
 // Defined below with the rest of the binding matcher; klj_want needs it to
@@ -1570,6 +1585,7 @@ static const klj_binding *klj_find_binding(const char *cls, const char *name,
     if (!own) own = klj_vivox_binding(cls, name, sig);
     if (!own) own = klj_vertigo_binding(cls, name, sig);
     if (!own) own = klj_ghosttown_binding(cls, name, sig);
+    if (!own) own = klj_bigscreen_binding(cls, name, sig);
     if (own) return own;
     // Exact wins outright across EVERY family table, so the answer does not
     // depend on which file a class landed in; a loose match is only ever the
@@ -2628,6 +2644,15 @@ static const klj_field g_fields[] = {
     KLJ_FSTR("android/content/Intent", "ACTION_VIEW", "android.intent.action.VIEW"),
 
     KLJ_FSTR("android/os/Environment", "MEDIA_MOUNTED", "mounted"),
+    // The DIRECTORY_* kinds getExternalStoragePublicDirectory takes. Bigscreen
+    // names its local-film folder this way ("Movies"); without the constant
+    // the guest reads null and the call below still answers /sdcard, but the
+    // log then cannot tell the two spellings apart.
+    KLJ_FSTR("android/os/Environment", "DIRECTORY_MOVIES", "Movies"),
+    KLJ_FSTR("android/os/Environment", "DIRECTORY_DCIM", "DCIM"),
+    KLJ_FSTR("android/os/Environment", "DIRECTORY_PICTURES", "Pictures"),
+    KLJ_FSTR("android/os/Environment", "DIRECTORY_MUSIC", "Music"),
+    KLJ_FSTR("android/os/Environment", "DIRECTORY_DOWNLOADS", "Download"),
     KLJ_FFN("android/net/Uri", "EMPTY", "Landroid/net/Uri;", klj_Uri_EMPTY),
     KLJ_FINT("android/content/res/Configuration", "colorMode", 0),
     KLJ_FINT("android/content/res/Configuration", "densityDpi",   320),

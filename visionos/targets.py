@@ -199,6 +199,24 @@ TARGETS = {
         # .upperLimbVisibility(.hidden).
         "hand_matting": False,
     },
+    "x2497738113633933": {
+        # Bigscreen Beta 0.950.2 (com.bigscreenvr.bigscreen, versionCode 4688857).
+        # Unity 2020.3.33f1 + IL2CPP through the stock UnityPlayerActivity.
+        # Keep an explicit AVP Play target so this game uses the normal launcher
+        # and stable bundle/product identity instead of the generic Klepton route.
+        "libs":    None,
+        "srcdir":  "x2497738113633933/lib/arm64-v8a",
+        "tree":    "x2497738113633933",
+        "apk":     "x2497738113633933.apk",
+        "assets":  "x2497738113633933/assets",
+        "qtplugins": "",
+        "obb":     "obb",
+        "entry":   "libmain",
+        "kind":    "unity",
+        "product": "KleptonX2497738113633933",
+        "display": "Bigscreen Beta",
+        "hand_matting": False,
+    },
     "x2582932495064035": {
         # Real VR Fishing 3.06102 (com.Miragesoft.RealVrFishingQ).  Keep an
         # explicit AVP Play target so this game uses the normal launcher and

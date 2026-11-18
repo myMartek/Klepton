@@ -2444,6 +2444,16 @@ static int klplat_user_listed(const char *t) {
                                 // The offline user supplies only player identity;
                                 // ownership and purchases remain separate.
                                 "x7532973430077887",
+                                // Bigscreen Beta 0.950.2: the entitlement
+                                // request completes, then GetLoggedInUser comes
+                                // back 0 with "An unknown error occurred.
+                                // Request failed." and its social menu stays
+                                // behind a spinner that never stops (on device,
+                                // 2026-10-16). As for Shave & Stuff, the offline
+                                // user supplies only "who is playing";
+                                // ownership and purchases remain the separate
+                                // answers they are.
+                                "x2497738113633933",
                                 // Cubism 1.8.0: entitlement succeeds, then
                                 // GetLoggedInUser returns 0 with "Request
                                 // failed." while the picture stays black
@@ -2597,7 +2607,8 @@ static uint64_t klplat_User_GetOrgScopedID(uint64_t user_id) {
     static int err = -1;
     if (err < 0) {
         const char *t = kl_driver_target_name();
-        err = t && strcmp(t, "x4360608937312293") == 0;
+        err = t && (strcmp(t, "x4360608937312293") == 0 ||
+                    strcmp(t, "x2497738113633933") == 0);
     }
     if (!err) return klplat_init_fails("ovr_User_GetOrgScopedID");
     plat_hit("ovr_User_GetOrgScopedID");
