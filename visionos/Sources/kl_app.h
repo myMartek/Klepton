@@ -112,6 +112,24 @@ void kl_app_guest_publish(void);
 // force that), and not the rate the app is being shown at, which the system
 // may halve.
 void kl_app_set_panel_hz(float hz);
+// The game's frame cadence while it runs: a frame every `div`-th refresh of the
+// panel (1 or 2; 0 = back to what it started with, KL_GUEST_PACE_DIV). For the
+// app's menu in the headset. kl_app_pace_div says what is in force.
+void kl_app_set_pace_div(int div);
+int  kl_app_pace_div(void);
+int  kl_app_shown_at_half_rate(void);
+// Foveated rendering while the game runs, where its module allows it:
+// Half-Life: Alyx's (kl_mtl_foveate.m; the hooks are in place when the app set
+// KL_VK_FOVEATE_LIVE=1 before the start) takes the rate at the edge (0 or >= 1
+// = off), the tangent it starts falling at and the one it reaches the edge at
+// (0 = the cone's edge). The other Vulkan games' (kl_fove.m) take a new curve —
+// box, ramp, floor as KL_FOVE_BOX/RAMP/FLOOR; floor 1 is no foveation — and only
+// when it was on from the start (kl_fove_live() says so: its shaders are made
+// for it then). New maps from the next frame on.
+int  kl_mtl_foveate_live(void);
+void kl_mtl_foveate_set(float edge, float inner, float outer);
+int  kl_fove_live(void);
+void kl_fove_set_curve(float box, float ramp, float floor_rate);
 // The system's thermal state (ProcessInfo.ThermalState's raw value, 0 nominal
 // .. 3 critical), for the [perf] line.
 void kl_app_note_thermal(int state);
@@ -263,5 +281,14 @@ typedef struct {
     int    free_account;   // 1 = no Java Edition: name + OFFLINE uuid, no token —
                            // the boot stays offline under that name
 } kl_msa_session_t;
+
+// Half-Life: Alyx's console, for the app's cheat menu (runtime/linux/kl_lx_netcon.c,
+// which also says what it is): with KL_LX_NETCON=<port> the engine's net console
+// listens on a stand-in socket. One line out (0 = written; -1 while the game's
+// console does not listen yet), the state (0 not listening, 1 listening,
+// 2 connected), and each line the console prints back, on a thread of its own.
+int  kl_lx_netcon_send(const char *command);
+int  kl_lx_netcon_state(void);
+void kl_lx_netcon_set_output(void (*fn)(const char *line));
 
 #endif

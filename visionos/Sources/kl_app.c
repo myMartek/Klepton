@@ -5,6 +5,7 @@
 #include <math.h>
 #include <mach/mach.h>          // task_info(TASK_VM_INFO) — the heartbeat's footprint
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1566,8 +1567,38 @@ static struct {
     pthread_t       thread;
 } g_guest = { .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
 
+// KL_UNITY_QUIT_TEARDOWN_MS=<ms>: a quit teardown (kl_driver.c) that has not
+// come back after this long is taken as the end of the guest, as if its loop
+// had ended on the game's own quit, so the compositor leaves the app. The
+// teardown is running on the guest thread and cannot be interrupted; it is the
+// app that stops waiting for it. Until You Fall's nativeDone runs its
+// OnApplicationQuit (its save) and then hangs (2026-11-16): default 1000 for
+// x2567459230020142 (the owner's choice; its "Application Shutdown" line comes
+// within half a second of the teardown starting), else 0 (wait as before).
+static unsigned guest_quit_teardown_limit_ms(void) {
+    static int v = -1;
+    if (v < 0) {
+        if (!g_target || !g_target->name) return 0;
+        v = kl_env_int("KL_UNITY_QUIT_TEARDOWN_MS",
+                       strcmp(g_target->name, "x2567459230020142") == 0 ? 1000 : 0);
+        if (v < 0) v = 0;
+    }
+    return (unsigned)v;
+}
+
 int kl_app_guest_state(void) {
+    unsigned limit = guest_quit_teardown_limit_ms();
+    unsigned ms = limit ? kl_driver_quit_teardown_ms() : 0;
     pthread_mutex_lock(&g_guest.mu);
+    if (limit && ms >= limit && g_guest.state > 0) {
+        g_guest.state = -1;
+        g_guest.asked_quit = 1;
+        pthread_mutex_unlock(&g_guest.mu);
+        fprintf(stderr, "[guest] quit teardown has not returned after %u ms — "
+                        "leaving without it (KL_UNITY_QUIT_TEARDOWN_MS)\n", ms);
+        fflush(NULL);
+        return -1;
+    }
     int s = g_guest.state;
     pthread_mutex_unlock(&g_guest.mu);
     return s;
@@ -1669,7 +1700,15 @@ static int guest_quit_exits(void) {
                                                    || strcmp(t, "x2436558143118760") == 0
                                                    || strcmp(t, "x157074645514372") == 0
                                                    || strcmp(t, "x2285803881494677") == 0
-                                                   || strcmp(t, "x2933720383334150") == 0));
+                                                   || strcmp(t, "x2933720383334150") == 0
+                                                   // Ven VR Adventure: quitting froze the
+                                                   // last picture, the app stayed open
+                                                   // (owner on the headset, 2026-11-16).
+                                                   || strcmp(t, "x3327317663977182") == 0
+                                                   // Until You Fall: its main menu's
+                                                   // quit button did nothing (owner,
+                                                   // 2026-11-16); with KL_UNITY_QUIT_TEARDOWN.
+                                                   || strcmp(t, "x2567459230020142") == 0));
     }
     return v;
 }
@@ -1710,7 +1749,29 @@ static uint64_t guest_pose_gap_ns(void) {      // under g_guest.mu; 0 until ther
     return v[n / 2];
 }
 void kl_app_set_panel_hz(float hz) { (void)hz; }   // kept for the compositor's call; the rate is read from the poses
+// The app's menu in the headset sets it while the game runs (kl_app_set_pace_div); 0 = as started.
+static _Atomic int g_pace_div_live;
+void kl_app_set_pace_div(int div) {
+    if (div < 0) div = 0;
+    if (div > 4) div = 4;
+    g_pace_div_live = div;
+    fprintf(stderr, "[guest] paced to every %d. refresh of the panel from now on (the menu)\n", div ? div : 1);
+}
+static int guest_pace_div_start(void);
 static int guest_pace_div(void) {
+    int live = g_pace_div_live;
+    return live ? live : guest_pace_div_start();
+}
+int kl_app_pace_div(void) { return guest_pace_div(); }
+// Whether the system shows the game at half the panel's rate already (50 of 100): every second refresh then
+// changes nothing, since there is no faster rate to halve (guest_pace_wait's own test, a gap of 13 ms or more).
+int kl_app_shown_at_half_rate(void) {
+    pthread_mutex_lock(&g_guest.mu);
+    uint64_t gap = guest_pose_gap_ns();
+    pthread_mutex_unlock(&g_guest.mu);
+    return gap >= 13000000ull;
+}
+static int guest_pace_div_start(void) {
     static int v = -1;
     if (v < 0) {
         // Moss: every second refresh. At the display's own eye size it needs about 8 ms of GPU a frame,
@@ -1883,9 +1944,11 @@ static void *guest_thread(void *unused) {
     // read it, so the Test switch did nothing for any Unity game (Arkham Shadow
     // and LEGO Bricktales on the headset: no "[guest] paced" line, the full
     // rate shown).
-    int pace_div = guest_pace_div();
+    // Read again for every frame: the menu in the headset changes it while the game runs (kl_app_set_pace_div).
+    // Read once before this loop, as it was until 2026-11-18, the menu's switch did nothing in a Unity game.
     uint64_t last_turn_ns = 0;
     for (;;) {
+        int pace_div = guest_pace_div();
         pthread_mutex_lock(&g_guest.mu);
         for (;;) {
             while (!g_guest.stop && g_guest.published == g_guest.consumed)
@@ -1931,6 +1994,22 @@ static void *guest_thread(void *unused) {
             printf("[guest] nativeRender is gone — the frame loop ends here\n");
             fflush(NULL);
             break;
+        }
+        // A quit handed to the headset rather than to Unity: OVRManager's
+        // PlatformUIConfirmQuit (KL_OVRP_CONFIRM_QUIT, kl_ovrp.c). On a Quest
+        // the system ends the app; here the loop ends and the app leaves, as
+        // for an Application.Quit() below.
+        {
+            extern int kl_ovrp_quit_requested(void);
+            if (kl_ovrp_quit_requested()) {
+                printf("[guest] the game asked the headset to quit it (ovrp ConfirmQuit) — "
+                       "the frame loop ends here\n");
+                fflush(NULL);
+                pthread_mutex_lock(&g_guest.mu);
+                g_guest.asked_quit = 1;
+                pthread_mutex_unlock(&g_guest.mu);
+                break;
+            }
         }
         if (rendered == 0 && guest_quit_exits()) {
             printf("[guest] nativeRender returned false: the game asked to quit — "

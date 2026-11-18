@@ -1,10 +1,12 @@
 // See kl_driver.h.
 #include <errno.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "klepton.h"
@@ -593,6 +595,16 @@ void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) 
         // cuffs were drawn (2026-10-17).
         kl_egl_set_gles_version(3, 0);
         fprintf(stderr, "  [gl] Catan VR: GLES 3.0 capability profile (ANGLE backend)\n");
+    }
+    if (t && !strcmp(t->name, "x2567459230020142")) {
+        // Until You Fall (Unity 2019.3.15f1): the same story despite
+        // disable-gpu-skinning=1 in its boot.config. Told 3.2, it still made
+        // compute shaders, glCreateShader(COMPUTE) was refused (shader 0, "GLSL
+        // compilation failed, no infolog provided" x39 a session), and on the
+        // headset there were no hands, no menu pointer, and objects out of
+        // place (2026-11-16).
+        kl_egl_set_gles_version(3, 0);
+        fprintf(stderr, "  [gl] Until You Fall: GLES 3.0 capability profile (ANGLE backend)\n");
     }
     if (t && !strcmp(t->name, "x3919415921458774")) {
         // Gods of Gravity (Unity 2021.3.45f2): told 3.2, its wand models came
@@ -1276,7 +1288,11 @@ static int unity_quit_teardown(void) {
         v = kl_env_on("KL_UNITY_QUIT_TEARDOWN", t &&
                       (strcmp(t, "x2285803881494677") == 0 ||
                        strcmp(t, "x157074645514372") == 0 ||
-                       strcmp(t, "x2933720383334150") == 0));
+                       strcmp(t, "x2933720383334150") == 0 ||
+                       // Ven VR Adventure: pause and teardown, as Gloomy Eyes.
+                       strcmp(t, "x3327317663977182") == 0 ||
+                       // Until You Fall: pause and teardown, as Gloomy Eyes.
+                       strcmp(t, "x2567459230020142") == 0));
     }
     return v;
 }
@@ -1290,12 +1306,75 @@ static void unity_lifecycle_call(const char *name) {
     fprintf(stderr, "[guest] quit: %s returned\n", name);
 }
 
+// KL_UNITY_QUIT_LIMIT_MS=<ms>: how long nativeDone gets before the app leaves
+// anyway. 0 = wait for as long as it takes (the default, every other title).
+//
+// Ven VR Adventure (x3327317663977182, Unity 2019.4): its in-game quit answers
+// false, nativePause returns and the game's own OnApplicationQuit / OnDestroy
+// run inside nativeDone — and then nativeDone never comes back. It posts two
+// messages to the main looper on its way down, and the only thread that
+// drains that looper is the one inside nativeDone. The last picture stood until
+// the app was closed by hand (owner on the headset, 2026-11-16). Its
+// OnApplicationQuit and OnDestroy were done 0.7 s into nativeDone; 1.2 s is
+// what its owner asked for (3 s and 1.5 s were too long). Android ends a
+// finished activity's process regardless, so after the limit this does the
+// same: what the guest threads were doing goes into the log
+// (KL_TRACE_CONDDUMP=1), then exit(0) — the way backgrounding leaves.
+static unsigned unity_quit_limit_ms(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *t = kl_driver_target_name();
+        v = (int)kl_env_uint("KL_UNITY_QUIT_LIMIT_MS",
+                             t && strcmp(t, "x3327317663977182") == 0 ? 1200 : 0);
+    }
+    return (unsigned)v;
+}
+static volatile int g_quit_done_returned;
+static void *unity_quit_limit_thread(void *arg) {
+    unsigned ms = (unsigned)(uintptr_t)arg;
+    usleep((useconds_t)ms * 1000);
+    if (g_quit_done_returned) return NULL;
+    fprintf(stderr, "[guest] quit: nativeDone has not returned after %u ms — "
+                    "leaving the app (KL_UNITY_QUIT_LIMIT_MS)\n", ms);
+    extern void kl_pthread_exit_report(FILE *out);
+    kl_pthread_exit_report(stderr);
+    fflush(NULL);
+    exit(0);
+    return NULL;
+}
+
+// When the teardown began (CLOCK_MONOTONIC ns), 0 when none is running. Read
+// from the compositor's thread (kl_app.c), which leaves the app once a teardown
+// has not come back in time: Until You Fall's nativeDone runs the game's own
+// OnApplicationQuit ("Application Shutdown", its save) and then never returns
+// (2026-11-16), which left the last picture standing with the app open.
+static uint64_t g_teardown_ns;
+static uint64_t kldrv_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+unsigned kl_driver_quit_teardown_ms(void) {
+    uint64_t t0 = __atomic_load_n(&g_teardown_ns, __ATOMIC_RELAXED);
+    return t0 ? (unsigned)((kldrv_now_ns() - t0) / 1000000ull) : 0;
+}
+
 static void unity_quit_teardown_run(void) {
     fprintf(stderr, "[guest] nativeRender returned false: saving and tearing down "
                     "(KL_UNITY_QUIT_TEARDOWN)\n");
+    __atomic_store_n(&g_teardown_ns, kldrv_now_ns(), __ATOMIC_RELAXED);
     kl_mprobe_gunclub_save_preferences();
     unity_lifecycle_call("nativePause");
+    unsigned limit = unity_quit_limit_ms();
+    if (limit) {
+        pthread_t th;
+        if (pthread_create(&th, NULL, unity_quit_limit_thread,
+                           (void *)(uintptr_t)limit) == 0)
+            pthread_detach(th);
+    }
     unity_lifecycle_call("nativeDone");
+    g_quit_done_returned = 1;
+    __atomic_store_n(&g_teardown_ns, 0, __ATOMIC_RELAXED);
     g_render = NULL;
 }
 
@@ -1336,6 +1415,8 @@ int kl_driver_frame(void) {
     kl_mprobe_tick(g_frames);
     // AC Nexus's own half-rate spin, taken out (self-gated on the target).
     kl_mprobe_nexus_frame_budget(g_frames);
+    // Ven VR Adventure's realtime shadows, taken out (self-gated on the target).
+    kl_mprobe_ven_no_rt_shadows(g_frames);
     // Custom levels, from the same seat and for the same reason. Self-gated on a
     // CustomLevels directory existing, so every other guest pays one stat().
     kl_songs_tick(g_frames);

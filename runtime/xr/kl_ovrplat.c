@@ -3017,14 +3017,57 @@ static int plat_is_unity_hook(const char *name) {
 // Returning a plausible request id instead would be a lie with a tail: the caller
 // would then poll ovr_PopMessage forever for a completion that cannot come.
 static uint64_t klplat_init_fails(const char *name) {
-    plat_hit(name);
-    static int said;
-    if (!said) {
-        said = 1;
+    // Once per NAME, not once a run: a guest that turns the SDK's "Request
+    // failed." into an error screen mid-game (Until You Fall) left nothing in
+    // the log to say which request it was, because the first 0 of the run had
+    // already used up the only line.
+    if (plat_hit(name) == 1)
         fprintf(stderr, "  [plat] %s -> 0 (no Oculus platform service on this host; "
                         "reporting failure rather than inventing success)\n", name);
-    }
     return 0;
+}
+
+// Achievement WRITES — unlock, add to a count, add bit-fields. Like the
+// leaderboard write, there is no service here to record them, and the bare 0
+// above is what the C# SDK meets with `Debug.LogError("An unknown error
+// occurred. Request failed.")`. Until You Fall (x2567459230020142) routes every
+// logged error into its GlobalExceptionHandler, which stops the game on a
+// "Something Went Wrong" screen in the middle of a run (owner on the headset,
+// 2026-11-16; it asks ovr_Achievements_GetAllProgress at start). For that
+// title the write completes as an ERROR — the truth, delivered to its
+// callback, as the leaderboard family does — and nothing is reported as
+// unlocked. Message types are the SDK's ovrMessage_Achievements_* constants,
+// read back from that game's global-metadata. Every other title keeps the 0.
+//   KL_PLAT_ACH_WRITE_ERR=0|1 overrides the per-target default.
+#define KLPLAT_MSG_ACHIEVEMENT_UNLOCK     0x593CCBDDu
+#define KLPLAT_MSG_ACHIEVEMENT_ADD_COUNT  0x03E76231u
+#define KLPLAT_MSG_ACHIEVEMENT_ADD_FIELDS 0x14AA2129u
+static int klplat_ach_write_err(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        if (!t && !getenv("KL_PLAT_ACH_WRITE_ERR")) return 0;   // not kept until known
+        on = kl_env_on("KL_PLAT_ACH_WRITE_ERR", t && strcmp(t, "x2567459230020142") == 0);
+    }
+    return on;
+}
+static uint64_t klplat_Achievements_Unlock(const char *name) {
+    (void)name;
+    if (!klplat_ach_write_err()) return klplat_init_fails("ovr_Achievements_Unlock");
+    plat_hit("ovr_Achievements_Unlock");
+    return klplat_request_err("ovr_Achievements_Unlock", KLPLAT_MSG_ACHIEVEMENT_UNLOCK);
+}
+static uint64_t klplat_Achievements_AddCount(const char *name, unsigned long long count) {
+    (void)name; (void)count;
+    if (!klplat_ach_write_err()) return klplat_init_fails("ovr_Achievements_AddCount");
+    plat_hit("ovr_Achievements_AddCount");
+    return klplat_request_err("ovr_Achievements_AddCount", KLPLAT_MSG_ACHIEVEMENT_ADD_COUNT);
+}
+static uint64_t klplat_Achievements_AddFields(const char *name, const char *fields) {
+    (void)name; (void)fields;
+    if (!klplat_ach_write_err()) return klplat_init_fails("ovr_Achievements_AddFields");
+    plat_hit("ovr_Achievements_AddFields");
+    return klplat_request_err("ovr_Achievements_AddFields", KLPLAT_MSG_ACHIEVEMENT_ADD_FIELDS);
 }
 
 // ovr_UnityInitWrapper is NOT here — it is a bool, not an ovrRequest, and it has
@@ -3588,6 +3631,10 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
                                                (void *)klplat_Leaderboard_WriteEntryWithSupplementaryMetric},
     {"ovr_Message_GetAchievementDefinitionArray", (void *)klplat_Message_GetPayload},
     {"ovr_Achievements_GetAllProgress",        (void *)klplat_Achievements_GetAllProgress},
+    // Writes: 0 as before, or an error completion per target (see the handlers).
+    {"ovr_Achievements_Unlock",                (void *)klplat_Achievements_Unlock},
+    {"ovr_Achievements_AddCount",              (void *)klplat_Achievements_AddCount},
+    {"ovr_Achievements_AddFields",             (void *)klplat_Achievements_AddFields},
     {"ovr_Message_GetAchievementProgressArray", (void *)klplat_Message_GetPayload},
     // The rich-presence destinations: an empty list, completed (see the handler).
     {"ovr_RichPresence_GetDestinations",       (void *)klplat_RichPresence_GetDestinations},

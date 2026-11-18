@@ -4618,7 +4618,11 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
     // Myst (x2719294624823942, UE 5.3 mobile, Vulkan multiview): right at the
     // start, blocks and wrong colours, the left eye not showing what the right
     // one does (on device, 2026-11-12).
-    //   default 1 for those five titles, else 0
+    // The Pirate Queen with Lucy Liu (x5420468924659233, UE 5.1 mobile, 4x
+    // MSAA, Vulkan multiview, a subpass-input reader): a chaotic background,
+    // blocks, wrong colours, displaced content flickering (on device,
+    // 2026-11-16).
+    //   default 1 for those six titles, else 0
     static int no_transient = -1;
     if (no_transient < 0) {
         extern const char *kl_driver_target_name(void);
@@ -4628,7 +4632,8 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
                                        !strcmp(t, "x6605328856182465") ||
                                        !strcmp(t, "x9269393463181825") ||
                                        !strcmp(t, "x5223884527630557") ||
-                                       !strcmp(t, "x2719294624823942")));
+                                       !strcmp(t, "x2719294624823942") ||
+                                       !strcmp(t, "x5420468924659233")));
     }
     if (ci && (ci->usage & 0x40u) && no_transient) {
         mod = *ci;

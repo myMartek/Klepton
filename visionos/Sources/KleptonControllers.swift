@@ -253,10 +253,17 @@ struct KLSenseTune {
     /// Gun Club VR: the general pitch, the gun's grip 3 cm lower and 3 cm further
     /// back than the general offset, as its owner aligned it (fix 44,
     /// 2026-10-15, on their headset; not run here).
+    /// Hot Dogs, Horseshoes & Hand Grenades 2 (Meta Store build): the general
+    /// pitch, 0.5 cm more in Y and 8 cm more in Z (+Z is back along the hilt)
+    /// than the general offset, as its owner aligned it with HandTuneView while playing (on a
+    /// Vision Pro with PSVR2 Sense controllers, 2026-11-15; one person's by-eye
+    /// value, so a second opinion is welcome). The game reads its controllers
+    /// through the OVRPlugin nodes, so this path is the one that moves them.
     static let targetHand: (pitch: Float, pos: SIMD3<Float>)? = {
         switch klTargetName() {
         case "x4015163475201433": return (-30, SIMD3<Float>(-0.010, 0.005, 0.055))
         case "x2285803881494677": return (-37, SIMD3<Float>(-0.005, -0.010, 0.010))
+        case "x26291709480509388": return (-37, SIMD3<Float>(-0.005, 0.025, 0.060))
         default: return nil
         }
     }()
@@ -1726,10 +1733,45 @@ final class KleptonControllers {
             // Buttons only. The pose is resolved in update(), where the frame's
             // presentation time is known and the anchor can be predicted to it.
             lock.lock()
+            // The menu in the headset (KleptonHeadsetMenu.swift) takes the hand while it is open:
+            // the menu reads what was pressed, the game gets nothing but the menu buttons, which
+            // applyPanelChord needs for the hold that closes it and keeps from the game.
+            menuRaw[hand] = st
+            if KLHeadsetMenu.shared.isOpen { Self.blankForMenu(&st, keepPill: true) }
             state[hand] = st
             lock.unlock()
         }
         applyPanelChord()
+    }
+
+    /// The last poll's buttons as the hand pressed them, for the menu in the headset.
+    private var menuRaw = [KleptonHandState(), KleptonHandState()]
+    private var menuTriggerDown = [false, false]
+
+    /// What the game is told of a hand while the menu is open: no button, no trigger, a stick at rest.
+    private static func blankForMenu(_ st: inout KleptonHandState, keepPill: Bool) {
+        st.buttons = keepPill ? st.pill : 0; st.touches = st.buttons
+        st.otherButtons = 0; st.otherTouches = 0
+        if !keepPill { st.pill = 0 }
+        st.indexTrigger = 0; st.handTrigger = 0; st.stick = .zero
+    }
+
+    /// With the menu open: the sticks move through it, Cross (right) or either trigger chooses, Circle goes back,
+    /// and the game gets nothing at all. Under `lock`.
+    private func driveCheatMenu() {
+        let l = menuRaw[0], r = menuRaw[1]
+        let y = abs(l.stick.y) > abs(r.stick.y) ? l.stick.y : r.stick.y
+        // A trigger counts as pressed past 0.7 and as let go only under 0.4, so one pull is one choice even where
+        // the travel hovers about the line.
+        for (h, s) in [(0, l), (1, r)] {
+            let v = s.fromController ? s.indexTrigger : 0
+            if v > 0.7 { menuTriggerDown[h] = true } else if v < 0.4 { menuTriggerDown[h] = false }
+        }
+        let select = (r.fromController && r.otherButtons & OVRPRawButton.a != 0)
+                  || menuTriggerDown[0] || menuTriggerDown[1]
+        let back = r.fromController && r.otherButtons & OVRPRawButton.b != 0
+        KLHeadsetMenu.shared.drive(stickY: y, select: select, back: back, now: ProcessInfo.processInfo.systemUptime)
+        for h in 0...1 { Self.blankForMenu(&state[h], keepPill: false) }
     }
 
     /// Create and Options held together for a second show the metrics panel
@@ -1780,6 +1822,7 @@ final class KleptonControllers {
             return
         }
         guard Self.panelButtons else { return }
+        _ = KLHeadsetMenu.prepared
         lock.lock(); defer { lock.unlock() }
         // A tap is passed on after the button is up again, with the bits it had.
         for h in 0...1 where state[h].pill != 0 { pillBits[h] = state[h].pill }
@@ -1787,14 +1830,16 @@ final class KleptonControllers {
         let chord = kl_metrics_chord(state[0].fromController && state[0].pill != 0 ? 1 : 0,
                                      state[1].fromController && state[1].pill != 0 ? 1 : 0,
                                      ProcessInfo.processInfo.systemUptime, &passL, &passR)
-        // A tap of the two together with the panel shown switches MetalFX upscaling where it can upscale
-        // (KleptonMetalFX.tapToggle), and does nothing anywhere else. The panel shows the result.
-        if chord == 2 { KleptonMetalFX.tapToggle() }
+        // The hold opens and closes the menu in the headset (kl_metrics_set_chord_menu), in every game; the
+        // performance panel is one of its entries. A short tap of the two does nothing any more (the owner's word,
+        // 2026-11-18: what it switched — MetalFX, frame generation — is in the menu now).
+        if chord == 3 { KLHeadsetMenu.shared.toggleOpen() }
         for h in 0...1 where state[h].fromController {
             let pill = (h == 0 ? passL : passR) != 0 ? pillBits[h] : 0
             state[h].buttons = state[h].otherButtons | pill
             state[h].touches = state[h].otherTouches | state[h].otherButtons | pill
         }
+        if KLHeadsetMenu.shared.isOpen { driveCheatMenu() }
     }
 
     // MARK: - Haptics

@@ -184,6 +184,7 @@ int kl_fove_curves1(uint32_t W, uint32_t H, float cx, float cy,
 // ---------------------------------------------------------------- state
 static int g_on = -1;                 // -1 unread, 0 off, 1 on
 static int g_level;                   // 1 low, 2 medium, 3 high
+static unsigned g_curve_gen;          // bumped by kl_fove_set_curve: every map is rebuilt as a re-centre is
 static const char *g_level_name = "off";
 static float g_box, g_ramp, g_floor;  // fractions of the target height (floor: rate)
 static int g_patch_fc = 1, g_expand = 1, g_idx = 20;
@@ -261,6 +262,7 @@ typedef struct {
     int env;                          // built as the envelope of both eyes' points (not KL_FOVE_PER_EYE)
     int superseded;                   // re-centred into another slot while expands still referred to this one:
                                       // lookups skip it, its pending expands still read it, recycled once none does
+    unsigned gen;                     // the curve it was built with (g_curve_gen, kl_fove_set_curve)
 } kf_map_t;
 #define KF_MAP_N 8
 static kf_map_t g_maps[KF_MAP_N];
@@ -390,6 +392,23 @@ static void kf_read_env(void) {
     g_subp_helpers = kl_env_on("KL_FOVE_SUBPASS_HELPERS", 1);
     g_per_eye = kl_env_on("KL_FOVE_PER_EYE", 0);
     g_on = 1;
+}
+
+int kl_fove_live(void) { return kl_fove_on(); }
+
+void kl_fove_set_curve(float box, float ramp, float floor_rate) {
+    if (!kl_fove_on()) {
+        fprintf(stderr, "  [fove] a new curve from the menu ignored: foveation was off at the start\n");
+        return;
+    }
+    pthread_mutex_lock(&g_mu);
+    if (box >= 0) g_box = box;
+    if (ramp >= 0) g_ramp = ramp;
+    g_floor = floor_rate > 1 ? 1 : floor_rate < 0.02f ? 0.02f : floor_rate;
+    g_curve_gen++;
+    pthread_mutex_unlock(&g_mu);
+    fprintf(stderr, "  [fove] curve from now on (the menu): box %.3f, ramp %.3f, floor %.3f%s\n",
+            (double)g_box, (double)g_ramp, (double)g_floor, g_floor >= 1 ? " — full rate everywhere" : "");
 }
 
 int kl_fove_on(void) {
@@ -1053,7 +1072,11 @@ static kf_map_t *kf_map_for_cb(uint32_t W, uint32_t H, int kind, int layers, int
         }
     }
     int recentre = 0;
-    if (mp && !mp->failed && kind == KF_ARRAY) {
+    // A new curve from the app's menu (kl_fove_set_curve): rebuilt the way a re-centred map is, in place
+    // or into another slot while expands still refer to this one. Any kind; the centre is followed for
+    // ARRAY only.
+    int stale = mp && !mp->failed && mp->gen != g_curve_gen;
+    if (mp && !mp->failed && (kind == KF_ARRAY || stale)) {
         // The centre follows the frame record. A
         // map built before the first record (or before the guest's render
         // viewport settled) used the full image — Deadpool renders each eye
@@ -1069,8 +1092,8 @@ static kf_map_t *kf_map_for_cb(uint32_t W, uint32_t H, int kind, int layers, int
         // from 79% to 55% of the image (the fovea ~800 px off on the Mac).
         char w[128];
         float ncx, ncy, nfx, nfy;
-        int moved = 0, mi = (int)(mp - g_maps);
-        for (int l = 0; l < layers && l < 2; l++) {
+        int moved = stale, mi = (int)(mp - g_maps);
+        for (int l = 0; kind == KF_ARRAY && l < layers && l < 2; l++) {
             int e = layers == 2 ? l : (eye == 1 ? 1 : 0);
             kf_eye_point(e, W, H, &ncx, &ncy, &nfx, &nfy, NULL, NULL, w, sizeof w);
             if (fabsf(ncx - mp->cx[l]) > 4.0f || fabsf(ncy - mp->cy[l]) > 4.0f) moved = 1;
@@ -1110,6 +1133,7 @@ build:
     if (mp->map && g_nold < 15) { g_old[g_nold++] = mp->map; g_old[g_nold++] = mp->buf; }
     *mp = (kf_map_t){0};
     mp->W = W; mp->H = H; mp->kind = kind; mp->layers = layers; mp->eye = eye; mp->failed = 1;
+    mp->gen = g_curve_gen;
     float box = g_box * (float)H, ramp = g_ramp * (float)H;
     int nh = (int)(W / 16) + 1, nv = (int)(H / 16) + 1;
     if (nh > 4096) nh = 4096;

@@ -116,6 +116,9 @@ double kl_driver_pump_default(void);
 // xrWaitFrame rather than being called), which is what _note_frame is for.
 unsigned kl_driver_frames(void);
 void     kl_driver_note_frame(void);
+// KL_UNITY_QUIT_TEARDOWN: milliseconds the teardown (nativePause/nativeDone)
+// has been running and not returned, or 0 when none is in progress.
+unsigned kl_driver_quit_teardown_ms(void);
 
 // Everything the run has to say: the door's own report, then the media, audio,
 // XR and GL surfaces and the JNI census. Each of those otherwise prints only on

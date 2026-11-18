@@ -909,7 +909,8 @@ enum { KLXR_GATE_ALWAYS = 0,      // unconditional
        KLXR_GATE_HITMAN3 = 6,              // ...HITMAN 3 VR: Reloaded only (see below)
        KLXR_GATE_BRINK_HANDS = 7,          // ...BRINK Traveler only
        KLXR_GATE_BRINK_DEPTH = 8,          // ...BRINK Traveler, unless KL_XR_DEPTH=0
-       KLXR_GATE_HAND_TRACKING = 9 };      // ...BRINK Traveler and Half-Life: Alyx (see below)
+       KLXR_GATE_HAND_TRACKING = 9,        // ...BRINK Traveler and Half-Life: Alyx (see below)
+       KLXR_GATE_META_HEADSET_ID = 10 };   // ...Hot Dogs, Horseshoes & Hand Grenades 2 only (see below)
 
 static const struct { const char *name; uint32_t version; int gate; } g_extensions[] = {
     { "XR_KHR_opengl_es_enable",       10, KLXR_GATE_ALWAYS },
@@ -1040,6 +1041,19 @@ static const struct { const char *name; uint32_t version; int gate; } g_extensio
     { "XR_META_performance_metrics",          2, KLXR_GATE_PERF_METRICS },
     { "XR_EXT_user_presence",                 1, KLXR_GATE_USER_PRESENCE },
     { "XR_VALVE_frame_controller_interaction", 1, KLXR_GATE_FRAME_CONTROLLER },
+    // XR_META_headset_id — Hot Dogs, Horseshoes & Hand Grenades 2 (Unity, Meta
+    // Store build). It has one platform object per headset family and picks the
+    // one whose identifying OpenXR extension is in the enabled set: this name
+    // for Meta, a Valve name for the Steam Frame, an Android one for Android XR.
+    // Without this one nothing matches ("No platform found that contains
+    // extension ..."), it falls back to its Steam Frame platform, never builds
+    // an OVRManager, and stops on its loading screen.
+    //
+    // The extension has no entry points; it is one output struct on
+    // xrGetSystemProperties, which is left as the guest zeroed it (the headset
+    // type is already answered as a Quest 2 through OVRPlugin). Gated to that
+    // one target, because a game that merely probes for it may branch on it.
+    { "XR_META_headset_id",                   1, KLXR_GATE_META_HEADSET_ID },
     // XR_FB_space_warp — HITMAN 3 VR: Reloaded (x8012387035448196, IOI's Glacier
     // engine as "Anubis", OpenXR + Vulkan) REQUIRES it at xrCreateInstance,
     // whether or not it was enumerated. Refused, it does not stop: it goes on
@@ -1194,6 +1208,11 @@ static int klxr_ext_gate_open(int gate) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
         return kl_env_on("KL_XR_HITMAN3_EXTS", t && !strcmp(t, "x8012387035448196"));
+    }
+    case KLXR_GATE_META_HEADSET_ID: {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        return kl_env_on("KL_XR_META_HEADSET_ID", t && !strcmp(t, "x26291709480509388"));
     }
     case KLXR_GATE_PERF_METRICS: {
         // XR_META_performance_metrics was once in the list by name only, none of

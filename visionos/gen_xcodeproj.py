@@ -628,7 +628,7 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonChroma.swift", "KleptonMic.swift", "KleptonFrameGen.swift",
          "KleptonLauncher.swift", "KleptonHL1.swift", "KleptonGameData.swift",
          "KleptonAlyx.swift", "KleptonText.swift", "KleptonSteamCloud.swift",
-         "KleptonBackup.swift", "KleptonMetrics.swift", "KleptonPinch.swift",
+         "KleptonBackup.swift", "KleptonMetrics.swift", "KleptonHeadsetMenu.swift", "KleptonPinch.swift",
          "KleptonTestBuild.swift", "KleptonLogTail.swift", "KleptonAppleMusic.swift", "KleptonModCredits.swift",
          "KleptonArrayViews.swift",
          "KleptonControllerInput.swift", "KleptonControllerMode.swift",

@@ -1478,6 +1478,11 @@ STORE_DEFAULTS = {
     # offsets Unity's 1.2x eye texture expansion.
     "x3967680489996895": {"foveation": False, "foveation_reset": 1,
                           "render_scale": 0.8, "picture_reset": 1},
+    # Marvel's Iron Man VR (Unity 2021.2.19f1, Vulkan). Foveated rendering off
+    # by default: on the headset the game runs only with the start window's
+    # "Foveated rendering" switch off (its owner, 2026-11-16). "foveation_reset"
+    # calls back a stored "on" once; a player can still turn it on afterwards.
+    "x5017327094985781": {"foveation": False, "foveation_reset": 1},
     # HITMAN 3 VR: Reloaded (Glacier, Vulkan, OpenXR). Its owner's choices in
     # the start window, made the default for new players (2026-10-20): 100 Hz
     # (the mixed space, the default anyway), a frame on every second refresh —
@@ -1490,6 +1495,13 @@ STORE_DEFAULTS = {
     # mission looks the same with it once they are there.
     "x8012387035448196": {"foveation": True, "vk_foveation": "high",
                           "test_on": "KL_GUEST_PACE_DIV,KL_VK_ASYNC_PIPES"},
+    # Ven VR Adventure 1.44 (Unity 2019.4.13f1, OpenGL ES, Stereo eye layout).
+    # Foveation off by default: its owner on the headset (2026-11-16) found it
+    # has to be off for the game to look right. "foveation_reset" calls back a
+    # stored "on" once. Its quit and loading-screen fixes are by target name in
+    # kl_app.c (KL_UNITY_QUIT_EXITS), kl_driver.c (KL_UNITY_QUIT_TEARDOWN) and
+    # kl_glfb.c (KL_GLFB_EYE_CLEAR).
+    "x3327317663977182": {"foveation": False, "foveation_reset": 1},
 }
 
 

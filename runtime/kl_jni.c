@@ -2713,6 +2713,13 @@ static const klj_field g_fields[] = {
             klj_PackageInfo_packageName),
     KLJ_FFN("android/content/pm/PackageInfo", "reqFeatures",
             "[Landroid/content/pm/FeatureInfo;", klj_PackageInfo_reqFeatures),
+    // Both spellings of ONE field: the platform start-up of Hot Dogs, Horseshoes
+    // & Hand Grenades 2 reads it through ReflectionHelper with the erased
+    // [Ljava/lang/Object; (the declared type is [Landroid/content/pm/Signature;).
+    KLJ_FFN("android/content/pm/PackageInfo", "signatures",
+            "[Landroid/content/pm/Signature;", klj_PackageInfo_signatures),
+    KLJ_FFN("android/content/pm/PackageInfo", "signatures",
+            "[Ljava/lang/Object;", klj_PackageInfo_signatures),
 
     // Unity's own static handle on the Activity. Must be the *same* object the
     // Context was, not another instance of the class — Unity passes one to native

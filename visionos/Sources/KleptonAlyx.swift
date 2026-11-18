@@ -963,7 +963,14 @@ func klAlyxApply() {
            + klAlyxTextureFloorArguments()
            + AlyxPace.stored.arguments
            + (loading ? "" : " +hlvr_auto_dismiss_loading 1")
-           + (language == .english ? "" : " -language \(language.engineName)"), 0)
+           + (language == .english ? "" : " -language \(language.engineName)")
+           // The engine's net console, for the menu in the headset (quick save and load, and the cheats), and
+           // cheats allowed from the start where the setting is on (Settings › Play › Cheats; KleptonHeadsetMenu.swift).
+           + " -netconport \(klAlyxNetconPort)" + (klAlyxCheatsOn ? " +sv_cheats 1" : ""), 0)
+    setenv("KL_LX_NETCON", "\(klAlyxNetconPort)", 1)
+    // The menu in the headset switches foveation while the game runs (KleptonHeadsetMenu.swift): the hooks are put
+    // in even where it starts off.
+    setenv("KL_VK_FOVEATE_LIVE", "1", 0)
     // The ceiling on the eye texture the game is offered. With the level fixed
     // the game allocates only what the level draws, so this no longer has to be
     // held down to protect memory at the small sizes.
@@ -994,7 +1001,8 @@ func klAlyxApply() {
            "picture \(q.title), edges \(edges.title), view \(view.title), foveation \(fov.title), output \(output.title); "
            + "cadence \(cadence == .every ? "every refresh" : "every second refresh"), picture size \(autoSize ? "automatic" : "fixed"), "
            + "effects \(fewerEffects ? "fewer" : "all"), depth \(leanDepth ? "in tile memory" : "in real memory"), "
-           + "meter's copy \(leanMeter ? "every 8th frame" : "every frame"); texture pool \(poolMB) MB, finest texture \(textureCap.rawValue)", 1)
+           + "meter's copy \(leanMeter ? "every 8th frame" : "every frame"); texture pool \(poolMB) MB, finest texture \(textureCap.rawValue)"
+           + (klAlyxCheatsOn ? "; cheats on" : ""), 1)
     klAlyxMovePipelineFolder()
     NSLog("[app] Alyx picture: \(q.title), edges \(edges.title), view \(view.title), foveation \(fov.title)\(wrote ? "" : " (table NOT written)"), language \(language.title) with \(voices ? "staged" : "the game's own") voices\(voicePath ? "" : " (gameinfo.gi NOT written)") — KL_LX_ARGS_EXTRA=\(String(cString: getenv("KL_LX_ARGS_EXTRA")))")
 }
@@ -1289,18 +1297,33 @@ struct AlyxLanguageView: View {
     }
 }
 
-/// Alyx's performance panel under Advanced: whether it shows from the start, and what a tap of
-/// Create + Options does (KleptonTapAction) – an instrument, not a setting to play by.
+/// Settings › Play › Cheats (klAlyxCheatsKey): the Cheats page of the menu in the headset (KleptonHeadsetMenu.swift).
+struct AlyxCheatsView: View {
+    @AppStorage(klAlyxCheatsKey) private var cheats = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            KLToggleRow(title: klT("Allow cheats", "Cheats erlauben"), help: "alyx.cheats", isOn: $cheats)
+            Text(klT("With this on, the menu in the headset (hold Create and Options together for a second) has a Cheats page: god mode, unlimited ammo, a bottomless magazine, all weapons and upgrades, single weapons, health and resin.",
+                     "Ist das an, hat das Menü im Headset (Create und Options eine Sekunde zusammen halten) eine Seite Cheats: Godmode, unbegrenzte Munition, ein Magazin, das nie leer wird, alle Waffen und Verbesserungen, einzelne Waffen, Heilspritzen und Harz."))
+                .font(.footnote).foregroundStyle(.secondary)
+            Text(klT("Applies from the next start of the game.", "Gilt ab dem nächsten Start des Spiels."))
+                .font(.footnote).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Alyx's performance panel under Advanced: whether it shows from the start.
 struct AlyxPerformancePanelView: View {
     @AppStorage(klAlyxStatsKey) private var stats = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle(klT("Show performance from the start", "Leistungsanzeige von Anfang an einblenden"), isOn: $stats)
-            Text(klT("A small panel just above the middle of the view: pictures a second, repeated pictures, GPU and CPU load, memory and heat, with the last minute as graphs. Holding Create and Options together for a second shows it and hides it at any time, whether this is on or not.",
-                     "Eine kleine Tafel knapp über der Blickmitte: Bilder pro Sekunde, wiederholte Bilder, Auslastung von GPU und CPU, Speicher und Wärme, dazu die letzte Minute als Verlauf. Create und Options eine Sekunde lang zusammen gehalten blendet sie jederzeit ein und aus, ob das hier an ist oder nicht."))
+            Text(klT("A small panel just above the middle of the view: pictures a second, repeated pictures, GPU and CPU load, memory and heat, with the last minute as graphs. It can be shown and hidden at any time from the menu in the headset (hold Create and Options together for a second).",
+                     "Eine kleine Tafel knapp über der Blickmitte: Bilder pro Sekunde, wiederholte Bilder, Auslastung von GPU und CPU, Speicher und Wärme, dazu die letzte Minute als Verlauf. Über das Menü im Headset (Create und Options eine Sekunde zusammen halten) lässt sie sich jederzeit ein- und ausblenden."))
                 .font(.footnote).foregroundStyle(.secondary)
-            KleptonTapActionPicker()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

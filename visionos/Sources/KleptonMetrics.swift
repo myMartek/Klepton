@@ -185,7 +185,7 @@ enum KLMetricsPanel {
         ctx.fillPath()
         let left: CGFloat = 28, right: CGFloat = 404
         // How to get rid of it, and back: the two menu buttons of the Sense controllers (kl_metrics_chord).
-        text(ctx, "Hold Create + Options 1 s to hide", x: left, y: h - 22, font: font(21), color: dim)
+        text(ctx, "Hold Create + Options 1 s: menu", x: left, y: h - 22, font: font(21), color: dim)
         // A tap of the two switches MetalFX where it can upscale (KleptonMetalFX.tapToggle), on the line above,
         // or cycles frame generation where that was chosen for the game or MetalFX has nothing to switch.
         let fgTap = samples.last?.frameGenTap ?? false

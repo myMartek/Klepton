@@ -178,6 +178,10 @@ static int64_t lx_ioctl(int fd, uint64_t req, void *arg) {
     if (req == 0x5413) {                            // TIOCGWINSZ: same layout both sides
         return lx_ret(ioctl(fd, TIOCGWINSZ, arg));
     }
+    if (kl_lx_netcon_is(fd) && req == 0x5421)       // FIONBIO, on the console's socket
+        return lx_ret(ioctl(fd, FIONBIO, arg));
+    if (kl_lx_netcon_is(fd) && req == 0x541B)       // FIONREAD
+        return lx_ret(ioctl(fd, FIONREAD, arg));
     return -(int64_t)kl_errno_to_linux(ENOTTY);
 }
 
@@ -224,7 +228,7 @@ int64_t kl_lx_syscall(kl_lx_frame *f) {
         r = lx_ret(kl_lx_open(path, (int)a2, (int)a3));
         break;
     }
-    case 57:  kl_lx_close((int)a0); r = lx_ret(close((int)a0)); break;
+    case 57:  kl_lx_close((int)a0); kl_lx_netcon_close((int)a0); r = lx_ret(close((int)a0)); break;
     case 63:  r = lx_read((int)a0, (void *)a1, (size_t)a2, -1); break;
     case 67:  r = lx_read((int)a0, (void *)a1, (size_t)a2, (int64_t)a3); break;         // pread64
     case 64: {
@@ -303,6 +307,27 @@ int64_t kl_lx_syscall(kl_lx_frame *f) {
     case 21:  r = lx_ret(klb_epoll_ctl((int)a0, (int)a1, (int)a2, (void *)a3)); break;
     case 22:  r = lx_ret(klb_epoll_wait((int)a0, (void *)a1, (int)a2, (int)a3)); break;  // epoll_pwait
     case 73:  r = lx_ret(klb_ppoll((struct pollfd *)a0, a1, (const struct timespec *)a2, NULL)); break;
+
+    // Sockets: only the game's console, and only with KL_LX_NETCON (kl_lx_netcon.c).
+    case 198: r = kl_lx_netcon_socket((int)a0, (int)a1, (int)a2); break;
+    case 200: r = kl_lx_netcon_bind((int)a0, (const void *)a1, (uint32_t)a2); break;
+    case 201: r = kl_lx_netcon_listen((int)a0, (int)a1); break;
+    case 202: r = kl_lx_netcon_accept((int)a0, (void *)a1, (uint32_t *)a2, 0); break;
+    case 242: r = kl_lx_netcon_accept((int)a0, (void *)a1, (uint32_t *)a2, (int)a3); break;
+    case 204: case 205:                             // getsockname, getpeername
+        r = kl_lx_netcon_name((int)a0, (void *)a1, (uint32_t *)a2); break;
+    case 206: r = kl_lx_netcon_is((int)a0) ? kl_lx_netcon_sendto((int)a0, (const void *)a1, (size_t)a2, (int)a3)
+                                           : -(int64_t)LX_ENOSYS; break;
+    case 207: r = kl_lx_netcon_is((int)a0) ? kl_lx_netcon_recvfrom((int)a0, (void *)a1, (size_t)a2, (int)a3,
+                                                                    (void *)a4, (uint32_t *)a5)
+                                           : -(int64_t)LX_ENOSYS; break;
+    case 208: r = kl_lx_netcon_sockopt((int)a0, 0, (void *)a3, NULL); break;
+    case 209: r = kl_lx_netcon_sockopt((int)a0, 1, (void *)a3, (uint32_t *)a4); break;
+    case 210: r = kl_lx_netcon_is((int)a0) ? kl_lx_netcon_shutdown((int)a0, (int)a1) : -(int64_t)LX_ENOSYS; break;
+    case 211: case 212:                             // sendmsg, recvmsg
+        r = kl_lx_netcon_is((int)a0) ? kl_lx_netcon_msg((int)a0, (void *)a1, (int)a2, nr == 211)
+                                     : -(int64_t)LX_ENOSYS; break;
+    case 72:  r = !kl_lx_netcon_enabled() ? -(int64_t)LX_ENOSYS : kl_lx_pselect6((int)a0, (void *)a1, (void *)a2, (void *)a3, (const struct timespec *)a4); break;
 
     case 93:  kl_lx_thread_exit((int)a0);           // exit: this thread only
     case 94:                                        // exit_group

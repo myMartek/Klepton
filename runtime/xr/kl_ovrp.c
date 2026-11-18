@@ -542,10 +542,73 @@ static uint64_t klovrp_SetAppEngineInfo(const char *name, const char *version,
 // and nothing recreates a distortion window, so both are 0 — and the out-param
 // is what the caller reads, so a scalar-return implementation of these leaves
 // the caller doing a `tbnz` on whatever was in its stack slot.
+// ...with ONE exception, per target: the guest's own quit button.
+//
+// Oculus Utilities' OVRManager.PlatformUIConfirmQuit() is how a Unity title on
+// a Quest quits from its menu: it asks OVRPlugin to show the system's "quit?"
+// dialog (ovrp_ShowSystemUI2(ConfirmQuit = 1)); once the player confirms, the
+// runtime raises ShouldQuit, OVRManager sees `OVRPlugin.shouldQuit` and calls
+// Application.Quit(). There is no system dialog here, and with ShowSystemUI2
+// a silent no and ShouldQuit pinned to 0 the button did nothing at all — not
+// even a pause (Until You Fall, x2567459230020142, owner on the headset,
+// 2026-11-16). For an opted-in title the request is taken as confirmed: the
+// player pressed the game's own quit button, which is the confirmation the
+// game asked for, and ShouldQuit reads 1 from then on. KL_UNITY_QUIT_EXITS /
+// _TEARDOWN then end the app as on Android.
+//   KL_OVRP_CONFIRM_QUIT=0|1 overrides the per-target default.
+//
+// Cosmodread (x3688751474502123, community fix 114) asks the same way through the
+// bool form, ovrp_ShowSystemUI, and then does nothing more itself — on a Quest the
+// system ends the app once the player confirms. For it the confirmed request also
+// ends the run: the guest frame loop leaves at its next frame (kl_app.c,
+// kl_ovrp_quit_requested), as for Application.Quit() under KL_UNITY_QUIT_EXITS.
+//   KL_OVRP_CONFIRM_QUIT_ENDS=0|1 overrides that per-target default.
+// (Fixes 112 and 114 brought one function each for this; they are one here.)
+static int g_confirm_quit;
+static volatile int g_ovrp_quit_requested;
+int kl_ovrp_quit_requested(void) { return g_ovrp_quit_requested; }
+static int klovrp_confirm_quit_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *t = kl_driver_target_name();
+        if (!t && !getenv("KL_OVRP_CONFIRM_QUIT")) return 0;   // not kept until known
+        v = kl_env_on("KL_OVRP_CONFIRM_QUIT", t && (strcmp(t, "x2567459230020142") == 0 ||
+                                                    strcmp(t, "x3688751474502123") == 0));
+    }
+    return v;
+}
+static int klovrp_confirm_quit_ends(void) {
+    const char *t = kl_driver_target_name();
+    return kl_env_on("KL_OVRP_CONFIRM_QUIT_ENDS", t && strcmp(t, "x3688751474502123") == 0);
+}
+static int klovrp_confirm_quit(int ui) {
+    if (ui != 1 /* PlatformUI.ConfirmQuit */ || !klovrp_confirm_quit_on()) return 0;
+    if (!__atomic_exchange_n(&g_confirm_quit, 1, __ATOMIC_RELAXED))
+        fprintf(stderr, "  [ovrp] ShowSystemUI(ConfirmQuit): the game's quit button — "
+                        "taken as confirmed, ShouldQuit now reads 1 (KL_OVRP_CONFIRM_QUIT)%s\n",
+                klovrp_confirm_quit_ends() ? "; the run ends after this frame (KL_OVRP_CONFIRM_QUIT_ENDS)" : "");
+    if (klovrp_confirm_quit_ends()) g_ovrp_quit_requested = 1;
+    return 1;
+}
+// Result form (1.21+): Success either way, as before.
+static uint64_t klovrp_ShowSystemUI2(int ui) {
+    ovrp_hit("ovrp_ShowSystemUI2");
+    klovrp_confirm_quit(ui);
+    return OVRP_SUCCESS;
+}
+// Bool form: true only when it was acted on.
+static uint64_t klovrp_ShowSystemUI(int ui) {
+    ovrp_hit("ovrp_ShowSystemUI");
+    return klovrp_confirm_quit(ui) ? OVRP_TRUE : 0;
+}
+static uint64_t klovrp_GetAppShouldQuit(void) {
+    ovrp_hit("ovrp_GetAppShouldQuit");
+    return __atomic_load_n(&g_confirm_quit, __ATOMIC_RELAXED) ? OVRP_TRUE : 0;
+}
 static uint64_t klovrp_GetAppShouldQuit2(int *out) {
     ovrp_hit("ovrp_GetAppShouldQuit2");
     if (!out) return OVRP_FAIL_INVALID_PARAM;
-    *out = 0;
+    *out = __atomic_load_n(&g_confirm_quit, __ATOMIC_RELAXED);
     return OVRP_SUCCESS;
 }
 static uint64_t klovrp_GetAppShouldRecreateDistortionWindow2(int *out) {
@@ -1075,7 +1138,16 @@ int kl_ovrp_gl_array_for(const char *t) {
                                                    // with a Scriptable Render Pipeline, which
                                                    // renders stereo single-pass or not at all
                                                    // (klovrp_setup_eye_array, below).
-                                                   strcmp(t, "x2190353671014400") == 0));
+                                                   strcmp(t, "x2190353671014400") == 0 ||
+                                                   // Until You Fall (Unity 2019.3.15f1, legacy
+                                                   // VRDevice, OVRPlugin 1.44): its programs are
+                                                   // multiview-only and it renders ONE pass a
+                                                   // frame. Told no array, Unity made "separate"
+                                                   // eye textures, bound only eye 0's
+                                                   // framebuffers (eye 1's: never, in a whole
+                                                   // run) and the right eye stayed black
+                                                   // (owner on the headset, 2026-11-16).
+                                                   strcmp(t, "x2567459230020142") == 0));
     }
 }
 
@@ -13467,6 +13539,10 @@ static const struct { const char *name; void *fn; } g_ovrp_impl[] = {
     {"ovrp_SetAppEngineInfo",  (void *)klovrp_SetAppEngineInfo},
     {"ovrp_SetAppEngineInfo2", (void *)klovrp_SetAppEngineInfo2},
     {"ovrp_GetAppShouldQuit2", (void *)klovrp_GetAppShouldQuit2},
+    // 0 / no unless the guest's quit button asked (KL_OVRP_CONFIRM_QUIT).
+    {"ovrp_GetAppShouldQuit",  (void *)klovrp_GetAppShouldQuit},
+    {"ovrp_ShowSystemUI",      (void *)klovrp_ShowSystemUI},
+    {"ovrp_ShowSystemUI2",     (void *)klovrp_ShowSystemUI2},
     {"ovrp_GetAppShouldRecreateDistortionWindow2",
      (void *)klovrp_GetAppShouldRecreateDistortionWindow2},
     {"ovrp_GetSystemRecommendedMSAALevel", (void *)klovrp_GetSystemRecommendedMSAALevel},
@@ -14239,6 +14315,7 @@ static const char *const g_ovrp_absent[] = {
 //   ovrp_GetTrackingCalibratedOrigin — Onward (x2677344882310094), fix 50
 //   ovrp_GetBoundaryConfigured/Geometry2/Geometry3 — KL_OVRP_BOUNDARY
 //   ovrp_SetUserIPD/IPD2/EyeHeight2 — DeoVR Classic (x2382576078453818), fix 100
+//   ovrp_ShowSystemUI — Cosmodread (x3688751474502123), KL_OVRP_CONFIRM_QUIT
 static int kl_ovrp_gated_out(const char *name) {
     if (!strcmp(name, "ovrp_SetUserIPD") || !strcmp(name, "ovrp_SetUserIPD2") ||
         !strcmp(name, "ovrp_SetUserEyeHeight2"))

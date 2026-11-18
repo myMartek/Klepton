@@ -301,8 +301,9 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   drawing the same surface agree on its depth to the last bit. Without it,
   passes that must match (a depth fill, then the lit pass under EQUAL/LEQUAL)
   disagree in places and whole faces flash black. Default 1 for `doom3quest`
-  and `x2933720383334150` (Gloomy Eyes: ground and objects flickering black),
-  else 0.
+  and `x2933720383334150` (Gloomy Eyes: ground and objects flickering black)
+  and `x3688751474502123` (Cosmodread: the flashlight's lit cone flickering in
+  squares), else 0.
 - `KL_GLFB_SSBO_TEX=0|1` — (`runtime/gfx/kl_glfb.c`, `kl_glfb_ssbo_tex`) read a
   shader's read-only storage buffers through textures, so shaders built for
   ES 3.1 compile on the ES 3.0 backend; also answers the ES 3.1 storage limits.
@@ -675,7 +676,8 @@ answers GL and kl_glfb never initializes.
   Chapter 2, whose textures were all purple without it) — Unreal's texture
   streaming needs it — and `x3231001163584154` (Warhammer 40,000: Battle
   Sister, a Unity title that copies textures into 2D arrays while loading a
-  level), else 0. Copies between 2D textures and 2D-array slices are handled;
+  level) and `x3327317663977182` (Ven VR Adventure, Unity: failed copies at
+  every scene change, magenta flashes between scenes), else 0. Copies between 2D textures and 2D-array slices are handled;
   a compressed source must be a 2D texture (the shadow is kept per 2D
   level); the call itself always goes through a thunk that reads its stack
   arguments the way the guest pushed them.
@@ -716,7 +718,8 @@ answers GL and kl_glfb never initializes.
   Default 1; 0 passes the guest's divisor through unchanged.
 - `KL_GLFB_EYE_CLEAR=0|1` — a provider-backed eye texture is cleared to opaque
   black once when it is bound, so a first frame cannot show what the memory
-  held. Default 1 for Unreal guests, else 0.
+  held. Default 1 for Unreal guests and `x3327317663977182` (Ven VR Adventure,
+  Unity: a new eye swapchain at every scene change flashed magenta), else 0.
 - `KL_GLFB_LOG_UNITS=1` — log texture-unit traffic (the "Invalid texture
   unit!" neighbourhood — see `KL_POKE_CAP` under Viewer).
 
@@ -967,6 +970,12 @@ The guest's own memory management, and the three seams that used to disable it.
 - `KL_NEXUS_FRAME_BUDGET_MS=<ms>` — the length to spin to instead, default 0
   (no spin). 17.0 is the game's own rule (85% of two display periods) at
   100 Hz and, with `KL_GUEST_FRESH_POSE`, gives exactly half the display rate.
+- `KL_VEN_NO_RT_SHADOWS=0|1` — (`runtime/diag/kl_mprobe.c`) Ven VR Adventure
+  without realtime shadows: the active URP asset's `shadowDistance` is held at
+  0 through IL2CPP, checked every 120 frames. In the Multi Pass this game falls
+  back to (it is built for multiview), the right eye lacked part of the
+  realtime-light shadows; baked shadows are unaffected. Default 1 for
+  `x3327317663977182`, else 0.
 - `KL_FS_REL_SDCARD=0|1` — resolve a relative path that begins with `sdcard/`
   (or another spelling of external storage) as the absolute one, as it is on a
   device where the app's working directory is `/`. AC Nexus opens its animator
@@ -979,6 +988,12 @@ The guest's own memory management, and the three seams that used to disable it.
   its OBB a second time by that literal path; Gloomy Eyes loads its episodes
   from it. Default 1 for `x2190353671014400` (Arizona Sunshine) and
   `x2933720383334150` (Gloomy Eyes), else 0.
+- `KL_FS_OBB_PKG_DIR=0|1` — (`runtime/libc/kl_libc.c`) the other direction: a
+  file asked for in the directory `getObbDir()` answers (`<files>/obb`) that is
+  not there is served from `<files>/Android/obb/<package>`, where the store's
+  loose content bundles are staged, if it exists there. Marvel's Iron Man VR
+  looks for `AssetManifest.Android.asset` beside its main OBB. Default 1 for
+  `x5017327094985781` (Marvel's Iron Man VR), else 0.
 - `KL_OVRP_GL_ARRAY=0|1` on the legacy path — (`runtime/xr/kl_ovrp.c`,
   `klovrp_setup_eye_array`) also on for Arizona Sunshine (`x2190353671014400`):
   Unity's old Oculus VRDevice is told multiview and texture arrays are
@@ -2015,7 +2030,9 @@ puts the camera on the ground with its hands underneath it.
   glimpses of models under its UI) and `x5223884527630557` (The 7th Guest
   VR: wrong colours and scattered blocks from the first frame) and
   `x2719294624823942` (Myst: blocks, wrong colours and different pictures per
-  eye right at the start), else 0.
+  eye right at the start) and `x5420468924659233` (The Pirate Queen with Lucy
+  Liu: a chaotic background, blocks, wrong colours, displaced content
+  flickering), else 0.
 - `KL_VK_PASS_BARRIERS=0|1|2` — what happens to a `vkCmdPipelineBarrier`
   recorded INSIDE a dynamic-rendering pass that only makes colour attachments
   readable as input attachments. MoltenVK answers one by ending the Metal pass
@@ -2185,7 +2202,9 @@ puts the camera on the ground with its hands underneath it.
   (`x3647259232032222`), whose Quit button ends in it once
   `moh-exit-no-rhi-teardown` lets `FEngineLoop::Exit` through, and for The 7th
   Guest VR (`x5223884527630557`), whose Quit button tears down Vulkan and then
-  calls it; ignored, the last picture froze. The bounded quit
+  calls it; ignored, the last picture froze; and for Journey to Foundation
+  (`x4822681107767272`) and The Pirate Queen with Lucy Liu
+  (`x5420468924659233`), which do the same. The bounded quit
   that came with the surface around it (`KL_UE4_QUIT_LIMIT`,
   `KL_UE4_QUIT_TRACE`) is not taken.
 - `KL_UE4_CXX_ALLOC=0|1` — (`kl_ue4.c`) bind libc++_shared's own calls to
@@ -2757,6 +2776,14 @@ that reports what came due since the frontend last asked. Platform-independent
   question at all: without the extension the client publishes an EMPTY rate
   list, and a host told the client can present at no rate never starts sending
   video.
+- `KL_XR_META_HEADSET_ID=0|1` — advertise `XR_META_headset_id`
+  (`runtime/xr/kl_openxr.c`). Default 1 for Hot Dogs, Horseshoes & Hand Grenades 2
+  (`x26291709480509388`) only, 0 elsewhere. That game picks its platform object
+  by which headset-family extension is enabled; without this one it finds none
+  ("No platform found that contains extension ..."), falls back to its Steam
+  Frame platform, never creates an `OVRManager` and stops on its loading screen.
+  The extension has no entry points and its one output struct is left zeroed.
+  `=0` restores the earlier behaviour for that game, `=1` offers it to any guest.
 - `KL_XR_VULKAN=0` — stop advertising `XR_KHR_vulkan_enable`
   (`runtime/xr/kl_openxr.c`), putting the runtime back to before the OpenXR↔Vulkan
   bridge. The A/B for Open Brush, and it restores the original failure
@@ -4046,8 +4073,21 @@ except its own control vars (next section).
   `x157074645514372` (MADiSON VR) and
   `x2285803881494677` (Gun Club VR, with `KL_UNITY_QUIT_TEARDOWN`) and
   `x2933720383334150` (Gloomy Eyes, with `KL_UNITY_QUIT_TEARDOWN`: its main
-  menu's Exit left a dark picture and the app open), else 0: no
+  menu's Exit left a dark picture and the app open) and
+  `x3327317663977182` (Ven VR Adventure, with `KL_UNITY_QUIT_TEARDOWN`: its
+  quit froze the last picture and left the app open), else 0: no
   other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
+- `KL_OVRP_CONFIRM_QUIT=0|1` — (`runtime/xr/kl_ovrp.c`) answer
+  `ovrp_ShowSystemUI(ConfirmQuit)` / `ovrp_ShowSystemUI2(ConfirmQuit)` —
+  `OVRManager.PlatformUIConfirmQuit()`, a game handing its quit to the
+  headset's system dialog — as confirmed: `ovrp_GetAppShouldQuit(2)` reads 1
+  from then on, so the game quits itself, as on a Quest once the player says
+  yes. Other system UIs answer false. Default 1 for `x2567459230020142` (Until
+  You Fall) and `x3688751474502123` (Cosmodread), else 0.
+- `KL_OVRP_CONFIRM_QUIT_ENDS=0|1` — (`runtime/xr/kl_ovrp.c`) with the above, a
+  confirmed quit also ends the guest frame loop after that frame and the app
+  leaves (for a game that waits for the system to end it). Default 1 for
+  `x3688751474502123` (Cosmodread: its main menu's Quit did nothing), else 0.
 - `KL_UNITY_QUIT_TEARDOWN=0|1` — (`runtime/guest/kl_driver.c`) when
   `nativeRender` first answers false, end Unity the way Android does before
   the loop stops: Gun Club VR's own public static `TBMPrefs.Save()` through
@@ -4056,9 +4096,16 @@ except its own control vars (next section).
   `nativeRender` is never called again after it. Default 1 for
   `x2285803881494677` (Gun Club VR build 410: its in-game Exit kept its settings
   across a restart only with the save in front, as its fix was sent in) and
-  `x157074645514372` (MADiSON VR) and `x2933720383334150` (Gloomy Eyes), else
+  `x157074645514372` (MADiSON VR) and `x2933720383334150` (Gloomy Eyes) and
+  `x3327317663977182` (Ven VR Adventure), else
   0. Persistence when visionOS force-quits
   the app is not covered.
+- `KL_UNITY_QUIT_LIMIT_MS=<ms>` — (`runtime/guest/kl_driver.c`) with
+  `KL_UNITY_QUIT_TEARDOWN`, how long `nativeDone` gets before the app leaves
+  anyway (`exit(0)`, after the thread account of `KL_TRACE_CONDDUMP` if that
+  is on). Default 1200 for `x3327317663977182` (Ven VR Adventure: its
+  `OnApplicationQuit` ran, then `nativeDone` never returned and the last
+  picture stood), else 0 = no limit.
 - `KL_SYNC_GUEST=1` — drive the guest inline on the compositor thread, i.e.
   P5b's shape before the guest moved to its own thread. The clock P5.4's device numbers were taken
   against, and the A/B for anything that looks like a pacing regression.
@@ -4710,6 +4757,14 @@ games is on`. Host test: `make untested`.
 Under the profile:
 - `KL_OVRP_UNANSWERED=unsupported`: an OVRPlugin entry point with no answer here
   says UNSUPPORTED instead of ending the run.
+- `KL_JNI_SIGNATURES=0|1` (`runtime/jni/kl_jni_services.c`): answer
+  `PackageInfo.signatures` (GET_SIGNATURES) with one `Signature` carrying the
+  APK's own signing certificate, read from its v3 (else v2) signing block. Default
+  1 for Hot Dogs, Horseshoes & Hand Grenades 2 (`x26291709480509388`), whose Meta
+  platform start-up walks the array and threw a NullReferenceException on the
+  null it got; 0 elsewhere (the field stays null). `=1` offers it to any guest,
+  `=0` withholds it. The log line `APK signing certificate: ...` says whether the
+  block was found.
 - `KL_JNI_SOFT_UNKNOWN=1` (`runtime/kl_jni.c`): a Java method or field with no
   answer here answers zero (nothing for void, 0 / false, a null object), each
   named in the log with `...answered with zero`. Only these two lookups;
