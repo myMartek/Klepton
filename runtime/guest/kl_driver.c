@@ -1442,6 +1442,8 @@ int kl_driver_frame(void) {
     kl_mprobe_nexus_frame_budget(g_frames);
     // Ven VR Adventure's realtime shadows, taken out (self-gated on the target).
     kl_mprobe_ven_no_rt_shadows(g_frames);
+    // EXOcars' multiplayer button, switched off (self-gated on the target).
+    kl_mprobe_exocars_no_multiplayer(g_frames);
     // The texture-unit cap is set when the GfxDevice is built, so a device
     // rebuilt after begin (XR start, graphics reset) comes back at Unity's
     // default 32 and the one-shot poke silently expires — Bigscreen showed

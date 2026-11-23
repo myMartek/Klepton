@@ -46,7 +46,9 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   the exception Java throws for a backend that is not there —
   `UnsupportedOperationException`, `IllegalStateException` for
   `FirebaseApp.getInstance` — so the SDK reports it to the game instead of the
-  process stopping on the name. No Firebase feature and no voice chat; every
+  process stopping on the name. The Vivox answer also serves Onward
+  (`x2677344882310094`) and EXOcars (`x8057795767629913`). No Firebase feature
+  and no voice chat; every
   other Firebase or Vivox call still aborts by name.
 - `KL_JNI_DROP_BHAPTICS=0|1` — (`runtime/kl_jni.c`) drop the calls into
   `com/bhaptics/…` that the bHaptics table (`runtime/jni/kl_jni_haptics.c`)
@@ -976,6 +978,13 @@ The guest's own memory management, and the three seams that used to disable it.
   back to (it is built for multiview), the right eye lacked part of the
   realtime-light shadows; baked shadows are unaffected. Default 1 for
   `x3327317663977182`, else 0.
+- `KL_EXOCARS_NO_MULTIPLAYER=0|1` — (`runtime/diag/kl_mprobe.c`) EXOcars with
+  its multiplayer button switched off: the main menu's `TriggerButtonUI`
+  under `Realtime` in the `StartMenu` tree is set disabled through the game's
+  own `SwitchEnabled` and its `EventTrigger` is turned off, checked every 90
+  frames. Its hosting joins a Vivox channel named after the lobby code
+  and stops at "Creating server..." without Vivox. Logs `[exocars]`, and names
+  each other menu button once. Default 1 for `x8057795767629913`, else 0.
 - `KL_FS_REL_SDCARD=0|1` — resolve a relative path that begins with `sdcard/`
   (or another spelling of external storage) as the absolute one, as it is on a
   device where the app's working directory is `/`. AC Nexus opens its animator
@@ -4571,7 +4580,9 @@ Not from his fork, found on the way (2026-10-13):
   whatever scale the guest passes, so a game's dynamic resolution cannot ask
   for a new eye size (and new eye storage) on every step. Default 1 for
   MOTHERGUNSHIP: FORGE (`x4188843481174389`: 24 new sizes in three minutes,
-  footprint 2.4 -> 8 GB, ended by the system), else 0; that title also has
+  footprint 2.4 -> 8 GB, ended by the system) and EXOcars
+  (`x8057795767629913`: scales 1.0 / 1.5 / ~1.19, ended by the system on
+  opening Career), else 0; MOTHERGUNSHIP also has
   `KL_OVRP_EYE_DESC_CAP` on. Bulletstorm VR has the same fixed scale without a
   switch. `kl_ovrp_eye_desc_size`.
 - `KL_OVRP_EYE_ALIGN=<n>` — each axis of the eye size is rounded down to a

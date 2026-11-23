@@ -10422,7 +10422,11 @@ void kl_ovrp_eye_desc_size(float texture_scale, int *out_w, int *out_h) {
     // eye storage while the old is kept ("allocating fresh"), so the footprint climbed to 8 GB and the
     // system ended the app (headset 2026-11-03, two runs; the cap alone only stopped the sizes above 1.0).
     // One size, one allocation. KL_OVRP_FIXED_SCALE=0 gives the guest's scale back.
-    else if (kl_env_on("KL_OVRP_FIXED_SCALE", t && strcmp(t, "x4188843481174389") == 0)) texture_scale = 1.0f;
+    // EXOcars (x8057795767629913) the same: its scale goes 1.0 / 1.5 / ~1.19 between menu, tutorial and
+    // career, each a fresh 3-stage eye set with the old ones kept; opening Career took the footprint to
+    // 7.9 GB (avail 292 MB) and the system ended the app (headset 2026-11-18).
+    else if (kl_env_on("KL_OVRP_FIXED_SCALE", t && (strcmp(t, "x4188843481174389") == 0 ||
+                                                     strcmp(t, "x8057795767629913") == 0))) texture_scale = 1.0f;
     else if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
     w = (int)((float)w * texture_scale);
     h = (int)((float)h * texture_scale);

@@ -1489,9 +1489,15 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     // Gloomy Eyes (x2933720383334150) too: its episode credits queued in=249
     // and in=1467 and got two to six frames out — black, a flash of the Unity
     // logo, and none of the credits (on device, 2026-11-10).
+    // EXOcars (x8057795767629913) for the other half of this mode: a stop that
+    // ends a waiting dequeueOutputBuffer. Now and then its start froze for good
+    // at the end of the intro clip: the frame thread in a futex wait, the
+    // decoder thread still polling dequeueOutputBuffer, which a plain codec's
+    // stop never ends (headset, 2026-11-18 and 2026-11-23; the next start ran).
     c->playback_backpressure=target && (!strcmp(target,"x2249318828413747") ||
                                         !strcmp(target,"x4015163475201433") ||
-                                        !strcmp(target,"x2933720383334150"));
+                                        !strcmp(target,"x2933720383334150") ||
+                                        !strcmp(target,"x8057795767629913"));
     snprintf(c->mime, sizeof c->mime, "%s", mime ? mime : "");
     pthread_mutex_init(&c->lock, NULL);
     if (mime && !strcmp(mime, "audio/raw")) {

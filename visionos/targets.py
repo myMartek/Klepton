@@ -1405,6 +1405,13 @@ STORE_DEFAULTS = {
     # Its Unity decodes with no surface and uploads the bytes itself, like
     # Arkham Shadow's, which is the path that is served.
     "x5812519008825194": {"video": True},
+    # EXOcars (Joyway/Xocus, Unity 2022.3, Vulkan). In-game video on: the game
+    # opens with an intro clip and waits for it before loading anything else.
+    # With the Vulkan refusal (kl_mediandk.c, klm_extractor_enabled) its single
+    # AndroidVideoMedia open fails with -10002 and the game then sits at a black
+    # picture with silent audio for good: no further asset reads, every eye
+    # picture check 0% lit (device log, toolchain 925, 2026-11-18).
+    "x8057795767629913": {"video": True},
     # Marvel's Deadpool VR. Edge smoothing at 4x: the game renders 2x, its
     # settings are out of reach in an encrypted pak, and on device (Vision Pro
     # M5, 2026-10-12) 4x cost no frame time that could be told from the spread
