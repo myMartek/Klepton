@@ -28,6 +28,7 @@
 #include <sys/stat.h>
 
 #include "kl_avdec.h"
+#include "kl_webm.h"
 #include "kl_env.h"
 #include "kl_audio.h"
 
@@ -791,6 +792,9 @@ const void *kl_avdec_frame(kl_avdec *d, int *w, int *h, size_t *bytes,
 
 struct kl_avdemux {
     char        path[1024];
+    // A WebM/VP8 clip, which AVFoundation cannot open: every video call below
+    // is answered from kl_webm instead, and there is no sound track (kl_webm.c).
+    kl_webm    *webm;
     int         width, height;
     long long   duration_us;
     const char *mime;                // static "video/avc" | "video/hevc"
@@ -957,6 +961,16 @@ static int demux_start_reader(kl_avdemux *m, CMTime from) {
 
 kl_avdemux *kl_avdemux_open(const char *container, long long offset, long long size) {
     if (!container || !*container) return NULL;
+    kl_webm *webm = kl_webm_open_range(container, offset, size);
+    if (webm) {
+        kl_avdemux *m = calloc(1, sizeof *m);
+        if (!m) { kl_webm_close(webm); return NULL; }
+        snprintf(m->path, sizeof m->path, "%s", container);
+        m->webm = webm;
+        m->mime = kl_webm_mime(webm);
+        kl_webm_info(webm, &m->width, &m->height, &m->duration_us, &m->fps);
+        return m;
+    }
     char real[1024];
     if (offset > 0 || size > 0) {
         if (!slice_out(container, offset, size, real, sizeof real)) return NULL;
@@ -1025,6 +1039,7 @@ kl_avdemux *kl_avdemux_open(const char *container, long long offset, long long s
 
 void kl_avdemux_close(kl_avdemux *m) {
     if (!m) return;
+    kl_webm_close(m->webm);
     if (m->out)    CFBridgingRelease(m->out);
     if (m->reader) CFBridgingRelease(m->reader);
     if (m->track)  CFBridgingRelease(m->track);
@@ -1050,26 +1065,31 @@ int kl_avdemux_info(kl_avdemux *m, int *w, int *h, const char **mime, long long 
 }
 
 long long kl_avdemux_sample_time_us(kl_avdemux *m) {
+    if (m && m->webm) return kl_webm_time_us(m->webm);
     return (m && !m->eos) ? m->cur_pts_us : -1;
 }
 
 int kl_avdemux_sample_keyframe(kl_avdemux *m) {
+    if (m && m->webm) return kl_webm_keyframe(m->webm);
     return (m && !m->eos) ? m->cur_key : 0;
 }
 
 long kl_avdemux_read(kl_avdemux *m, unsigned char *buf, unsigned long cap) {
+    if (m && m->webm) return kl_webm_read(m->webm, buf, cap);
     if (!m || m->eos || !m->cur) return -1;
     if (buf && cap) memcpy(buf, m->cur, m->cur_len < cap ? m->cur_len : cap);
     return (long)m->cur_len;          // full size, AMediaExtractor convention
 }
 
 int kl_avdemux_advance(kl_avdemux *m) {
+    if (m && m->webm) return kl_webm_advance(m->webm);
     if (!m || m->eos) return 0;
     demux_pull(m);
     return m->eos ? 0 : 1;
 }
 
 int kl_avdemux_seek_us(kl_avdemux *m, long long us) {
+    if (m && m->webm) return kl_webm_seek_us(m->webm, us);
     if (!m) return 0;
     m->eos = 0;
     if (!demux_start_reader(m, CMTimeMake(us, 1000000))) return 0;

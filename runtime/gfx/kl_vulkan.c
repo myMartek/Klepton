@@ -287,11 +287,14 @@ static void vk_init(void) {
     // (on a Quest the two agree). Fast math off made it clean on the
     // headset (2026-10-18, MVK_CONFIG_FAST_MATH_ENABLED=0 at launch) with the
     // GPU wait per frame unchanged (7-8 ms mean either way). LEGO-gated,
-    // env-overridable (KL_MVK_NO_FAST_MATH).
+    // env-overridable (KL_MVK_NO_FAST_MATH). Mixture (x4691626700899382) too:
+    // before a character is picked the player's hands showed wandering lines
+    // and triangles across them (owner on the headset, 2026-11-18).
     {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        int def = (t && strcmp(t, "x6521909757843713") == 0) ? 1 : 0;
+        int def = (t && (strcmp(t, "x6521909757843713") == 0 ||
+                         strcmp(t, "x4691626700899382") == 0)) ? 1 : 0;
         if (kl_env_on("KL_MVK_NO_FAST_MATH", def)) {
             setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);   // 0 = NEVER
             VKI("Metal shaders without fast math (KL_MVK_NO_FAST_MATH)\n");
@@ -4541,12 +4544,40 @@ static int klvk_ml_lazy_type(VkDevice dev, uint32_t bits) {
     return -1;
 }
 
+// KL_VK_D24_AS_D32=0|1: serve VK_FORMAT_D24_UNORM_S8_UINT as D32_SFLOAT_S8_UINT.
+// Apple GPUs have no 24-bit depth with stencil, so MoltenVK reports D24S8 with
+// no features — and a Unity RenderTexture whose import settings ask for D24S8
+// with the fallback switched off is then never created: Mixture
+// (x4691626700899382) logged "RenderTexture.Create failed: depth/stencil format
+// unsupported - D24 UNorm S8 UInt (92)" about 90 times a second for half a
+// minute of its tutorial, while the player's hands showed grey moving clouds
+// instead of themselves (device log and owner on the headset, 2026-11-18).
+// With this the format queries answer for D32S8 and every image, view and
+// render-pass attachment made with D24S8 is made with D32S8: more depth
+// precision, the same stencil, the same clear values. Default on for Mixture.
+static int klvk_d24_as_d32(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_VK_D24_AS_D32", t && !strcmp(t, "x4691626700899382"));
+        if (on) fprintf(stderr, "  [vk] D24_UNORM_S8_UINT is served as D32_SFLOAT_S8_UINT\n");
+    }
+    return on;
+}
+static inline VkFormat klvk_d24_fmt(VkFormat f) {
+    return (f == VK_FORMAT_D24_UNORM_S8_UINT && klvk_d24_as_d32()) ? VK_FORMAT_D32_SFLOAT_S8_UINT : f;
+}
+
 static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInfo *ci,
         const VkAllocationCallbacks *alloc, VkImage *out) {
     KFE(KFE_IMG_NEW);
     static PFN_vkCreateImage real;
     if (!real && real_gdpa) real = (PFN_vkCreateImage)real_gdpa(dev, "vkCreateImage");
     if (!real) return VK_ERROR_INITIALIZATION_FAILED;
+    VkImageCreateInfo d24ci;
+    if (ci && klvk_d24_fmt(ci->format) != ci->format) {
+        d24ci = *ci; d24ci.format = klvk_d24_fmt(ci->format); ci = &d24ci;
+    }
     int did_astc_sub = 0;
     VkImageCreateInfo mod;
     // KL_VK_MSAA_MEMORYLESS: a large multisampled depth target becomes a
@@ -4938,6 +4969,10 @@ static VkResult VKAPI_CALL klvk_CreateImageView(VkDevice dev,
     static PFN_vkCreateImageView real;
     if (!real && real_gdpa)
         real = (PFN_vkCreateImageView)real_gdpa(dev, "vkCreateImageView");
+    VkImageViewCreateInfo d24vi;
+    if (ci && klvk_d24_fmt(ci->format) != ci->format) {
+        d24vi = *ci; d24vi.format = klvk_d24_fmt(ci->format); ci = &d24vi;
+    }
     if (ci) {
         static int logged;
         if (logged < 4096) {   // high enough to capture the crashing view
@@ -7196,6 +7231,18 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
         VkRenderPass *out) {
     static PFN_vkCreateRenderPass real;
     if (!real && real_gdpa) real = (PFN_vkCreateRenderPass)real_gdpa(dev, "vkCreateRenderPass");
+    VkAttachmentDescription *d24a = NULL;           // KL_VK_D24_AS_D32, on a copy
+    VkRenderPassCreateInfo d24rp;
+    for (uint32_t i = 0; ci && i < ci->attachmentCount; i++) {
+        if (klvk_d24_fmt(ci->pAttachments[i].format) == ci->pAttachments[i].format) continue;
+        if (!d24a) {
+            d24a = malloc(ci->attachmentCount * sizeof *d24a);
+            if (!d24a) break;
+            memcpy(d24a, ci->pAttachments, ci->attachmentCount * sizeof *d24a);
+        }
+        d24a[i].format = klvk_d24_fmt(d24a[i].format);
+    }
+    if (d24a) { d24rp = *ci; d24rp.pAttachments = d24a; ci = &d24rp; }
     // KL_VK_FORCE_SAMPLES, on a copy (see klvk_raise_samples).
     VkAttachmentDescription *raised = NULL;
     VkRenderPassCreateInfo rci;
@@ -7245,6 +7292,7 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass(VkDevice dev,
         klvk_rp_note((uint64_t)(uintptr_t)*out, ci->subpassCount, depth);
     }
     free(raised);
+    free(d24a);
     if (r == VK_SUCCESS && out) fove_rp_note1(ci, *out);   // foveation: the eye-pass check reads it
     return r;
 }
@@ -7257,6 +7305,18 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
         real = (PFN_vkCreateRenderPass2)real_gdpa(dev, "vkCreateRenderPass2");
         if (!real) real = (PFN_vkCreateRenderPass2)real_gdpa(dev, "vkCreateRenderPass2KHR");
     }
+    VkAttachmentDescription2 *d24a = NULL;          // KL_VK_D24_AS_D32, on a copy
+    VkRenderPassCreateInfo2 d24rp;
+    for (uint32_t i = 0; ci && i < ci->attachmentCount; i++) {
+        if (klvk_d24_fmt(ci->pAttachments[i].format) == ci->pAttachments[i].format) continue;
+        if (!d24a) {
+            d24a = malloc(ci->attachmentCount * sizeof *d24a);
+            if (!d24a) break;
+            memcpy(d24a, ci->pAttachments, ci->attachmentCount * sizeof *d24a);
+        }
+        d24a[i].format = klvk_d24_fmt(d24a[i].format);
+    }
+    if (d24a) { d24rp = *ci; d24rp.pAttachments = d24a; ci = &d24rp; }
     // Force STORE on every MSAA resolve target. UE5 (wanderer) resolves its
     // multiview scene colour into the eye image but marks that resolve attachment
     // storeOp=DONT_CARE — legal on a Quest tiler where the resolve write survives,
@@ -7368,6 +7428,7 @@ static VkResult VKAPI_CALL klvk_CreateRenderPass2(VkDevice dev,
     }
     if (r == VK_SUCCESS && out) fove_rp_note2(guest_ci, *out);
     free(atts);
+    free(d24a);
     return r;
 }
 static void VKAPI_CALL klvk_DestroyRenderPass(VkDevice dev, uint64_t rp, const VkAllocationCallbacks *alloc) {
@@ -7888,6 +7949,7 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties(
     if (!real && real_gipa) real = (PFN_vkGetPhysicalDeviceImageFormatProperties)
         real_gipa(g_instance, "vkGetPhysicalDeviceImageFormatProperties");
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceImageFormatProperties");
+    fmt = klvk_d24_fmt(fmt);
     VkResult r = real ? real(pd, fmt, type, tiling, usage, flags, out)
                       : VK_ERROR_FORMAT_NOT_SUPPORTED;
     if (r == VK_SUCCESS && out) out->sampleCounts &= klvk_sample_mask();
@@ -8202,7 +8264,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceFormatProperties(
     if (!t) { t = 1; if (real_gipa) real = (PFN_vkGetPhysicalDeviceFormatProperties)
         real_gipa(g_instance, "vkGetPhysicalDeviceFormatProperties"); }
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceFormatProperties");
-    if (real) real(pd, fmt, p);
+    if (real) real(pd, klvk_d24_fmt(fmt), p);
     klvk_astc_patch_features(fmt, p);
 }
 static void VKAPI_CALL klvk_GetPhysicalDeviceFormatProperties2(
@@ -8214,7 +8276,7 @@ static void VKAPI_CALL klvk_GetPhysicalDeviceFormatProperties2(
         if (!real) real = (PFN_vkGetPhysicalDeviceFormatProperties2)
             real_gipa(g_instance, "vkGetPhysicalDeviceFormatProperties2KHR"); } }
     pd = KLVK_PHYS_OR_SUB(pd, "GetPhysicalDeviceFormatProperties2");
-    if (real) real(pd, fmt, p);
+    if (real) real(pd, klvk_d24_fmt(fmt), p);
     if (p) klvk_astc_patch_features(fmt, &p->formatProperties);
 }
 // The two device-enumeration queries Unity runs while VALIDATING a physical
@@ -8284,6 +8346,10 @@ static VkResult VKAPI_CALL klvk_GetPhysicalDeviceImageFormatProperties2(
             real_gipa(g_instance, "vkGetPhysicalDeviceImageFormatProperties2");
         if (!real) real = (PFN_vkGetPhysicalDeviceImageFormatProperties2)
             real_gipa(g_instance, "vkGetPhysicalDeviceImageFormatProperties2KHR");
+    }
+    VkPhysicalDeviceImageFormatInfo2 d24info;
+    if (info && klvk_d24_fmt(info->format) != info->format) {
+        d24info = *info; d24info.format = klvk_d24_fmt(info->format); info = &d24info;
     }
     VkResult r = real ? real(pd, info, props) : VK_ERROR_FORMAT_NOT_SUPPORTED;
     if (r == VK_SUCCESS && props) props->imageFormatProperties.sampleCounts &= klvk_sample_mask();

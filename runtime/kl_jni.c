@@ -209,14 +209,18 @@ static void klj_forget_writes(void *obj);
         }
     }
     if (!o) {
-        if (g_nobjects == KLJ_MAX_OBJECTS) { KLJ_LOG("object pool exhausted"); kl_fatal_prepare(); abort(); }
+        if (g_nobjects == KLJ_MAX_OBJECTS) {
+            KLJ_LOG("object pool exhausted");
+            kl_jni_report(stderr);   // the live-by-class census says what leaked
+            kl_fatal_prepare(); abort();
+        }
         o = &g_objects[g_nobjects++];
     } else {
         // The old payload dies here, after the quarantine, not at retire.
         if (o->destroy) { o->destroy(o->data); g_stat_freed++; }
         klj_forget_writes(o);
     }
-    *o = (klj_object){KLJ_OBJ_MAGIC, 0, cls, data, NULL};
+    *o = (klj_object){KLJ_OBJ_MAGIC, 0, cls, data, NULL, 0};
     g_stat_alloc++;
     klj_frame_record(o);
     return o;
@@ -350,6 +354,44 @@ void kl_jni_pin_object(void *obj) {
     pthread_mutex_lock(&g_lock);
     klj_object *o = klj_as_object(obj);
     if (o) o->pinned++;
+    pthread_mutex_unlock(&g_lock);
+}
+
+// KL_JNI_RECLAIM_DEAD=0|1: give back the slots of objects the guest has
+// finished with. A JNIBridge proxy is pinned by newInterfaceProxy, and a
+// SurfaceTexture by its constructor, and neither pin was ever dropped — so a
+// guest that makes them in a loop walks the pool to "object pool exhausted".
+// Mixture (x4691626700899382) does: its VideoPlayers retry a WebM/VP8 clip we
+// cannot open every frame, each attempt making SurfaceTexture listener proxies
+// (50,058 in a 14-minute run, device log 2026-11-17), and aborts. With this on,
+// disableInterfaceProxy and SurfaceTexture.release drop the host's pin and the
+// object retires once no global ref is left — through the usual quarantine, so
+// a late use still finds dead memory rather than another object. Default on for
+// Mixture alone.
+static int klj_reclaim_dead(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_JNI_RECLAIM_DEAD", t && strcmp(t, "x4691626700899382") == 0);
+    }
+    return on;
+}
+static void klj_unpin_locked(klj_object *o) {
+    if (o->pinned) o->pinned--;
+    if (!o->pinned && o->dead) klj_retire_object_locked(o);
+}
+void kl_jni_release_dead(void *obj) {
+    if (!klj_reclaim_dead()) return;
+    pthread_mutex_lock(&g_lock);
+    klj_object *o = klj_as_object(obj);
+    if (o && !o->dead) { o->dead = 1; klj_unpin_locked(o); }
+    pthread_mutex_unlock(&g_lock);
+}
+void kl_jni_unpin_object(void *obj) {
+    if (!klj_reclaim_dead()) return;
+    pthread_mutex_lock(&g_lock);
+    klj_object *o = klj_as_object(obj);
+    if (o) klj_unpin_locked(o);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -837,6 +879,12 @@ static void *klj_NewGlobalRef(void *env, void *obj) {
 static void  klj_DeleteGlobalRef(void *env, void *obj) {
     (void)env;
     klj_object *o = klj_as_object(obj);
+    if (o && o->dead) {             // only ever set by kl_jni_release_dead
+        pthread_mutex_lock(&g_lock);
+        if (klj_as_object(obj)) klj_unpin_locked(o);
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
     if (o && o->pinned) o->pinned--;
 }
 static void  klj_ref_release(void *env, void *obj)        { (void)env; (void)obj; }

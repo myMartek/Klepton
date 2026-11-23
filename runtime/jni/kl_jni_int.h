@@ -48,6 +48,10 @@ typedef struct klj_object {
     // its thread's Looper are one klj_looper), and a class-keyed destructor would
     // double-free exactly those. An object with no destructor leaks its payload.
     void      (*destroy)(void *data);
+    // The guest is done with it (a disabled JNIBridge proxy, a released
+    // SurfaceTexture): when the last global ref goes, it is retired instead of
+    // sitting pinned at zero refs forever. See kl_jni_release_dead.
+    int         dead;
 } klj_object;
 
 typedef struct { char name[224]; klj_object *as_object; } klj_class;
