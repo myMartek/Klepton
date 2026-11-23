@@ -5209,9 +5209,13 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // with its eye layer, then three quads alone (layers 2-4, a 4096x4096 at
     // 600 m and two 256x256 at 150 m) from the next frame on while it loads,
     // and the picture flickered (2026-10-20).
-    //   default 1 for x5767635983306831, wrath2, x24882487241367228 and
-    //   x6605328856182465, else 0 (every other OVRPlugin guest is left with the
-    //   eye pass always on, as before)
+    // Wallace & Gromit in The Grand Getaway (x6744365485575791, UE 4.27,
+    // Vulkan): its loading screens are quads alone (a 2048x2048 at 1000 m and
+    // a 32x32 one), "eye stage NOT observed", and the picture flickered with
+    // the two eyes not matching while a scene loaded (2026-11-23).
+    //   default 1 for x5767635983306831, wrath2, x24882487241367228,
+    //   x6605328856182465 and x6744365485575791, else 0 (every other OVRPlugin
+    //   guest is left with the eye pass always on, as before)
     static int eyeless = -1;
     if (eyeless < 0) {
         extern const char *kl_driver_target_name(void);
@@ -5219,7 +5223,8 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         eyeless = kl_env_on("KL_OVRP_EYELESS_FRAMES",
                             t && (!strcmp(t, "x5767635983306831") || !strcmp(t, "wrath2") ||
                                   !strcmp(t, "x24882487241367228") ||
-                                  !strcmp(t, "x6605328856182465")));
+                                  !strcmp(t, "x6605328856182465") ||
+                                  !strcmp(t, "x6744365485575791")));
     }
     if (eyeless && layer_submits && layer_submit_count > 0) {
         kl_ovrp_eye_layer_external(named >= 0);

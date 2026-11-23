@@ -1888,9 +1888,11 @@ puts the camera on the ground with its hands underneath it.
   frame counter under the last eye viewport, at the different sizes its
   dynamic resolution had left them. Into The Radius 2
   (`x6605328856182465`, Vulkan) submits three quads alone from its second
-  frame on while it loads, and its picture flickered. Default 1 for
-  `x5767635983306831`, `wrath2`, `x24882487241367228` and
-  `x6605328856182465`, else 0. While the eye pass is off this way the compositor draws black behind
+  frame on while it loads, and its picture flickered. Wallace & Gromit in The
+  Grand Getaway (`x6744365485575791`, UE 4.27, Vulkan) shows only quads while a
+  scene loads, and there the picture flickered and the eyes did not match.
+  Default 1 for `x5767635983306831`, `wrath2`, `x24882487241367228`,
+  `x6605328856182465` and `x6744365485575791`, else 0. While the eye pass is off this way the compositor draws black behind
   the frame's quads (a mixed space shows the room wherever no depth was
   written).
 - `KL_OVRP_GL_EYE_FENCE=0|1` — a GL guest's `ovrp_EndFrame4` with an eye layer
