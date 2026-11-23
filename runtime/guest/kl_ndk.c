@@ -27,6 +27,7 @@
 #include "kl_openxr.h"   // the XR surface-swapchain seam, for ANativeWindow_fromSurface
 #include "kl_ovrp.h"
 #include "kl_extension.h"
+#include "klepton.h"      // kl_shim_lookup (JNI_GetCreatedJavaVMs)
 #include "kl_driver.h"    // DeoVR's own NDK answers (g_ndk_deovr)
 #include "kl_mediandk.h"  // AHardwareBuffer_describe
 
@@ -1206,8 +1207,28 @@ int kl_ndk_is_handle(const void *h) { return h == (const void *)g_ndk_handle; }
 // before using it). A NULL is how a prober learns the answer. Unlike the AAudio
 // door there is no named stub here, because kl_ndk_lookup's table IS the list of
 // what this tree implements — a name outside it has no handler to name.
+// JNI_GetCreatedJavaVMs through this handle. bionic's dlsym on a handle searches
+// the library AND its dependencies, and libandroid.so on a device pulls in the
+// runtime that exports the JNI invocation API — so the name resolves there.
+// Meta's Avatar SDK 2 (libovravatar2) reaches the VM exactly this way: it
+// dlopen()s "libandroid.so" and dlsyms JNI_GetCreatedJavaVMs out of it. NULL
+// left it with "SystemAndroid::no jni", no AAssetManager, its
+// Oculus/OvrAvatar2Assets.zip unloaded, and a NULL deref on a worker thread
+// moments later (libovravatar2.so+0x255ea4) that ends the app on a black screen.
+// Rooms of Realities (x9310428738998196), 2026-11-23. KL_NDK_JNI_VM=0|1.
+static void *kl_ndk_jni_vm_sym(const char *name) {
+    if (!name || strcmp(name, "JNI_GetCreatedJavaVMs") != 0) return NULL;
+    const char *t = kl_driver_target_name();
+    if (!kl_env_on("KL_NDK_JNI_VM", t && strcmp(t, "x9310428738998196") == 0)) return NULL;
+    void *fn = kl_shim_lookup(name);
+    fprintf(stderr, "  [ndk] dlsym(libandroid.so, \"JNI_GetCreatedJavaVMs\") -> %s (the process's JavaVM)\n",
+            fn ? "served" : "NULL");
+    return fn;
+}
+
 void *kl_ndk_sym(const char *name) {
     void *fn = name ? kl_ndk_lookup(name) : NULL;
+    if (!fn) fn = kl_ndk_jni_vm_sym(name);
     // The synthetic handle short-circuits klb_dlsym before its own tracer runs,
     // so KL_TRACE_DLSYM would otherwise show the dlopen and nothing after it.
     if (kl_env_on("KL_TRACE_DLSYM", 0))

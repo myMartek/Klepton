@@ -790,6 +790,181 @@ static const char *kl_inet_ntop(int af, const void *src, char *dst, socklen_t si
     return inet_ntop(af, src, dst, size);
 }
 
+// ---------- NETLINK_ROUTE address dump (KL_NET_NETLINK_ROUTE) ----------
+// WebRTC carries its own getifaddrs for Android (rtc_base/ifaddrs_android.cc,
+// rtc::getifaddrs): it opens an AF_NETLINK/NETLINK_ROUTE socket, send()s one
+// RTM_GETADDR request (nlmsghdr + ifaddrmsg, 24 bytes) and recv()s RTM_NEWADDR
+// messages until NLMSG_DONE; for each address it then asks if_indextoname and
+// ioctl(SIOCGIFFLAGS). On the plain AF_UNIX stand-in below that send fails
+// EDESTADDRREQ, so the interface list is EMPTY: no network, no ICE candidate,
+// and a WebRTC peer connection that never comes up. Rooms of Realities'
+// multiplayer (Normcore, libRealtimeClient) stopped right there: the matcher and
+// the cluster pings worked, then 20 failed netlink sends and no room (headset,
+// 2026-11-23).
+//
+// With the switch on, the stand-in is one end of an AF_UNIX datagram socketpair.
+// An RTM_GETADDR sent to it is answered on the other end with the host's own
+// addresses (Darwin getifaddrs) in Linux netlink form, so the guest's recv,
+// recvfrom, recvmsg, poll, select and epoll all see an ordinary readable socket.
+// Any other request is answered with NLMSG_DONE alone (an empty dump). Interface
+// indices are Darwin's (if_nametoindex), which is what the forwarded
+// if_indextoname reads back. KL_NET_NETLINK_ROUTE=0|1, default 1 for
+// x9310428738998196, else 0; kl_ioctl's SIOCGIFFLAGS follows the same switch.
+int kl_net_netlink_route(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_NET_NETLINK_ROUTE", t && strcmp(t, "x9310428738998196") == 0);
+    }
+    return on;
+}
+
+#define KL_NL_MAX 16
+typedef struct { int fd, peer; } kl_nl_sock;
+static kl_nl_sock      g_nl[KL_NL_MAX];
+static pthread_mutex_t g_nl_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// The guest's close() of its end (klb_close) releases the slot and our peer.
+// An fd number is the only identity: fstat on a socket does not tell two apart
+// on the headset (the first version keyed on st_dev/st_ino and never matched).
+void kl_nl_forget(int fd) {
+    if (fd < 0 || !kl_net_netlink_route()) return;
+    pthread_mutex_lock(&g_nl_mu);
+    for (int i = 0; i < KL_NL_MAX; i++)
+        if (g_nl[i].peer > 0 && g_nl[i].fd == fd) {
+            close(g_nl[i].peer);
+            g_nl[i].peer = 0;
+            g_nl[i].fd = -1;
+        }
+    pthread_mutex_unlock(&g_nl_mu);
+}
+static int kl_nl_open(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) return -1;
+    int big = 256 * 1024;
+    setsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &big, sizeof big);
+    setsockopt(sv[1], SOL_SOCKET, SO_SNDBUF, &big, sizeof big);
+    fcntl(sv[1], F_SETFL, fcntl(sv[1], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+    kl_nl_forget(sv[0]);                  // a stale slot for this number, if any
+    pthread_mutex_lock(&g_nl_mu);
+    int slot = -1;
+    for (int i = 0; i < KL_NL_MAX && slot < 0; i++)
+        if (g_nl[i].peer <= 0) slot = i;
+    if (slot >= 0) g_nl[slot] = (kl_nl_sock){ sv[0], sv[1] };
+    pthread_mutex_unlock(&g_nl_mu);
+    if (slot < 0) {                       // all 16 held open by the guest
+        fprintf(stderr, "  [net] netlink: all %d synthetic sockets in use; this one answers nothing\n",
+                KL_NL_MAX);
+        close(sv[1]);
+    }
+    return sv[0];
+}
+static int kl_nl_peer(int fd) {
+    int peer = -1;
+    pthread_mutex_lock(&g_nl_mu);
+    for (int i = 0; i < KL_NL_MAX; i++)
+        if (g_nl[i].peer > 0 && g_nl[i].fd == fd) { peer = g_nl[i].peer; break; }
+    pthread_mutex_unlock(&g_nl_mu);
+    return peer;
+}
+
+static size_t kl_nl_put_attr(uint8_t *p, uint16_t type, const void *data, size_t len) {
+    uint16_t alen = (uint16_t)(4 + len);
+    memcpy(p, &alen, 2);
+    memcpy(p + 2, &type, 2);
+    memcpy(p + 4, data, len);
+    size_t padded = (alen + 3u) & ~3u;
+    memset(p + alen, 0, padded - alen);
+    return padded;
+}
+static unsigned kl_nl_prefix(const struct sockaddr *mask) {
+    if (!mask) return 0;
+    const uint8_t *b; size_t n;
+    if (mask->sa_family == AF_INET)       { b = (const uint8_t *)&((const struct sockaddr_in *)mask)->sin_addr;   n = 4;  }
+    else if (mask->sa_family == AF_INET6) { b = (const uint8_t *)&((const struct sockaddr_in6 *)mask)->sin6_addr; n = 16; }
+    else return 0;
+    unsigned bits = 0;
+    for (size_t i = 0; i < n; i++) bits += (unsigned)__builtin_popcount(b[i]);
+    return bits;
+}
+
+// Answer one netlink request on `peer`. Messages go out in datagrams of at most
+// 1 KB (Darwin's AF_UNIX datagram ceiling is 2 KB), each holding whole messages.
+static void kl_nl_answer(int peer, uint16_t type, uint32_t seq) {
+    uint8_t dgram[1024];
+    size_t used = 0;
+    int naddr = 0;
+    struct ifaddrs *ifa = NULL;
+    if (type == 22 /* RTM_GETADDR */ && getifaddrs(&ifa) != 0) ifa = NULL;
+    for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
+        if (!p->ifa_addr || !p->ifa_name) continue;
+        int fam = p->ifa_addr->sa_family;
+        if (fam != AF_INET && fam != AF_INET6) continue;
+        uint8_t addr[16];
+        size_t alen;
+        uint8_t scope = 0;                                  // RT_SCOPE_UNIVERSE
+        if (fam == AF_INET) {
+            memcpy(addr, &((struct sockaddr_in *)p->ifa_addr)->sin_addr, 4); alen = 4;
+            if (addr[0] == 127) scope = 254;                // RT_SCOPE_HOST
+        } else {
+            memcpy(addr, &((struct sockaddr_in6 *)p->ifa_addr)->sin6_addr, 16); alen = 16;
+            if (addr[0] == 0xfe && (addr[1] & 0xc0) == 0x80) {
+                addr[2] = addr[3] = 0;   // Darwin embeds the scope in a link-local address
+                scope = 253;                                // RT_SCOPE_LINK
+            } else if (IN6_IS_ADDR_LOOPBACK((struct in6_addr *)addr)) scope = 254;
+        }
+        uint8_t msg[128];
+        size_t off = 16;
+        msg[off + 0] = fam == AF_INET ? 2 : 10;              // bionic family
+        msg[off + 1] = (uint8_t)kl_nl_prefix(p->ifa_netmask);
+        msg[off + 2] = 0x80;                                // IFA_F_PERMANENT
+        msg[off + 3] = scope;
+        uint32_t idx = if_nametoindex(p->ifa_name);
+        memcpy(msg + off + 4, &idx, 4);
+        off += 8;
+        off += kl_nl_put_attr(msg + off, 1 /* IFA_ADDRESS */, addr, alen);
+        if (fam == AF_INET) off += kl_nl_put_attr(msg + off, 2 /* IFA_LOCAL */, addr, alen);
+        size_t nlen = strnlen(p->ifa_name, 15);
+        char label[16] = {0};
+        memcpy(label, p->ifa_name, nlen);
+        off += kl_nl_put_attr(msg + off, 3 /* IFA_LABEL */, label, nlen + 1);
+        uint32_t len32 = (uint32_t)off, pid = 0;
+        uint16_t mtype = 20 /* RTM_NEWADDR */, mflags = 2 /* NLM_F_MULTI */;
+        memcpy(msg + 0, &len32, 4); memcpy(msg + 4, &mtype, 2); memcpy(msg + 6, &mflags, 2);
+        memcpy(msg + 8, &seq, 4);   memcpy(msg + 12, &pid, 4);
+        if (used + off > sizeof dgram) { send(peer, dgram, used, 0); used = 0; }
+        memcpy(dgram + used, msg, off);
+        used += off;
+        naddr++;
+    }
+    if (ifa) freeifaddrs(ifa);
+    // NLMSG_DONE: header + the int error field (0).
+    uint8_t done[20] = {0};
+    uint32_t dlen = 20; uint16_t dtype = 3 /* NLMSG_DONE */, dflags = 2;
+    memcpy(done + 0, &dlen, 4); memcpy(done + 4, &dtype, 2); memcpy(done + 6, &dflags, 2);
+    memcpy(done + 8, &seq, 4);
+    if (used + sizeof done > sizeof dgram) { send(peer, dgram, used, 0); used = 0; }
+    memcpy(dgram + used, done, sizeof done);
+    used += sizeof done;
+    send(peer, dgram, used, 0);
+    fprintf(stderr, "  [net] netlink request type %u -> %d address(es) + NLMSG_DONE "
+                    "(KL_NET_NETLINK_ROUTE)\n", (unsigned)type, naddr);
+}
+// A send to a synthetic netlink socket. Returns 1 and sets *out when handled.
+static int kl_nl_send(int fd, const void *buf, size_t n, ssize_t *out) {
+    if (!kl_net_netlink_route() || !buf || n < 16) return 0;
+    int peer = kl_nl_peer(fd);
+    if (peer < 0) return 0;
+    uint32_t len; uint16_t type; uint32_t seq;
+    memcpy(&len, buf, 4); memcpy(&type, (const uint8_t *)buf + 4, 2);
+    memcpy(&seq, (const uint8_t *)buf + 8, 4);
+    kl_nl_answer(peer, type, seq);
+    *out = (ssize_t)n;
+    return 1;
+}
+
 static int kl_socket(int domain, int type, int protocol) {
     // bionic AF_INET6=10 -> Darwin 30; SOCK_* types agree.
     if (domain == 10) domain = AF_INET6;
@@ -810,7 +985,8 @@ static int kl_socket(int domain, int type, int protocol) {
     // not change under us. kl_bind no-ops the sockaddr_nl bind that Darwin would
     // otherwise reject.
     if (domain == 16) {
-        int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+        // KL_NET_NETLINK_ROUTE: a socketpair end that answers RTM_GETADDR (above).
+        int fd = kl_net_netlink_route() ? kl_nl_open() : socket(AF_UNIX, SOCK_DGRAM, 0);
         if (kl_net_trace())
             fprintf(stderr, "  [net] socket(AF_NETLINK) -> synthetic fd %d "
                             "(interface scan uses getifaddrs, not this socket)\n", fd);
@@ -1441,6 +1617,7 @@ static void kl_sendmsg_fanout(int fd, struct msghdr *h, int dflags) {
 
 static ssize_t kl_sendto(int fd, const void *buf, size_t n, int flags,
                          const struct sockaddr *sa, socklen_t len) {
+    { ssize_t nr; if (kl_nl_send(fd, buf, n, &nr)) return nr; }
     struct sockaddr_storage hs;
     char host[80] = "-";
     if (sa && kl_sa_to_host(&hs, sa, len) == 0) {
@@ -1481,6 +1658,7 @@ static ssize_t kl_sendto(int fd, const void *buf, size_t n, int flags,
 // write is send(..., MSG_NOSIGNAL) on Linux, which arrived here as Darwin's
 // MSG_RCVMORE.
 static ssize_t kl_send(int fd, const void *buf, size_t n, int flags) {
+    { ssize_t nr; if (kl_nl_send(fd, buf, n, &nr)) return nr; }
     int nosig = 0, dflags = kl_msg_flags(flags, &nosig);
     if (nosig) kl_no_sigpipe(fd);
     ssize_t r = send(fd, buf, n, dflags);

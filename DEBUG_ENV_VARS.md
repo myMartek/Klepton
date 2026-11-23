@@ -746,6 +746,14 @@ answers GL and kl_glfb never initializes.
   a truncated sweep says how many addresses it dropped — a sweep that quietly
   covers half a /22 finds the machines at the bottom of the range and not the
   ones above them).
+- `KL_NET_NETLINK_ROUTE=0|1` — the synthetic `AF_NETLINK` socket answers an
+  `RTM_GETADDR` dump with the host's addresses (from Darwin `getifaddrs`, in
+  Linux netlink form, Darwin interface indices) and any other request with an
+  empty dump; `ioctl(SIOCGIFFLAGS)` is translated too. WebRTC's own Android
+  `getifaddrs` (`rtc_base/ifaddrs_android.cc`) enumerates interfaces exactly
+  this way; without it the list is empty and no peer connection comes up.
+  Default 1 for `x9310428738998196` (Rooms of Realities: Normcore multiplayer
+  could not create or join a room), else 0.
 - `KL_NET_DGRAM_NOSIGPIPE=0` — stop setting `SO_NOSIGPIPE` on the guest's
   non-stream (datagram/raw) sockets. Default ON: Linux never raises SIGPIPE for
   a datagram send, Darwin does on EPIPE, and the guest's SIGPIPE handler
@@ -1081,6 +1089,12 @@ The guest's own memory management, and the three seams that used to disable it.
   `LibRuntimeOptimizer` it ships) and `x9449316705178989` (DreamSpace, Meta's
   `libmrutilitykitshared`), else 0 — a title that works may ship an
   optional library it has been running without.
+- `KL_NDK_JNI_VM=0|1` — (`runtime/guest/kl_ndk.c`) `dlsym` on the synthetic
+  `libandroid.so` handle also answers `JNI_GetCreatedJavaVMs` with the
+  process's JavaVM, as bionic does by searching the library's dependencies.
+  Meta's Avatar SDK 2 (`libovravatar2`) finds the VM this way; without it the
+  SDK has no JNI, no asset manager, and faults on a worker thread. Default 1
+  for `x9310428738998196` (Rooms of Realities), else 0.
 - `KL_MADV_DONTNEED=remap|reusable|zero|passthrough` — how a guest
   `madvise(MADV_DONTNEED)` is served. Default `remap`. **`MADV_DONTNEED` is 4 on
   Linux and Darwin and means different things**: Linux frees the pages, Darwin
