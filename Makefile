@@ -1328,6 +1328,9 @@ check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load buil
 	@test -f $(LIBS)/libil2cpp.so || { echo "check needs the guest it tests: $(LIBS)/libil2cpp.so is not here."; \
 	  echo "  Unpack $(TARGET) into this working copy (see BUILDING.md), link or clone the tree from another one,"; \
 	  echo "  or name a guest that is here: make check TARGET=<name>"; exit 1; }
+	@# The Minecraft app (target vivecraft) has its own typecheck, outside xros on purpose (see swiftcheck-macho).
+	@# It is run here so a release check catches a shared view it still uses being renamed (avp-play #141).
+	@$(MAKE) --no-print-directory swiftcheck-macho
 	@./build/t_surreal
 	@echo "=== variadic ABI ===" && ./build/t_variadic
 	@./build/t_x18race > build/x18race.log 2>&1 || { cat build/x18race.log; exit 1; }
