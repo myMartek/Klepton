@@ -10187,10 +10187,48 @@ static uint64_t klovrp_SetColorScaleAndOffset(klovrp_vec4 scale, klovrp_vec4 off
 // and no guest has been seen to need them. Said once, where a submit carries
 // values that are not the identity, so that the game that does need them names
 // itself in a log.
+//
+// Wraith: The Oblivion - Afterlife (x2562090053828017, UE 4.25.4 Oculus branch)
+// does need them. Its scene changes fade through UTheLibrarianBlueprintLibrary::
+// ApplyColorScale -> UOculusFunctionLibrary::SetColorScaleAndOffset(.., false),
+// which never reaches ovrp_SetColorScaleAndOffset: FOculusHMD keeps the values
+// in its settings and FLayer::UpdateLayer_RHIThread writes them into the EYE
+// layer's submit (layer id 0) at +0x48/+0x58, every frame, with no override
+// flag in that build. Dropped, the level being built behind the fade showed —
+// "pictures of a scene that was not shown yet" while it changed scene, which a
+// Quest does not show (2026-11-23). For such a guest the eye submit's values
+// are applied as they come. KL_OVRP_SUBMIT_COLOR=1/0 forces it either way;
+// default 1 for x2562090053828017, else 0.
+static int klovrp_submit_color_wanted(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_OVRP_SUBMIT_COLOR", t && !strcmp(t, "x2562090053828017")) &&
+             kl_env_on("KL_OVRP_COLOR_SCALE", 1);
+    }
+    return on;
+}
 static void klovrp_submit_eye_color(const void *layer_submits, int count) {
     static int said;
     const ovrp_layer_submit *const *list = layer_submits;
-    if (said || !list || count <= 0) return;
+    if (!list || count <= 0) return;
+    if (klovrp_submit_color_wanted()) {
+        for (int i = 0; i < count; i++) {
+            const ovrp_layer_submit *s = list[i];
+            if (!s) continue;
+            struct klovrp_layer *l = klovrp_layer(s->layer_id);
+            if (!l || !l->is_eye) continue;
+            if (!klovrp_color_sane(s->color_scale) || !klovrp_color_sane(s->color_offset)) return;
+            float o[4];
+            memcpy(o, s->color_offset, sizeof o);
+            if (!klovrp_color_offset_wanted()) memset(o, 0, sizeof o);
+            klovrp_eye_color_apply(s->color_scale, o, "the eye layer's submit");
+            return;
+        }
+        return;
+    }
+    if (said) return;
     for (int i = 0; i < count; i++) {
         const ovrp_layer_submit *s = list[i];
         if (!s) continue;

@@ -4622,7 +4622,11 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
     // MSAA, Vulkan multiview, a subpass-input reader): a chaotic background,
     // blocks, wrong colours, displaced content flickering (on device,
     // 2026-11-16).
-    //   default 1 for those six titles, else 0
+    // Wraith: The Oblivion - Afterlife (x2562090053828017, UE 4.25 mobile,
+    // Vulkan, 2x MSAA pipelines that read a subpass input): once past its
+    // startup sequences, a broken picture in blocks, different per eye (on
+    // device, 2026-11-23).
+    //   default 1 for those seven titles, else 0
     static int no_transient = -1;
     if (no_transient < 0) {
         extern const char *kl_driver_target_name(void);
@@ -4633,7 +4637,8 @@ static VkResult VKAPI_CALL klvk_CreateImage(VkDevice dev, const VkImageCreateInf
                                        !strcmp(t, "x9269393463181825") ||
                                        !strcmp(t, "x5223884527630557") ||
                                        !strcmp(t, "x2719294624823942") ||
-                                       !strcmp(t, "x5420468924659233")));
+                                       !strcmp(t, "x5420468924659233") ||
+                                       !strcmp(t, "x2562090053828017")));
     }
     if (ci && (ci->usage & 0x40u) && no_transient) {
         mod = *ci;
