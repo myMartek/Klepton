@@ -1791,6 +1791,12 @@ final class KleptonControllers {
     var trackingRebase = matrix_identity_float4x4
     private var ghostTownRecenterSince: Double?
     private var ghostTownRecenterFired = false
+    /// The right Options button held alone for a second recenters, as the Quest's
+    /// Oculus-button hold does; that button is then not passed to the game. Set per
+    /// target in kl_driver.c (I Expect You To Die). Both held still opens the menu.
+    private static let recenterHold = klEnvOn("KL_HOST_RECENTER_HOLD", default: false)
+    private var recenterHoldSince: Double?
+    private var recenterHoldFired = false
     private func applyPanelChord() {
         // Ghost Town (community PR #41): Options is the Quest Menu button, held
         // and released as pressed, and the right one held for a second
@@ -1834,6 +1840,23 @@ final class KleptonControllers {
         // performance panel is one of its entries. A short tap of the two does nothing any more (the owner's word,
         // 2026-11-18: what it switched — MetalFX, frame generation — is in the menu now).
         if chord == 3 { KLHeadsetMenu.shared.toggleOpen() }
+        if Self.recenterHold {
+            let now = ProcessInfo.processInfo.systemUptime
+            let rightOnly = state[1].fromController && state[1].pill != 0
+                && !(state[0].fromController && state[0].pill != 0)
+            if rightOnly {
+                if recenterHoldSince == nil { recenterHoldSince = now }
+                if !recenterHoldFired, let since = recenterHoldSince, now - since >= 1 {
+                    KleptonCompositor.pendingRecenter = true
+                    recenterHoldFired = true
+                    NSLog("[cp] right Options hold requested host recenter")
+                }
+            } else {
+                recenterHoldSince = nil
+                recenterHoldFired = false
+            }
+            passR = 0
+        }
         for h in 0...1 where state[h].fromController {
             let pill = (h == 0 ? passL : passR) != 0 ? pillBits[h] : 0
             state[h].buttons = state[h].otherButtons | pill

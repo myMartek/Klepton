@@ -1024,7 +1024,9 @@ static uint64_t klovrp_GetSystemHeadsetType2(int *out) {
 // reads this count to learn that it happened. The compositor counts each host recenter (kl_ovrp_notify_recenter).
 // From community PR #41 (sibest); KL_OVRP_RECENTER_COUNT=0/1 overrides.
 static int g_host_recenter_count;
+static void klovrp_eye_origin_recenter(void);
 void kl_ovrp_notify_recenter(void) {
+    klovrp_eye_origin_recenter();
     __atomic_add_fetch(&g_host_recenter_count, 1, __ATOMIC_RELEASE);
 }
 static int klovrp_recenter_count_on(void) {
@@ -2717,6 +2719,17 @@ static void klovrp_eye_origin_request(const char *why) {
     if (g_head_raw_seen) klovrp_eye_origin_capture(g_head_raw_y, why);
     else                 g_eye_origin_want = 1;      // no head yet: take the first
 }
+// A host recenter moves yaw and XZ only (KleptonCompositor). In an EyeLevel
+// space a Quest's recenter also makes the head's CURRENT height the origin's,
+// so a seated player who sat down or leant after the start gets the scene back
+// at their eyes. KL_OVRP_RECENTER_HEIGHT=1 does that: the origin is placed
+// again at the next head pose. Off by default; on for I Expect You To Die
+// (kl_driver.c). Nothing happens while the shift is not in force.
+static void klovrp_eye_origin_recenter(void) {
+    if (!g_eye_origin_have || g_tracking_origin != 0) return;
+    if (!kl_env_on("KL_OVRP_RECENTER_HEIGHT", 0)) return;
+    g_eye_origin_want = 1;
+}
 //
 // **The v1 and v2 spellings of this pair are four different ABIs, not two**, and
 // three of the four were wrong here. Read out of the real plugin (SUPERHOT's
@@ -3945,7 +3958,9 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
     // and zeros in it are an assertion rather than a silence.
     g_head_raw_y = py; g_head_raw_seen = 1;
     klovrp_stick_move_offset(&px, &pz);
-    if (g_eye_origin_want) klovrp_eye_origin_capture(py, "first head pose after the guest selected EyeLevel");
+    if (g_eye_origin_want) klovrp_eye_origin_capture(py, g_eye_origin_have
+                                                         ? "host recenter (KL_OVRP_RECENTER_HEIGHT)"
+                                                         : "first head pose after the guest selected EyeLevel");
     // Unreal's Oculus default IS EyeLevel, but Saints & Sinners only says so a
     // few seconds in — after its title splash, a world-locked quad at y=0, was
     // already up, and with no origin y=0 is the floor: the title appeared at

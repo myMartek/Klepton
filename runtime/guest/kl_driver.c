@@ -346,6 +346,19 @@ static void kl_driver_env_defaults(const kl_target *t) {
         setenv("KL_GHOSTTOWN_OVERLAY_COLOR", "1", 0);
         setenv("KL_OVRP_ENQ_OWNS_OVERLAYS", "1", 0);
     }
+    else if (!strcmp(t->name, "x1987283631365460")) {
+        // I Expect You To Die (Schell Games, Unity). A seated title that never
+        // calls SetTrackingOriginType, reads the EyeLevel default and authors
+        // its desk round a head at y=0: given the frontend's floor-relative
+        // height it started the player ~1 m above the scene (2026-11-21). So
+        // EyeLevel is taken from the first head pose, as for Catan VR, and the
+        // right Options button held a second recenters (KleptonControllers),
+        // height included, as a Quest's recenter does in an EyeLevel space.
+        setenv("KL_OVRP_EYELEVEL_DEFAULT", "1", 0);
+        setenv("KL_OVRP_RECENTER_COUNT", "1", 0);
+        setenv("KL_OVRP_RECENTER_HEIGHT", "1", 0);
+        setenv("KL_HOST_RECENTER_HOLD", "1", 0);
+    }
     else if (!strcmp(t->name, "vampire")) {
         // Vampire: The Masquerade - Justice (UE 4.27, Vulkan). Ended by the
         // system on entering the sanctuary for the first time: the footprint
