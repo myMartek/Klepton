@@ -1989,6 +1989,9 @@ static void *guest_thread(void *unused) {
             pthread_mutex_unlock(&g_guest.mu);
         }
 
+        // The frame's start, for an OVRPlugin guest that does not say so
+        // itself: one head pose for the whole turn (kl_ovrp.c).
+        { extern void kl_ovrp_guest_frame_begin(void); kl_ovrp_guest_frame_begin(); }
         int rendered = kl_app_frame();
         if (rendered < 0) {
             printf("[guest] nativeRender is gone — the frame loop ends here\n");

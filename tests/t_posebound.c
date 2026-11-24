@@ -27,6 +27,10 @@
 //       ovrp_Update2(step 0, frameIdx 0) in mid-frame. Before one-pose was
 //       gated on the frame cycle each such call re-froze the head the OpenXR
 //       queries read. The head before and after it must be one pose.
+//   (e) I Expect You To Die's shape: an OVRPlugin guest that never calls
+//       ovrp_WaitToBeginFrame, driven by the frame loop, with a publish
+//       mid-frame. KL_OVRP_ARM_AT_FRAME=1: one pose for the turn, reads and
+//       record alike.
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -52,6 +56,9 @@ static const struct {
     { "(d)", NULL, KL_OVRP_POSEBOUND_MIXED,
       "OpenXR frames with ovrp_Update2(0, 0) in mid-frame (Walkabout)",
       "the Update2 does not change the head inside the frame, nothing frozen" },
+    { "(e)", NULL, KL_OVRP_POSEBOUND_LEGACY,
+      "a legacy OVRPlugin guest without WaitToBeginFrame (I Expect You To Die)",
+      "one pose per turn of the frame loop, reads and record alike" },
 };
 
 // Knobs that would change what the pattern reads, were one left over in the
@@ -62,12 +69,14 @@ static const char *const CLEARED[] = {
     "KL_OVRP_POSE_BOUNDARY", "KL_OVRP_LATCH", "KL_OVRP_IPD",
     "KL_OVRP_EYE_CANT", "KL_OVRP_HEAD", "KL_OVRP_RECORD_INDEXED",
     "KL_OVRP_RECORD_LATE", "KL_OVRP_TEST_BR_YAW", "KL_OVRP_POSE_TRACE",
+    "KL_OVRP_ARM_AT_FRAME",
 };
 
 static int run(unsigned i) {
     for (unsigned k = 0; k < sizeof CLEARED / sizeof CLEARED[0]; k++)
         unsetenv(CLEARED[k]);
     if (CASES[i].boundary) setenv("KL_OVRP_POSE_BOUNDARY", CASES[i].boundary, 1);
+    if (CASES[i].which == KL_OVRP_POSEBOUND_LEGACY) setenv("KL_OVRP_ARM_AT_FRAME", "1", 1);
     printf("--- %s %s ---\n", CASES[i].tag, CASES[i].title);
     int ok = kl_ovrp_pose_boundary_selftest(stdout, CASES[i].which);
     printf("%s %s: %s\n", ok ? "PASS" : "FAIL", CASES[i].tag, CASES[i].verdict);

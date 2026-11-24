@@ -6717,8 +6717,11 @@ static uint64_t klovrp_GetNodePoseState3(int a, int b, int c, void *out) {
 static void (*g_frame_pacer)(void);
 void kl_ovrp_set_frame_pacer(void (*wait)(void)) { g_frame_pacer = wait; }
 
+static int g_guest_waits;   // the guest has called ovrp_WaitToBeginFrame itself
+
 static uint64_t klovrp_WaitToBeginFrame(long frame_index) {
     ovrp_hit("ovrp_WaitToBeginFrame");
+    __atomic_store_n(&g_guest_waits, 1, __ATOMIC_RELEASE);
     // One pose per guest frame: THE GUEST'S FRAME CYCLE, and the
     // only boundary both of its threads agree on. Called once per frame, and
     // armed before the pacer, because a guest that blocks here must still have
@@ -6745,6 +6748,44 @@ static uint64_t klovrp_WaitToBeginFrame(long frame_index) {
     // CALLER's input. Returning a counter here read as success only by luck
     // (positive ovrpResults are success variants); say success plainly.
     return OVRP_SUCCESS;
+}
+
+// --- One pose per frame for a guest that never calls WaitToBeginFrame -------
+//
+// I Expect You To Die (x1987283631365460, legacy Unity VRDevice) frames through
+// ovrp_Update2 / ovrp_BeginFrame / ovrp_EndFrame and never calls
+// ovrp_WaitToBeginFrame, so one pose per guest frame never came into force for
+// it (no "IN FORCE" line in its logs). Its reads then answer from the step ring,
+// which samples the LIVE published pose at each Update2: Physics first, Render
+// later, both in the same frame. The frontend publishes every display period
+// while the frame runs, so whenever a publish lands inside a frame the frame's
+// reads straddle two head poses while the record carries one. That happens on
+// every frame drop at 100 Hz, and at KL_GUEST_PACE_DIV=2 the next publish comes
+// 10 ms into every frame. His observation on device: the whole room doubled on
+// drops, constantly at "Every 2nd"; Beat Saber and Alyx at "Every 2nd" clean.
+//
+// The frame loop that drives such a guest (kl_app.c, one turn per published
+// pose) knows where each frame starts, so it opens the cycle there: arm and
+// freeze at once, with the pose this turn was offered. Every Update2 and read
+// in the turn then reuses it, and the record (g_fs by index) is that pose.
+// Only after the guest has spoken OVRPlugin's frame loop (an Update2 seen), and
+// never for a guest that arms itself. KL_OVRP_ARM_AT_FRAME=1/0, on for IEYTD.
+void kl_ovrp_guest_frame_begin(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_OVRP_ARM_AT_FRAME", t && strcmp(t, "x1987283631365460") == 0);
+    }
+    if (!on || __atomic_load_n(&g_guest_waits, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&g_saw_update2, __ATOMIC_ACQUIRE)) return;
+    static int said;
+    if (!said++)
+        fprintf(stderr, "  [ovrp] one pose per guest frame from the frame loop: this "
+                        "guest never calls ovrp_WaitToBeginFrame, so each turn of the "
+                        "loop opens its frame (KL_OVRP_ARM_AT_FRAME=0 reverts)\n");
+    klovrp_one_pose_arm();
+    klovrp_one_pose_open(0);
 }
 
 // --- The pose-boundary self-test (one pose per guest frame) ------------------
@@ -6969,6 +7010,47 @@ static int klovrp_pb_external(FILE *f, int update2) {
     return bad;
 }
 
+// I Expect You To Die's shape: legacy Unity, one thread, no
+// ovrp_WaitToBeginFrame. Each turn of the frame loop starts with
+// kl_ovrp_guest_frame_begin; then Physics Update2 (index 0), a read, the
+// frontend publishing again (the next display period, or the pose a paced
+// frame lets go by), the Render Update2 with the frame's index, the reads the
+// picture is drawn from, and BeginFrame filing the record. Every read and the
+// record must be the pose published before the turn. Returns the frames that
+// broke it.
+static int klovrp_pb_legacy(FILE *f) {
+    int bad = 0;
+    klovrp_pb_publish(0.0f, KLOVRP_PB_EYE_OPEN);
+    klovrp_Update2(0, 0, 0.0);              // the guest has spoken the frame loop
+    for (int c = 2; c <= 6; c++) {
+        float a = 0.15f * (float)c;
+        klovrp_pb_publish(a, KLOVRP_PB_EYE_OPEN);
+        kl_ovrp_guest_frame_begin();                     // the loop's turn starts
+        klovrp_Update2(0, 0, 0.0);                       // Physics, no index
+        float p0[24] = {0}, r9[24] = {0}, r0[24] = {0}, r2[24] = {0}, fq[4];
+        klovrp_GetNodePoseState_impl(0, 9, p0);
+        klovrp_pb_publish(a + 0.05f, KLOVRP_PB_EYE_MID); // mid-frame publish
+        klovrp_Update2(KLOVRP_STEP_RENDER, c, 0.0);
+        klovrp_GetNodePoseState_impl(KLOVRP_STEP_RENDER, 9, r9);
+        klovrp_GetNodePoseState_impl(KLOVRP_STEP_RENDER, 0, r0);
+        klovrp_GetNodePoseState_impl(0, 9, r2);
+        klovrp_begin_frame_impl(c);
+        klovrp_pb_filed(fq);
+        int one = klovrp_pb_is_yaw(p0, a) && klovrp_pb_same(p0, r9) &&
+                  klovrp_pb_same(p0, r2) && klovrp_pb_same(p0, fq);
+        int eye = klovrp_pb_dist_is(r0 + 4, r9 + 4, KLOVRP_PB_EYE_OPEN);
+        fprintf(f, "  frame %d (no WaitToBeginFrame, publish mid-frame): reads and "
+                   "record %s; eye transform %s\n", c,
+                one ? "one pose, the turn's" : "DIFFER",
+                eye ? "as pushed before the turn" : "NOT the turn's");
+        if (!one || !eye) bad++;
+    }
+    fprintf(f, "  freezes %llu over %llu turns (must be equal, 5)\n",
+            (unsigned long long)g_op_freezes, (unsigned long long)g_op_arms);
+    if (g_op_arms != 5 || g_op_freezes != g_op_arms) bad++;
+    return bad;
+}
+
 // None of the feature's state valid, none of its counters moved.
 static int klovrp_pb_untouched(FILE *f) {
     uint64_t served = 0;
@@ -7056,6 +7138,11 @@ int kl_ovrp_pose_boundary_selftest(FILE *f, int which) {
         // and none of the feature's state moves.
         if (klovrp_pb_external(f, 1)) ok = 0;
         if (!klovrp_pb_untouched(f)) ok = 0;
+        break;
+    case KL_OVRP_POSEBOUND_LEGACY:
+        // (e) I Expect You To Die: one pose per turn of the frame loop for a
+        // guest that never arms itself (KL_OVRP_ARM_AT_FRAME).
+        if (klovrp_pb_legacy(f)) ok = 0;
         break;
     default:
         fprintf(f, "  FAIL: no such case %d\n", which);
