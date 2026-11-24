@@ -52,8 +52,21 @@ final class KLBigscreenFolders: ObservableObject {
     /// The folder's own name as the Files app shows it, made safe for a single
     /// path component and distinct from the other folders and from what the
     /// game's own Movies folder already holds.
+    /// The two places the Files app shows at the top answer their on-disk names
+    /// to localizedName: "On My Apple Vision Pro" came back as "File Provider
+    /// Storage" (seen on the headset, 2026-11-24). Those two get the names the
+    /// Files app shows; any other folder keeps its own.
+    private static func rootName(_ raw: String) -> String? {
+        switch raw {
+        case "File Provider Storage": return klT("On My Apple Vision Pro", "Auf meiner Apple Vision Pro")
+        case "com~apple~CloudDocs": return "iCloud Drive"
+        default: return nil
+        }
+    }
+
     private func name(for url: URL) -> String {
-        let shown = (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
+        let shown = Self.rootName(url.lastPathComponent)
+            ?? (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
         var base = shown.replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -111,6 +124,14 @@ final class KLBigscreenFolders: ObservableObject {
         // folder, so nothing else creates it.
         try? FileManager.default.createDirectory(at: Self.movies, withIntermediateDirectories: true)
         var changed = false
+        // A root kept under its on-disk name by the first test build gets the
+        // Files app's name; its empty stand-in folder goes with the old name.
+        for (i, f) in folders.enumerated() where open[f.name] == nil {
+            guard let shown = Self.rootName(f.name), !folders.contains(where: { $0.name == shown }) else { continue }
+            rmdir(Self.movies.appendingPathComponent(f.name).path)
+            folders[i].name = shown
+            changed = true
+        }
         for (i, f) in folders.enumerated() where open[f.name] == nil {
             var stale = false
             guard let u = try? URL(resolvingBookmarkData: f.bookmark, options: [], relativeTo: nil,
