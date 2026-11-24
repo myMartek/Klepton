@@ -1890,6 +1890,10 @@ static int klovrp_title_cap(const char *t) {
         // STORE_DEFAULTS). At 4608 its eye was 4512x3697 and its GPU time a
         // frame 8 to 11 ms.
         if (t && strcmp(t, "x3713270985434472") == 0) cap_dflt = 4000;
+        // I Expect You To Die (legacy Unity on GLES): its owner played it at
+        // "Every 2nd" and asked for 4000 an eye as the default when he called
+        // it verified, 2026-11-25 (targets.py STORE_DEFAULTS has the pacing).
+        if (t && strcmp(t, "x1987283631365460") == 0) cap_dflt = 4000;
         // Floor Plan 2 (Unity 2022.3 on Vulkan): its owner chose 4096 in the
         // start window and asked for it as the default when it was verified,
         // 2026-10-18 (7-8 ms of GPU a frame at 60 a second there).

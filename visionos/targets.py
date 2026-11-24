@@ -1461,6 +1461,13 @@ STORE_DEFAULTS = {
     # the next refresh or the one after. A player turns it off in the start
     # window (Advanced > Test), and that choice stays.
     "x3713270985434472": {"test_on": "KL_GUEST_PACE_DIV"},
+    # I Expect You To Die 1.2 (legacy Unity VRDevice, GLES). A frame on every
+    # second refresh from the start and 4000 an eye (kl_ovrp.c,
+    # klovrp_title_cap), as its owner asked when calling it verified
+    # (2026-11-25), after the double picture on head turns at that rate was
+    # fixed (KL_CP_FENCE_EYE, KL_OVRP_ARM_AT_FRAME, KL_OVRP_GL_EYE_FENCE). A
+    # player turns it off in the start window (Advanced > Test).
+    "x1987283631365460": {"test_on": "KL_GUEST_PACE_DIV"},
     # Floor Plan 2 (Unity 2022.3, OVRPlugin 1.88, Vulkan). The owner's own
     # choices in the start window, made the default when it was verified
     # (2026-10-18): 120 Hz with a frame on every second refresh — an even 60 —
