@@ -104,6 +104,12 @@ final class KLBigscreenFolders: ObservableObject {
     /// Before the guest boots: open every kept folder and tell the runtime.
     func applyAtBoot() {
         guard Self.offered else { return }
+        // Movies itself, always. Bigscreen's video player opens there only when
+        // the folder exists; without it the player opened in the game's own APK
+        // ("No supported videos") and Back led to the container's Documents
+        // (seen on the headset, 2026-11-24). The game never asks Java for the
+        // folder, so nothing else creates it.
+        try? FileManager.default.createDirectory(at: Self.movies, withIntermediateDirectories: true)
         var changed = false
         for (i, f) in folders.enumerated() where open[f.name] == nil {
             var stale = false
