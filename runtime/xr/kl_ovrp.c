@@ -5097,6 +5097,31 @@ static uint64_t klovrp_EndFrame(int guest_frame_index) {
     // textures down through ovrp_SetupEyeTexture2 and never describes a layer,
     // so it can only ever have rendered into the whole thing.
     int named = klovrp_legacy_array() ? klovrp_mirror_legacy_array(guest_frame_index) : -1;
+    // KL_OVRP_GL_EYE_FENCE on this path too: a GL guest that draws straight
+    // into the compositor's eye textures and SWAPS AFTER ovrp_EndFrame. The
+    // swap-driven fence then still names the previous frame when this record
+    // announces the new stage, so a composite landing between the two waits on
+    // the old value and samples a stage whose drawing is still in flight. I
+    // Expect You To Die (x1987283631365460) draws its eyes in two passes, left
+    // then right: the left eye is usually done, the right still holds the
+    // stage's picture from three frames back. His observation: the whole room
+    // doubled with both eyes on head turns, at "Every 2nd" constantly and on
+    // drops at 100 Hz, and gone with the picture on the left eye only
+    // (KL_CP_EYE=0). Fencing here, after the eye drawing and before the
+    // record, closes it. Default on for x1987283631365460, else 0.
+    { static int gl_fence = -1;
+      if (gl_fence < 0) {
+          extern const char *kl_driver_target_name(void);
+          const char *t = kl_driver_target_name();
+          gl_fence = kl_env_on("KL_OVRP_GL_EYE_FENCE", t && !strcmp(t, "x1987283631365460"));
+      }
+      if (gl_fence && named < 0 && !kl_vulkan_guest_active()) {
+          kl_glfb_frame_fence();
+          static int said;
+          if (!said++)
+              fprintf(stderr, "  [ovrp] GL eyes fenced at ovrp_EndFrame, before their "
+                              "frame record is published (KL_OVRP_GL_EYE_FENCE)\n");
+      } }
     uint64_t rv = klovrp_end_frame_impl(guest_frame_index, NULL, NULL, named);
     // KL_OVRP_IMPLICIT_BEGIN: a guest that ends frames and never begins one.
     // Arizona Sunshine (x2190353671014400, OVRPlugin 1.49, legacy VRDevice)
