@@ -1024,7 +1024,9 @@ static uint64_t klovrp_GetSystemHeadsetType2(int *out) {
 // reads this count to learn that it happened. The compositor counts each host recenter (kl_ovrp_notify_recenter).
 // From community PR #41 (sibest); KL_OVRP_RECENTER_COUNT=0/1 overrides.
 static int g_host_recenter_count;
+static void klovrp_eye_origin_recenter(void);
 void kl_ovrp_notify_recenter(void) {
+    klovrp_eye_origin_recenter();
     __atomic_add_fetch(&g_host_recenter_count, 1, __ATOMIC_RELEASE);
 }
 static int klovrp_recenter_count_on(void) {
@@ -2717,6 +2719,17 @@ static void klovrp_eye_origin_request(const char *why) {
     if (g_head_raw_seen) klovrp_eye_origin_capture(g_head_raw_y, why);
     else                 g_eye_origin_want = 1;      // no head yet: take the first
 }
+// A host recenter moves yaw and XZ only (KleptonCompositor). In an EyeLevel
+// space a Quest's recenter also makes the head's CURRENT height the origin's,
+// so a seated player who sat down or leant after the start gets the scene back
+// at their eyes. KL_OVRP_RECENTER_HEIGHT=1 does that: the origin is placed
+// again at the next head pose. Off by default; on for I Expect You To Die
+// (kl_driver.c). Nothing happens while the shift is not in force.
+static void klovrp_eye_origin_recenter(void) {
+    if (!g_eye_origin_have || g_tracking_origin != 0) return;
+    if (!kl_env_on("KL_OVRP_RECENTER_HEIGHT", 0)) return;
+    g_eye_origin_want = 1;
+}
 //
 // **The v1 and v2 spellings of this pair are four different ABIs, not two**, and
 // three of the four were wrong here. Read out of the real plugin (SUPERHOT's
@@ -3945,7 +3958,9 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
     // and zeros in it are an assertion rather than a silence.
     g_head_raw_y = py; g_head_raw_seen = 1;
     klovrp_stick_move_offset(&px, &pz);
-    if (g_eye_origin_want) klovrp_eye_origin_capture(py, "first head pose after the guest selected EyeLevel");
+    if (g_eye_origin_want) klovrp_eye_origin_capture(py, g_eye_origin_have
+                                                         ? "host recenter (KL_OVRP_RECENTER_HEIGHT)"
+                                                         : "first head pose after the guest selected EyeLevel");
     // Unreal's Oculus default IS EyeLevel, but Saints & Sinners only says so a
     // few seconds in — after its title splash, a world-locked quad at y=0, was
     // already up, and with no origin y=0 is the floor: the title appeared at
@@ -5194,9 +5209,13 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // with its eye layer, then three quads alone (layers 2-4, a 4096x4096 at
     // 600 m and two 256x256 at 150 m) from the next frame on while it loads,
     // and the picture flickered (2026-10-20).
-    //   default 1 for x5767635983306831, wrath2, x24882487241367228 and
-    //   x6605328856182465, else 0 (every other OVRPlugin guest is left with the
-    //   eye pass always on, as before)
+    // Wallace & Gromit in The Grand Getaway (x6744365485575791, UE 4.27,
+    // Vulkan): its loading screens are quads alone (a 2048x2048 at 1000 m and
+    // a 32x32 one), "eye stage NOT observed", and the picture flickered with
+    // the two eyes not matching while a scene loaded (2026-11-23).
+    //   default 1 for x5767635983306831, wrath2, x24882487241367228,
+    //   x6605328856182465 and x6744365485575791, else 0 (every other OVRPlugin
+    //   guest is left with the eye pass always on, as before)
     static int eyeless = -1;
     if (eyeless < 0) {
         extern const char *kl_driver_target_name(void);
@@ -5204,7 +5223,8 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
         eyeless = kl_env_on("KL_OVRP_EYELESS_FRAMES",
                             t && (!strcmp(t, "x5767635983306831") || !strcmp(t, "wrath2") ||
                                   !strcmp(t, "x24882487241367228") ||
-                                  !strcmp(t, "x6605328856182465")));
+                                  !strcmp(t, "x6605328856182465") ||
+                                  !strcmp(t, "x6744365485575791")));
     }
     if (eyeless && layer_submits && layer_submit_count > 0) {
         kl_ovrp_eye_layer_external(named >= 0);
@@ -10172,10 +10192,48 @@ static uint64_t klovrp_SetColorScaleAndOffset(klovrp_vec4 scale, klovrp_vec4 off
 // and no guest has been seen to need them. Said once, where a submit carries
 // values that are not the identity, so that the game that does need them names
 // itself in a log.
+//
+// Wraith: The Oblivion - Afterlife (x2562090053828017, UE 4.25.4 Oculus branch)
+// does need them. Its scene changes fade through UTheLibrarianBlueprintLibrary::
+// ApplyColorScale -> UOculusFunctionLibrary::SetColorScaleAndOffset(.., false),
+// which never reaches ovrp_SetColorScaleAndOffset: FOculusHMD keeps the values
+// in its settings and FLayer::UpdateLayer_RHIThread writes them into the EYE
+// layer's submit (layer id 0) at +0x48/+0x58, every frame, with no override
+// flag in that build. Dropped, the level being built behind the fade showed —
+// "pictures of a scene that was not shown yet" while it changed scene, which a
+// Quest does not show (2026-11-23). For such a guest the eye submit's values
+// are applied as they come. KL_OVRP_SUBMIT_COLOR=1/0 forces it either way;
+// default 1 for x2562090053828017, else 0.
+static int klovrp_submit_color_wanted(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_OVRP_SUBMIT_COLOR", t && !strcmp(t, "x2562090053828017")) &&
+             kl_env_on("KL_OVRP_COLOR_SCALE", 1);
+    }
+    return on;
+}
 static void klovrp_submit_eye_color(const void *layer_submits, int count) {
     static int said;
     const ovrp_layer_submit *const *list = layer_submits;
-    if (said || !list || count <= 0) return;
+    if (!list || count <= 0) return;
+    if (klovrp_submit_color_wanted()) {
+        for (int i = 0; i < count; i++) {
+            const ovrp_layer_submit *s = list[i];
+            if (!s) continue;
+            struct klovrp_layer *l = klovrp_layer(s->layer_id);
+            if (!l || !l->is_eye) continue;
+            if (!klovrp_color_sane(s->color_scale) || !klovrp_color_sane(s->color_offset)) return;
+            float o[4];
+            memcpy(o, s->color_offset, sizeof o);
+            if (!klovrp_color_offset_wanted()) memset(o, 0, sizeof o);
+            klovrp_eye_color_apply(s->color_scale, o, "the eye layer's submit");
+            return;
+        }
+        return;
+    }
+    if (said) return;
     for (int i = 0; i < count; i++) {
         const ovrp_layer_submit *s = list[i];
         if (!s) continue;
@@ -10407,7 +10465,11 @@ void kl_ovrp_eye_desc_size(float texture_scale, int *out_w, int *out_h) {
     // eye storage while the old is kept ("allocating fresh"), so the footprint climbed to 8 GB and the
     // system ended the app (headset 2026-11-03, two runs; the cap alone only stopped the sizes above 1.0).
     // One size, one allocation. KL_OVRP_FIXED_SCALE=0 gives the guest's scale back.
-    else if (kl_env_on("KL_OVRP_FIXED_SCALE", t && strcmp(t, "x4188843481174389") == 0)) texture_scale = 1.0f;
+    // EXOcars (x8057795767629913) the same: its scale goes 1.0 / 1.5 / ~1.19 between menu, tutorial and
+    // career, each a fresh 3-stage eye set with the old ones kept; opening Career took the footprint to
+    // 7.9 GB (avail 292 MB) and the system ended the app (headset 2026-11-18).
+    else if (kl_env_on("KL_OVRP_FIXED_SCALE", t && (strcmp(t, "x4188843481174389") == 0 ||
+                                                     strcmp(t, "x8057795767629913") == 0))) texture_scale = 1.0f;
     else if (!(texture_scale > 0.0f)) texture_scale = 1.0f;
     w = (int)((float)w * texture_scale);
     h = (int)((float)h * texture_scale);

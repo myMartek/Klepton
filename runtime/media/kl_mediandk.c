@@ -284,6 +284,10 @@ static klm_extractor *klm_ex(void *ex) {
 // up — so it is copied here rather than read back off an object at report time.
 static unsigned g_ex_refused;
 static char    *g_ex_last;
+// The guest opens extractors from several threads at once (Mixture's
+// VideoPlayers: two threads in klm_extractor_refuse freed the same g_ex_last
+// and malloc aborted, device log 2026-11-17), so the pair is guarded.
+static pthread_mutex_t g_ex_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void *klm_AMediaExtractor_new(void) {
     klm_extractor *x = calloc(1, sizeof *x);
@@ -304,9 +308,12 @@ static int klm_AMediaExtractor_delete(void *ex) {
 static int klm_extractor_refuse(klm_extractor *x, const char *what) {
     free(x->source);
     x->source = what ? strdup(what) : NULL;
+    pthread_mutex_lock(&g_ex_lock);
     free(g_ex_last);
     g_ex_last = what ? strdup(what) : NULL;
-    if (!g_ex_refused++)
+    unsigned first = !g_ex_refused++;
+    pthread_mutex_unlock(&g_ex_lock);
+    if (first)
         fprintf(stderr, "  [media] AMediaExtractor: no container demuxer here — "
                         "refusing \"%s\". The guest's own no-video path runs from "
                         "here (see the note in kl_mediandk.c).\n",
@@ -360,7 +367,15 @@ static int klm_extractor_enabled(void) {
         // indefinitely. Let this title reach the decoder so its video path
         // can run; keep the Vulkan refusal for all other unmeasured guests.
         int gundam = target && !strcmp(target, "x6811683248909506");
-        int default_on = g_video_default > 0 ? 1 : shave ? 0 : (iss || gundam) ? 1 : !vk;
+        // Mixture does the same as Gundam, harder: refused, its VideoPlayers
+        // reopen the clip every frame (~22,000 "Error opening extractor:
+        // -10002" in 14 minutes). Every attempt makes JNIBridge proxies for
+        // SurfaceTexture$OnFrameAvailableListener, which stay pinned, so the
+        // run ends at "object pool exhausted" and an abort (device log,
+        // 2026-11-17). Let the clip reach the decoder so the retry stops.
+        int mixture = target && !strcmp(target, "x4691626700899382");
+        int default_on = g_video_default > 0 ? 1 : shave ? 0
+                       : (iss || gundam || mixture) ? 1 : !vk;
         on = kl_env_on("KL_MEDIA_EXTRACTOR", default_on);
         if (on && vk)
             fprintf(stderr, "  [media] video is enabled for this Vulkan "
@@ -1489,9 +1504,15 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     // Gloomy Eyes (x2933720383334150) too: its episode credits queued in=249
     // and in=1467 and got two to six frames out — black, a flash of the Unity
     // logo, and none of the credits (on device, 2026-11-10).
+    // EXOcars (x8057795767629913) for the other half of this mode: a stop that
+    // ends a waiting dequeueOutputBuffer. Now and then its start froze for good
+    // at the end of the intro clip: the frame thread in a futex wait, the
+    // decoder thread still polling dequeueOutputBuffer, which a plain codec's
+    // stop never ends (headset, 2026-11-18 and 2026-11-23; the next start ran).
     c->playback_backpressure=target && (!strcmp(target,"x2249318828413747") ||
                                         !strcmp(target,"x4015163475201433") ||
-                                        !strcmp(target,"x2933720383334150"));
+                                        !strcmp(target,"x2933720383334150") ||
+                                        !strcmp(target,"x8057795767629913"));
     snprintf(c->mime, sizeof c->mime, "%s", mime ? mime : "");
     pthread_mutex_init(&c->lock, NULL);
     if (mime && !strcmp(mime, "audio/raw")) {

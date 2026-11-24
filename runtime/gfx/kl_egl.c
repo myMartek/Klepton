@@ -785,7 +785,14 @@ static const char *klgl_identity(int renderer) {
     // "Klepton GLES" it resolved to none of them, its button hints fell through
     // to the last platform in its list, and the game showed the markup itself
     // (`<img id="WMR.RStick"/>`) because the Quest package holds no such icons.
-    if (t && strcmp(t, "vampire") == 0)
+    // Wraith: The Oblivion - Afterlife (x2562090053828017, build 114) is the
+    // same studio's Jukebox engine with the same ResolveHMD (Quest 1 or 2 only:
+    // "adreno" and "540" or "650"), and there it is a start gate:
+    // AJukeboxGameMode::ReadyToStartMatch waits on the game instance's
+    // bHMDResolved, set from that call each tick. As "Klepton GLES" it never
+    // resolved, and the game sat in its empty entry level after the logo —
+    // black, silent, one 18-draw pass a frame (headset logs 2026-11-23).
+    if (t && (strcmp(t, "vampire") == 0 || strcmp(t, "x2562090053828017") == 0))
         return renderer ? "Adreno (TM) 650" : "Qualcomm";
     return renderer ? "Klepton GLES" : "Klepton";
 }

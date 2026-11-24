@@ -46,7 +46,9 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   the exception Java throws for a backend that is not there —
   `UnsupportedOperationException`, `IllegalStateException` for
   `FirebaseApp.getInstance` — so the SDK reports it to the game instead of the
-  process stopping on the name. No Firebase feature and no voice chat; every
+  process stopping on the name. The Vivox answer also serves Onward
+  (`x2677344882310094`) and EXOcars (`x8057795767629913`). No Firebase feature
+  and no voice chat; every
   other Firebase or Vivox call still aborts by name.
 - `KL_JNI_DROP_BHAPTICS=0|1` — (`runtime/kl_jni.c`) drop the calls into
   `com/bhaptics/…` that the bHaptics table (`runtime/jni/kl_jni_haptics.c`)
@@ -744,6 +746,14 @@ answers GL and kl_glfb never initializes.
   a truncated sweep says how many addresses it dropped — a sweep that quietly
   covers half a /22 finds the machines at the bottom of the range and not the
   ones above them).
+- `KL_NET_NETLINK_ROUTE=0|1` — the synthetic `AF_NETLINK` socket answers an
+  `RTM_GETADDR` dump with the host's addresses (from Darwin `getifaddrs`, in
+  Linux netlink form, Darwin interface indices) and any other request with an
+  empty dump; `ioctl(SIOCGIFFLAGS)` is translated too. WebRTC's own Android
+  `getifaddrs` (`rtc_base/ifaddrs_android.cc`) enumerates interfaces exactly
+  this way; without it the list is empty and no peer connection comes up.
+  Default 1 for `x9310428738998196` (Rooms of Realities: Normcore multiplayer
+  could not create or join a room), else 0.
 - `KL_NET_DGRAM_NOSIGPIPE=0` — stop setting `SO_NOSIGPIPE` on the guest's
   non-stream (datagram/raw) sockets. Default ON: Linux never raises SIGPIPE for
   a datagram send, Darwin does on EPIPE, and the guest's SIGPIPE handler
@@ -976,6 +986,13 @@ The guest's own memory management, and the three seams that used to disable it.
   back to (it is built for multiview), the right eye lacked part of the
   realtime-light shadows; baked shadows are unaffected. Default 1 for
   `x3327317663977182`, else 0.
+- `KL_EXOCARS_NO_MULTIPLAYER=0|1` — (`runtime/diag/kl_mprobe.c`) EXOcars with
+  its multiplayer button switched off: the main menu's `TriggerButtonUI`
+  under `Realtime` in the `StartMenu` tree is set disabled through the game's
+  own `SwitchEnabled` and its `EventTrigger` is turned off, checked every 90
+  frames. Its hosting joins a Vivox channel named after the lobby code
+  and stops at "Creating server..." without Vivox. Logs `[exocars]`, and names
+  each other menu button once. Default 1 for `x8057795767629913`, else 0.
 - `KL_FS_REL_SDCARD=0|1` — resolve a relative path that begins with `sdcard/`
   (or another spelling of external storage) as the absolute one, as it is on a
   device where the app's working directory is `/`. AC Nexus opens its animator
@@ -1072,6 +1089,12 @@ The guest's own memory management, and the three seams that used to disable it.
   `LibRuntimeOptimizer` it ships) and `x9449316705178989` (DreamSpace, Meta's
   `libmrutilitykitshared`), else 0 — a title that works may ship an
   optional library it has been running without.
+- `KL_NDK_JNI_VM=0|1` — (`runtime/guest/kl_ndk.c`) `dlsym` on the synthetic
+  `libandroid.so` handle also answers `JNI_GetCreatedJavaVMs` with the
+  process's JavaVM, as bionic does by searching the library's dependencies.
+  Meta's Avatar SDK 2 (`libovravatar2`) finds the VM this way; without it the
+  SDK has no JNI, no asset manager, and faults on a worker thread. Default 1
+  for `x9310428738998196` (Rooms of Realities), else 0.
 - `KL_MADV_DONTNEED=remap|reusable|zero|passthrough` — how a guest
   `madvise(MADV_DONTNEED)` is served. Default `remap`. **`MADV_DONTNEED` is 4 on
   Linux and Darwin and means different things**: Linux frees the pages, Darwin
@@ -1879,9 +1902,11 @@ puts the camera on the ground with its hands underneath it.
   frame counter under the last eye viewport, at the different sizes its
   dynamic resolution had left them. Into The Radius 2
   (`x6605328856182465`, Vulkan) submits three quads alone from its second
-  frame on while it loads, and its picture flickered. Default 1 for
-  `x5767635983306831`, `wrath2`, `x24882487241367228` and
-  `x6605328856182465`, else 0. While the eye pass is off this way the compositor draws black behind
+  frame on while it loads, and its picture flickered. Wallace & Gromit in The
+  Grand Getaway (`x6744365485575791`, UE 4.27, Vulkan) shows only quads while a
+  scene loads, and there the picture flickered and the eyes did not match.
+  Default 1 for `x5767635983306831`, `wrath2`, `x24882487241367228`,
+  `x6605328856182465` and `x6744365485575791`, else 0. While the eye pass is off this way the compositor draws black behind
   the frame's quads (a mixed space shows the room wherever no depth was
   written).
 - `KL_OVRP_GL_EYE_FENCE=0|1` — a GL guest's `ovrp_EndFrame4` with an eye layer
@@ -4571,7 +4596,9 @@ Not from his fork, found on the way (2026-10-13):
   whatever scale the guest passes, so a game's dynamic resolution cannot ask
   for a new eye size (and new eye storage) on every step. Default 1 for
   MOTHERGUNSHIP: FORGE (`x4188843481174389`: 24 new sizes in three minutes,
-  footprint 2.4 -> 8 GB, ended by the system), else 0; that title also has
+  footprint 2.4 -> 8 GB, ended by the system) and EXOcars
+  (`x8057795767629913`: scales 1.0 / 1.5 / ~1.19, ended by the system on
+  opening Career), else 0; MOTHERGUNSHIP also has
   `KL_OVRP_EYE_DESC_CAP` on. Bulletstorm VR has the same fixed scale without a
   switch. `kl_ovrp_eye_desc_size`.
 - `KL_OVRP_EYE_ALIGN=<n>` — each axis of the eye size is rounded down to a

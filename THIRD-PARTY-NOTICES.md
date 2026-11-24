@@ -24,6 +24,11 @@ Available original license/notice files are copied unchanged under
 | ports/scotland2/song-details/upstream | `b13aa5d5cc07200a4873f7c0554a99ba0ba6d79f` | [pinned source](https://codeload.github.com/bsq-ports/SongDetails/tar.gz/b13aa5d5cc07200a4873f7c0554a99ba0ba6d79f) | No license file in the recorded archive/tree; redistribution permission not established |
 | ports/scotland2/and64 | `dd9f4cf0565ff46f9c2844a1512bc1786a7f2446` | [pinned source](https://codeload.github.com/QuestPackageManager/beatsaber-hook/zip/dd9f4cf0565ff46f9c2844a1512bc1786a7f2446) | No license file in the recorded archive/tree; redistribution permission not established |
 
+`runtime/media/kl_vp8.c` and `runtime/media/kl_vp8_tables.h` are a port of the
+VP8 decoder in libvpx (`vp8/decoder`, `vp8/common`, `vpx_dsp/intrapred.c`) at
+`8f9b84afccde`, Copyright (c) 2010 The WebM project authors, BSD-3-Clause; the license
+is `third-party-licenses/libvpx-LICENSE`.
+
 The selected released QMOD libraries are separately fetched from their original
 release URLs and checked against `selected-mods.json` and the original inventory.
 Their original licenses and attribution remain applicable. Dependency archive

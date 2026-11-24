@@ -50,10 +50,10 @@ struct MCPictureSettings: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     GroupBox(klT("Frame rate", "Bildrate")) {
-                        FrameRatePicker().frame(maxWidth: .infinity, alignment: .leading)
+                        MCFrameRatePicker().frame(maxWidth: .infinity, alignment: .leading)
                     }
                     GroupBox(klT("Frame generation", "Zwischenbilder")) {
-                        FrameGenPicker().frame(maxWidth: .infinity, alignment: .leading)
+                        MCFrameGenPicker().frame(maxWidth: .infinity, alignment: .leading)
                     }
                     GroupBox(klT("Your hands", "Deine Hände")) {
                         VStack(alignment: .leading, spacing: 10) {
@@ -125,5 +125,57 @@ struct MCPictureSettings: View {
             parts.append(klT("in-between pictures", "Zwischenbilder"))
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+// The two pickers below were shared views (FrameRatePicker, FrameGenPicker in KleptonApp.swift) until the
+// settings window of 905 replaced them with rows that live in its pages (KLFrameRateRow, KLFrameGenRow).
+// This sheet is not one of those pages, and the Minecraft app failed to build without them (avp-play #141),
+// so it keeps its own copies: the same settings, the rates of this headset as the settings window shows them.
+
+/// The frame-rate choice (KleptonRendering.maxRate) with what it does.
+private struct MCFrameRatePicker: View {
+    @ObservedObject private var rendering = KleptonRendering.shared
+
+    var body: some View {
+        let r = KLDevice.kind.rates
+        VStack(alignment: .leading, spacing: 10) {
+            Picker(klT("Frame rate", "Bildrate"), selection: $rendering.maxRate) {
+                Text(klT("Up to \(r.mixed)", "Bis \(r.mixed)")).tag(100)
+                Text(klT("Up to \(r.full)", "Bis \(r.full)")).tag(120)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text(klT("Up to \(r.mixed) is the default. Up to \(r.full) is smoother where the game manages it and the Vision Pro's display can do it. When a game cannot keep up, the Vision Pro halves the rate for a while.",
+                     "Bis \(r.mixed) ist der Standard. Bis \(r.full) ist flüssiger, wo das Spiel es schafft und das Display der Vision Pro es kann. Kommt ein Spiel nicht mit, halbiert die Vision Pro die Rate eine Weile."))
+                .font(.callout).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// The frame-generation choice (KleptonRendering.frameGen): its three modes and what they do.
+private struct MCFrameGenPicker: View {
+    @ObservedObject private var rendering = KleptonRendering.shared
+    @ObservedObject private var metalfx = KleptonMetalFX.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker(klT("Frame generation", "Zwischenbilder"), selection: $rendering.frameGen) {
+                Text(klT("Off", "Aus")).tag(KleptonFrameGen.Mode.off.rawValue)
+                Text(klT("Ahead", "Vorausberechnet")).tag(KleptonFrameGen.Mode.ahead.rawValue)
+                Text(klT("In between", "Dazwischen")).tag(KleptonFrameGen.Mode.between.rawValue)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text(klT("For a game that draws fewer pictures than the display shows. Ahead: where the game has no new picture, one is made from its last two, moved on to the moment it is shown. In between: the middle between the game's last two pictures – smoother, and what the game draws comes 10 ms later; the head's movement stays as quick.",
+                     "Für ein Spiel, das weniger Bilder zeichnet, als das Display zeigt. Vorausberechnet: Wo das Spiel kein neues Bild hat, wird eins aus seinen letzten beiden errechnet, bis zu dem Moment weitergerückt, in dem es gezeigt wird. Dazwischen: die Mitte zwischen den letzten beiden Bildern des Spiels – weicher, und was das Spiel zeichnet, kommt 10 ms später; die Kopfbewegung bleibt so schnell."))
+                .font(.callout).foregroundStyle(.secondary)
+            // The compositor makes no in-between picture where MetalFX swapped the eye's picture.
+            if rendering.frameGen != KleptonFrameGen.Mode.off.rawValue, metalfx.enabled {
+                Text(klT("While MetalFX upscaling is on, no in-between pictures are made – choose one of the two.",
+                         "Solange MetalFX-Hochskalieren an ist, entstehen keine Zwischenbilder – eins von beiden wählen."))
+                    .font(.callout).foregroundStyle(.orange)
+            }
+        }
     }
 }

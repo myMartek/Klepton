@@ -19,6 +19,8 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <sys/sockio.h>   // SIOCGIFFLAGS
+#include <net/if.h>       // struct ifreq
 #include <sys/param.h>
 #include <sys/mount.h>
 #include <sys/sysctl.h>
@@ -3103,8 +3105,11 @@ off_t  klb_lseek(int fd, off_t o, int w)   { int handled; off_t r = kl_obbmap_ls
                                              return handled ? r : lseek(fd, o, w); }
 // ...and close, so an OBB read-through fd is unregistered before its number can
 // be recycled by an unrelated open (or the table would misroute that open).
+void   kl_nl_forget(int fd);                // kl_shim.c: synthetic netlink sockets
 int    klb_close(int fd)                   { int handled; int r = kl_obbmap_close(fd, &handled);
-                                             return handled ? r : close(fd); }
+                                             if (handled) return r;
+                                             kl_nl_forget(fd);
+                                             return close(fd); }
 // bare-name pread (libUE4 uses it): interpose the read-through window.
 // A failure publishes its errno (kl_errno_set), as read and the socket calls do.
 ssize_t klb_pread(int fd, void *buf, size_t n, off_t off) {
@@ -4381,11 +4386,35 @@ int kl_fcntl(int fd, int cmd, uintptr_t arg) {
 // direction and size, so a wrong code addresses a different driver operation.
 #define LX_FIONREAD 0x541B
 #define LX_FIONBIO  0x5421
+#define LX_SIOCGIFFLAGS 0x8913
+
+// SIOCGIFFLAGS, for WebRTC's Android getifaddrs (see kl_net_netlink_route in
+// kl_shim.c): a Linux struct ifreq is the 16-byte name and then ifr_flags as a
+// short at offset 16, like Darwin's. The flag bits agree up to ALLMULTI;
+// IFF_MULTICAST is 0x8000 on Darwin and 0x1000 on Linux.
+static int kl_ioctl_gifflags(int fd, uintptr_t arg) {
+    if (!arg) { errno = EFAULT; return -1; }
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof ifr);
+    memcpy(ifr.ifr_name, (const void *)arg, IFNAMSIZ);
+    ifr.ifr_name[IFNAMSIZ - 1] = 0;
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) != 0) return -1;
+    unsigned d = (unsigned short)ifr.ifr_flags;
+    unsigned l = d & 0x03ffu;
+    if (d & 0x8000u) l |= 0x1000u;
+    short out = (short)l;
+    memcpy((uint8_t *)arg + 16, &out, sizeof out);
+    return 0;
+}
 
 int kl_ioctl(int fd, unsigned long req, uintptr_t arg) {
+    extern int kl_net_netlink_route(void);
     switch (req) {
     case LX_FIONREAD: return ioctl(fd, FIONREAD, (void *)arg);
     case LX_FIONBIO:  return ioctl(fd, FIONBIO,  (void *)arg);
+    case LX_SIOCGIFFLAGS:
+        if (kl_net_netlink_route()) return kl_ioctl_gifflags(fd, arg);
+        __attribute__((fallthrough));   // refused as before
     default: {
         fcntl_warn_once("ioctl", (long)req);
         // Diagnostic for the Bigscreen voice-net crash (2026-10-21, x2497738113633933):

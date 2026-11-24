@@ -62,6 +62,13 @@ void *kl_jni_new_object(const char *class_name);
 // Pin a host-made object against local-frame retirement (the C NewGlobalRef).
 // Use for objects the host caches and hands back more than once.
 void kl_jni_pin_object(void *obj);
+// The host's pin on an object the guest has now finished with (a disabled
+// proxy, a released SurfaceTexture) is dropped, and the object is retired as
+// soon as no global ref holds it. kl_jni_unpin_object drops a pin the host took
+// with kl_jni_pin_object, with the same rule. Both are no-ops unless
+// KL_JNI_RECLAIM_DEAD is on (see kl_jni.c).
+void kl_jni_release_dead(void *obj);
+void kl_jni_unpin_object(void *obj);
 // Retire, by age, strings a guest makes outside any local frame and never
 // deletes. See klj_loose_note in kl_jni.c.
 void kl_jni_reclaim_frameless_strings(int on);

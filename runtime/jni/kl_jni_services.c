@@ -1887,10 +1887,17 @@ static klj_val klj_Context_getExternalFilesDir(void *env, void *self, const klj_
     // GetDirectoryName is null, Path.Combine throws, the catalogue path stays
     // the literal "{...addressableLoadPath}/..." and every bundle fails to
     // open. Other games keep the short form, so their saves do not move.
+    //
+    // EXOcars (x8057795767629913) is the same case: it derives its Addressables
+    // directory from this path too, and from /sdcard/files it came out as
+    // "/sdcar/obb/com.joyway.exocars/", so every track bundle failed to open
+    // and the tutorial's loading screen never ended (2026-11-18). The bundles
+    // are staged in Android/obb/<package>, which the Android spelling reaches.
     static int android_shape = -1;
     if (android_shape < 0) {
         const char *t = kl_driver_target_name();
-        android_shape = t && strcmp(t, "x4015163475201433") == 0;
+        android_shape = t && (strcmp(t, "x4015163475201433") == 0 ||
+                              strcmp(t, "x8057795767629913") == 0);
     }
     if (android_shape) {
         if (type && *type) snprintf(path, sizeof path, "/sdcard/Android/data/%s/files/%s", klj_guest_package(), type);

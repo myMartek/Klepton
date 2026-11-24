@@ -1757,6 +1757,118 @@ void kl_mprobe_ven_no_rt_shadows(unsigned frame) {
                     "(frame %u; KL_VEN_NO_RT_SHADOWS=0 keeps them)\n", (double)dist, frame);
 }
 
+// EXOcars (x8057795767629913, Unity 2022.3) only: its multiplayer cannot work
+// here. Hosting creates the lobby, the relay and the server, then joins a Vivox
+// voice channel named after the lobby code; Vivox is unavailable on this host
+// (kl_jni_vivox.c), the channel never exists, and adding the local player looks
+// it up and throws KeyNotFoundException: the menu sits at "Creating server..."
+// for good (headset 2026-11-18). At the owner's request the way in is switched
+// off instead: the main menu's realtime-race button — the TriggerButtonUI (the
+// game's menu button) on "Handler" under "Realtime" in the "StartMenu" tree,
+// which opens LobbyListeningUI — is set disabled with the game's own
+// SwitchEnabled, and its EventTrigger is switched off so no pointer event
+// reaches it. Matched by that place in the tree, not by a word: a looser match
+// on "multiplayer" also caught the lobby screen's own back button (headset,
+// 2026-11-23). Checked every 90 frames, because the menu is rebuilt when the
+// player returns to it. Nothing is stored; the game's files and settings are
+// untouched. Each other button is named once in the log.
+// KL_EXOCARS_NO_MULTIPLAYER=0 leaves the menu as it is.
+void kl_mprobe_exocars_no_multiplayer(unsigned frame) {
+    static int on = -1;
+    if (on < 0) {
+        extern const char *kl_driver_target_name(void);
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_EXOCARS_NO_MULTIPLAYER", t && strcmp(t, "x8057795767629913") == 0);
+    }
+    if (!on || frame < 120 || frame % 90) return;
+    if (!mprobe_init()) { on = 0; return; }
+    static const MethodInfo *m_find, *m_name, *m_tf, *m_parent, *m_switch, *m_disabled, *m_en;
+    static Il2CppObject *type;
+    static size_t trig_off;
+    static int r;
+    if (!r) {
+        r = 1;
+        Il2CppClass *k = find_class("", "TriggerButtonUI");
+        kl_image *img = kl_find_image("libil2cpp.so");
+        typedef void *(*gfn_fn)(Il2CppClass *, const char *);
+        typedef size_t (*f_off_fn)(void *);
+        gfn_fn gfn = img ? (gfn_fn)kl_sym(img, "il2cpp_class_get_field_from_name") : NULL;
+        f_off_fn fo = img ? (f_off_fn)kl_sym(img, "il2cpp_field_get_offset") : NULL;
+        void *f = k && gfn ? gfn(k, "eventTrigger") : NULL;
+        if (f && fo) trig_off = fo(f);
+        if (k) type = il.type_get_object(il.class_get_type(k));
+        m_find     = find_method("UnityEngine", "Object", "FindObjectsOfType", 1);
+        m_name     = find_method("UnityEngine", "Object", "get_name", 0);
+        m_tf       = find_method("UnityEngine", "Component", "get_transform", 0);
+        m_parent   = find_method("UnityEngine", "Transform", "get_parent", 0);
+        m_en       = find_method("UnityEngine", "Behaviour", "set_enabled", 1);
+        m_switch   = k ? il.class_get_method_from_name(k, "SwitchEnabled", 1) : NULL;
+        m_disabled = k ? il.class_get_method_from_name(k, "get_Disabled", 0) : NULL;
+        if (!type || !m_find || !m_name || !m_tf || !m_parent || !m_switch || !m_disabled) {
+            fprintf(stderr, "  [exocars] multiplayer button: TriggerButtonUI not found as "
+                            "expected — menu left as it is\n");
+            on = 0;
+            return;
+        }
+    }
+    void *ta[1] = { type };
+    Il2CppObject *arr = invoke(m_find, ta, "FindObjectsOfType(TriggerButtonUI)");
+    unsigned n = arr ? il.array_length(arr) : 0;
+    static unsigned seen[64], nseen;
+    for (unsigned i = 0; i < n && i < 256; i++) {
+        Il2CppObject *b = ((Il2CppObject **)((uint8_t *)arr + ARR_DATA))[i];
+        if (!b) continue;
+        // The button's own name and up to three ancestors', as "a < b < c < d".
+        char chain[320] = "", nm[4][80] = { "", "", "", "" };
+        str_ascii(invoke_on(b, m_name, NULL, "Object.get_name"), nm[0], sizeof nm[0]);
+        strncat(chain, nm[0], sizeof chain - strlen(chain) - 1);
+        Il2CppObject *tr = invoke_on(b, m_tf, NULL, "Component.get_transform");
+        for (int up = 1; up < 4 && tr; up++) {
+            tr = invoke_on(tr, m_parent, NULL, "Transform.get_parent");
+            if (!tr) break;
+            str_ascii(invoke_on(tr, m_name, NULL, "Object.get_name"), nm[up], sizeof nm[up]);
+            strncat(chain, " < ", sizeof chain - strlen(chain) - 1);
+            strncat(chain, nm[up], sizeof chain - strlen(chain) - 1);
+        }
+        int mp = !strcmp(nm[1], "Realtime") &&
+                 (!strcmp(nm[2], "StartMenu") || !strcmp(nm[3], "StartMenu"));
+        Il2CppObject *o = invoke_on(b, m_disabled, NULL, "TriggerButtonUI.get_Disabled");
+        int dis = o ? *(uint8_t *)il.object_unbox(o) : -1;
+        if (!mp) {
+            unsigned h = 2166136261u;
+            for (const char *c = chain; *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
+            unsigned k = 0;
+            while (k < nseen && seen[k] != h) k++;
+            if (k == nseen && nseen < sizeof seen / sizeof *seen) {
+                seen[nseen++] = h;
+                fprintf(stderr, "  [exocars] menu button seen: %s\n", chain);
+            }
+        }
+        if (!mp || dis == 1) continue;
+        // SwitchEnabled(value): which way "value" points is not in the names, so
+        // the result is read back and the other value tried if it did not take.
+        uint8_t v = 0;
+        void *a1[1] = { &v };
+        invoke_on(b, m_switch, a1, "TriggerButtonUI.SwitchEnabled(false)");
+        o = invoke_on(b, m_disabled, NULL, "TriggerButtonUI.get_Disabled");
+        if (!(o && *(uint8_t *)il.object_unbox(o))) {
+            v = 1;
+            invoke_on(b, m_switch, a1, "TriggerButtonUI.SwitchEnabled(true)");
+            o = invoke_on(b, m_disabled, NULL, "TriggerButtonUI.get_Disabled");
+        }
+        dis = o ? *(uint8_t *)il.object_unbox(o) : -1;
+        Il2CppObject *trig = trig_off ? *(Il2CppObject **)((uint8_t *)b + trig_off) : NULL;
+        if (trig && m_en) {
+            uint8_t off = 0;
+            void *a2[1] = { &off };
+            invoke_on(trig, m_en, a2, "EventTrigger.set_enabled(false)");
+        }
+        fprintf(stderr, "  [exocars] multiplayer button switched off: %s (disabled=%d, "
+                        "events %s; frame %u; KL_EXOCARS_NO_MULTIPLAYER=0 keeps it)\n",
+                chain, dis, trig ? "off" : "not found", frame);
+    }
+}
+
 // KL_PROBE_LINES=1 — every KL_PROBE_LINES_EVERY frames (default 300) from frame
 // 600: each LineRenderer the game has switched on, by name with its first
 // three ancestors, whether it renders and is visible, its point count, first

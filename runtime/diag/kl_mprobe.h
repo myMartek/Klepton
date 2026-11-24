@@ -33,6 +33,10 @@ void kl_mprobe_gunclub_save_preferences(void);
 // shadow distance held at 0). See kl_mprobe.c.
 void kl_mprobe_ven_no_rt_shadows(unsigned frame);
 
+// EXOcars only, self-gated on the target: the main menu's multiplayer button
+// switched off (Vivox, which its hosting needs, is not here). See kl_mprobe.c.
+void kl_mprobe_exocars_no_multiplayer(unsigned frame);
+
 #endif
 
 // User-initiated visionOS selection ray, in Unity-handed head-local metres.

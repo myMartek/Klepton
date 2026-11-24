@@ -964,7 +964,17 @@ static klj_val surface_released(void *env, void *self, const klj_val *a, int n) 
 static klj_val surface_release(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)a; (void)n;
     klj_surface_texture *st=surface_texture(self);
-    if (st && st->reader) { kl_mediandk_texture_delete(st->reader); st->reader=NULL; st->listener=NULL; }
+    if (st && st->reader) {
+        kl_mediandk_texture_delete(st->reader);
+        pthread_mutex_lock(&st->lock);
+        void *listener = st->listener;
+        st->reader=NULL; st->listener=NULL;
+        pthread_mutex_unlock(&st->lock);
+        // The pins surface_listener and surface_texture_init took "until
+        // release" (no-ops unless KL_JNI_RECLAIM_DEAD; see kl_jni.c).
+        if (listener) kl_jni_unpin_object(listener);
+        kl_jni_release_dead(st->object);
+    }
     return (klj_val){0};
 }
 static klj_val surface_wrapper_release(void *env, void *self, const klj_val *a, int n) {

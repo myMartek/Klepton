@@ -1416,6 +1416,7 @@ static klj_val klj_JNIBridge_disableInterfaceProxy(void *env, void *clazz,
         p->disabled = 1;
         KLJ_LOG("disableInterfaceProxy: proxy 0x%llx is dead",
                 (unsigned long long)p->native_ptr);
+        kl_jni_release_dead(o);   // newInterfaceProxy's pin (KL_JNI_RECLAIM_DEAD)
     } else {
         KLJ_LOG("disableInterfaceProxy: %s is not a proxy — ignored",
                 o ? o->cls : "(not an object)");

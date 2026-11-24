@@ -10,6 +10,7 @@
 #include "kl_vtdec.h"
 
 #include "kl_env.h"
+#include "kl_vp8.h"
 
 #include <TargetConditionals.h>
 #include <pthread.h>
@@ -29,7 +30,11 @@
 // "video/hevc"; measured). H.264 is here because the same three lines serve it,
 // the APK carries libh264bitstream.so beside the HEVC one, and the alternative
 // is aborting by name on a codec we can already decode.
-enum { KLVT_HEVC, KLVT_AVC };
+enum { KLVT_HEVC, KLVT_AVC, KLVT_VP8 };
+// VP8 (WebM clips, kl_webm.c) has no VideoToolbox decoder at all: it is
+// decoded in software by kl_vp8.c at submit time and its frames enter the same
+// ring as VideoToolbox's, as NV12 pixel buffers. Nothing below the ring can
+// tell the difference.
 
 // HEVC: nal_unit_type is bits 6..1 of the first header byte. AVC: bits 4..0.
 static int nal_type(int codec, uint8_t b0) {
@@ -103,6 +108,10 @@ struct kl_vtdec {
     unsigned n_fmt_built, n_sess_created, n_fmt_swapped;
     int      logged_changes;
     int width, height;
+
+    kl_vp8              *vp8;   // KLVT_VP8 only
+    CVPixelBufferPoolRef pool;  // its output buffers
+    int                  pool_w, pool_h;
 
     FILE    *dump;              // KL_VTDEC_DUMP — see klvt_open_dump
     FILE    *dump_idx;
@@ -180,6 +189,8 @@ static void klvt_ring_put(kl_vtdec *d, klvt_frame f) {
     d->ring_count++;
 }
 
+static void klvt_deliver(kl_vtdec *d, CVPixelBufferRef image, int64_t pts_us);
+
 static void klvt_output(void *decompressionOutputRefCon, void *sourceFrameRefCon,
                         OSStatus status, VTDecodeInfoFlags flags,
                         CVImageBufferRef image, CMTime pts, CMTime duration) {
@@ -195,13 +206,19 @@ static void klvt_output(void *decompressionOutputRefCon, void *sourceFrameRefCon
         return;
     }
 
+    klvt_deliver(d, (CVPixelBufferRef)CFRetain(image),
+                 (int64_t)(CMTimeGetSeconds(pts) * 1e6 + 0.5));
+}
+
+// A decoded frame (its retain handed over) into the ring, through the reorder
+// hold when that is on.
+static void klvt_deliver(kl_vtdec *d, CVPixelBufferRef image, int64_t pts_us) {
     pthread_mutex_lock(&d->lock);
     d->n_decoded++;
     d->width  = (int)CVPixelBufferGetWidth(image);
     d->height = (int)CVPixelBufferGetHeight(image);
 
-    klvt_frame f = { (CVPixelBufferRef)CFRetain(image),
-                     (int64_t)(CMTimeGetSeconds(pts) * 1e6 + 0.5) };
+    klvt_frame f = { image, pts_us };
     if (d->reorder) {
         // Sorted insert; then the earliest goes on once enough are held that
         // nothing still to come can precede it.
@@ -433,12 +450,15 @@ kl_vtdec *kl_vtdec_create(const char *mime) {
         codec = KLVT_HEVC;
     else if (mime && !strcmp(mime, "video/avc"))
         codec = KLVT_AVC;
+    else if (mime && !strcmp(mime, "video/x-vnd.on2.vp8"))
+        codec = KLVT_VP8;
     else
         return NULL;            // the caller reports it; see the header
 
     kl_vtdec *d = calloc(1, sizeof *d);
     if (!d) return NULL;
     d->codec = codec;
+    if (codec == KLVT_VP8 && !(d->vp8 = kl_vp8_new())) { free(d); return NULL; }
     pthread_mutex_init(&d->lock, NULL);
     klvt_open_dump(d);
     g_last = d;
@@ -452,6 +472,8 @@ void kl_vtdec_destroy(kl_vtdec *d) {
     if (d->dump)     fclose(d->dump);
     if (d->dump_idx) fclose(d->dump_idx);
     for (int i = 0; i < KLVT_NSETS; i++) free(d->set[i]);
+    kl_vp8_free(d->vp8);
+    if (d->pool) CVPixelBufferPoolRelease(d->pool);
     pthread_mutex_destroy(&d->lock);
     if (g_last == d) g_last = NULL;
     free(d);
@@ -530,10 +552,71 @@ static int klvt_hold(kl_vtdec *d, int slot, const uint8_t *p, size_t n) {
     return 1;
 }
 
+// One VP8 frame: decoded here, copied into an NV12 (video range) pixel buffer
+// — the layout VideoToolbox hands out for H.264, so buffer mode and the
+// SurfaceTexture path take it unchanged. A frame VP8 does not show (an
+// alt-ref) is not counted as submitted, so it cannot hold a pending slot.
+static int klvt_vp8_submit(kl_vtdec *d, const uint8_t *data, size_t len, int64_t pts_us) {
+    int r = kl_vp8_decode(d->vp8, data, len);
+    if (r == 0) return 0;
+    pthread_mutex_lock(&d->lock);
+    d->n_submitted++;
+    if (r < 0) d->n_failed++;
+    pthread_mutex_unlock(&d->lock);
+    if (r < 0) return 0;        // not decodable yet (no key frame): no picture, not an error
+
+    const uint8_t *y, *u, *v;
+    int ys, uvs, w, h;
+    kl_vp8_frame(d->vp8, &y, &u, &v, &ys, &uvs, &w, &h);
+    if (!d->pool || d->pool_w != w || d->pool_h != h) {
+        if (d->pool) { CVPixelBufferPoolRelease(d->pool); d->pool = NULL; }
+        CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 5, &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks);
+        int32_t pf = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+        CFNumberRef n_pf = CFNumberCreate(NULL, kCFNumberSInt32Type, &pf);
+        CFNumberRef n_w = CFNumberCreate(NULL, kCFNumberSInt32Type, &w);
+        CFNumberRef n_h = CFNumberCreate(NULL, kCFNumberSInt32Type, &h);
+        CFDictionaryRef empty = CFDictionaryCreate(NULL, NULL, NULL, 0,
+                                                   &kCFTypeDictionaryKeyCallBacks,
+                                                   &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(attrs, kCVPixelBufferPixelFormatTypeKey, n_pf);
+        CFDictionarySetValue(attrs, kCVPixelBufferWidthKey, n_w);
+        CFDictionarySetValue(attrs, kCVPixelBufferHeightKey, n_h);
+        CFDictionarySetValue(attrs, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
+        CFDictionarySetValue(attrs, kCVPixelBufferIOSurfacePropertiesKey, empty);
+        CVPixelBufferPoolCreate(NULL, NULL, attrs, &d->pool);
+        CFRelease(n_pf); CFRelease(n_w); CFRelease(n_h); CFRelease(empty); CFRelease(attrs);
+        d->pool_w = w; d->pool_h = h;
+        fprintf(stderr, "  [vtdec] VP8 %dx%d: decoding in software (kl_vp8.c)\n", w, h);
+    }
+    CVPixelBufferRef pb = NULL;
+    if (!d->pool || CVPixelBufferPoolCreatePixelBuffer(NULL, d->pool, &pb) != kCVReturnSuccess || !pb) {
+        pthread_mutex_lock(&d->lock); d->n_failed++; pthread_mutex_unlock(&d->lock);
+        return -1;
+    }
+    CVPixelBufferLockBaseAddress(pb, 0);
+    uint8_t *dy = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
+    uint8_t *dc = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+    size_t py = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
+    size_t pc = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+    int cw = (w + 1) / 2, ch = (h + 1) / 2;
+    for (int r2 = 0; r2 < h; r2++) memcpy(dy + (size_t)r2 * py, y + (size_t)r2 * ys, (size_t)w);
+    for (int r2 = 0; r2 < ch; r2++) {
+        uint8_t *o = dc + (size_t)r2 * pc;
+        const uint8_t *su = u + (size_t)r2 * uvs, *sv = v + (size_t)r2 * uvs;
+        for (int x = 0; x < cw; x++) { o[2 * x] = su[x]; o[2 * x + 1] = sv[x]; }
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    klvt_deliver(d, pb, pts_us);
+    return 0;
+}
+
 int kl_vtdec_submit(kl_vtdec *d, const uint8_t *annexb, size_t len,
                     int64_t pts_us) {
     if (!d || !annexb || !len) return -1;
     klvt_dump_au(d, annexb, len, pts_us);
+    if (d->codec == KLVT_VP8) return klvt_vp8_submit(d, annexb, len, pts_us);
 
     // Pass 1: absorb parameter sets, and measure how much length-prefixed
     // payload the rest will need. Two passes rather than one so the block
@@ -692,7 +775,8 @@ void kl_vtdec_report(FILE *f) {
     fprintf(f, "\n=== video decoder (VideoToolbox) ===\n");
     fprintf(f, "  %s %dx%d: %u submitted, %u decoded, %u dropped, %u failed,"
                " %d held\n",
-            d->codec == KLVT_HEVC ? "HEVC" : "H.264", d->width, d->height,
+            d->codec == KLVT_HEVC ? "HEVC" : d->codec == KLVT_VP8 ? "VP8 (software)" : "H.264",
+            d->width, d->height,
             d->n_submitted, d->n_decoded, d->n_dropped, d->n_failed,
             d->ring_count);
     // The parameter-set line, and what to read into it: sessions is the number

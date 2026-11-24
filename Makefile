@@ -68,7 +68,7 @@ RUNTIME_SHIP := $(LX_SRC) runtime/guest/kl_linuxproc.c \
            $(RUNTIME_JNI) \
            runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c runtime/xr/kl_hands.c \
            runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_present.c \
-           runtime/xr/kl_ovrplat.c runtime/xr/kl_assetcfg.c runtime/xr/kl_room.c runtime/xr/kl_steamapi.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_avdec.m runtime/media/kl_avpro.m runtime/media/kl_bsplayer.c runtime/media/kl_bsfbs.c \
+           runtime/xr/kl_ovrplat.c runtime/xr/kl_assetcfg.c runtime/xr/kl_room.c runtime/xr/kl_steamapi.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_vp8.c runtime/media/kl_webm.c runtime/media/kl_avdec.m runtime/media/kl_avpro.m runtime/media/kl_bsplayer.c runtime/media/kl_bsfbs.c \
            runtime/gfx/kl_vulkan.c runtime/gfx/kl_vk_eyefix.c runtime/gfx/kl_mtl_foveate.m runtime/gfx/kl_mtl_busy.m \
            runtime/guest/kl_nativeactivity.c runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_xashservers.c runtime/guest/kl_sdl2.c \
@@ -1328,6 +1328,9 @@ check: build/t_futex build/t_sem build/t_opus build/t_variadic build/t_load buil
 	@test -f $(LIBS)/libil2cpp.so || { echo "check needs the guest it tests: $(LIBS)/libil2cpp.so is not here."; \
 	  echo "  Unpack $(TARGET) into this working copy (see BUILDING.md), link or clone the tree from another one,"; \
 	  echo "  or name a guest that is here: make check TARGET=<name>"; exit 1; }
+	@# The Minecraft app (target vivecraft) has its own typecheck, outside xros on purpose (see swiftcheck-macho).
+	@# It is run here so a release check catches a shared view it still uses being renamed (avp-play #141).
+	@$(MAKE) --no-print-directory swiftcheck-macho
 	@./build/t_surreal
 	@echo "=== variadic ABI ===" && ./build/t_variadic
 	@./build/t_x18race > build/x18race.log 2>&1 || { cat build/x18race.log; exit 1; }
