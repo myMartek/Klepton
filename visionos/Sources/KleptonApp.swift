@@ -1480,6 +1480,8 @@ struct BootView: View {
         // Before configure, which is where the runtime starts reading its
         // environment.
         klAlyxApply()
+        // Bigscreen's folders from the Files app, before the guest lists Movies.
+        KLBigscreenFolders.shared.applyAtBoot()
         // The test switches first: none of these overwrites a value that is set, so a switch under
         // Advanced › Test wins over the picture setting it retunes (the foveation profile, 2026-10-13).
         KleptonTestSwitches.applyEnvironment()

@@ -282,6 +282,12 @@ typedef struct {
                            // the boot stays offline under that name
 } kl_msa_session_t;
 
+// Bigscreen Beta's films from the Files app (KleptonBigscreenFolders.swift):
+// one "<guest dir>\t<host dir>\n" line per picked folder, the guest dir
+// relative to external storage ("/Movies/iCloud Drive"); NULL clears the list.
+// Implemented in runtime/libc/kl_libc.c, which says how paths are served.
+void kl_guest_dir_aliases_set(const char *spec);
+
 // Half-Life: Alyx's console, for the app's cheat menu (runtime/linux/kl_lx_netcon.c,
 // which also says what it is): with KL_LX_NETCON=<port> the engine's net console
 // listens on a stand-in socket. One line out (0 = written; -1 while the game's

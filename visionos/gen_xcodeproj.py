@@ -639,6 +639,7 @@ SWIFT = ["KleptonApp.swift", "KleptonCompositor.swift", "KleptonControllers.swif
          "KleptonPictureProfile.swift", "KleptonSettingsWindow.swift",
          "KleptonVRRFloor.swift",
          "KleptonWalkaboutSave.swift",
+         "KleptonBigscreenFolders.swift",
          "KleptonRealityPresent.swift",
          "KleptonRoomStore.swift", "KleptonRoomSpace.swift", "KleptonBoundary.swift"]
 # Steam's connection, sign-in and Steam Cloud (SteamCloudKit/README.md: parts of
