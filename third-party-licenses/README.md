@@ -18,6 +18,7 @@ It also carries third-party source that is compiled with the runtime:
 | miniz (part of Fossilize) | `vendor-fossilize/miniz` | MIT | `vendor-fossilize/miniz/LICENSE` |
 | Vulkan headers (Khronos, part of Fossilize) | `vendor-fossilize/khronos` | Apache-2.0 or MIT | head of each file |
 | SMOL-V, at 55000ef, one marked change | `vendor-smolv` | MIT or public domain | `vendor-smolv/LICENSE.txt` |
+| The VP8 decoder of libvpx (the WebM Project), ported to C for WebM clips | `runtime/media/kl_vp8.c`, `runtime/media/kl_vp8.h` | BSD-3-Clause | `libvpx-LICENSE` |
 
 Recording and pre-building the Vulkan pipelines (`runtime/gfx/kl_fossilize.cpp`,
 `runtime/gfx/kl_vk_pipe_hooks.h`, `tools/alyx_pipelines.py`) follows Glovebox
