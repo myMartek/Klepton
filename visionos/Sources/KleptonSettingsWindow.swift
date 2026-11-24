@@ -359,6 +359,12 @@ enum KLHelp {
                                textEN: "The language the game is told the headset speaks. Many games choose their text and voices from it.",
                                textDE: "Die Sprache, die dem Spiel als Sprache des Headsets gemeldet wird. Viele Spiele wählen danach Texte und Stimmen.",
                                noteEN: nextStartEN, noteDE: nextStartDE)
+        case "bigscreen.folders":
+            return KLHelpEntry(en: "Films from the Files app", de: "Filme aus der Dateien-App",
+                               textEN: "Folders you choose here appear in Bigscreen's local films as folders inside Movies, beside the films in the game's own folder. Choose \"On My Apple Vision Pro\", iCloud Drive or any folder in them. The game plays the films where they are; nothing is copied.",
+                               textDE: "Ordner, die du hier wählst, erscheinen in Bigscreens lokalen Filmen als Ordner in Movies, neben den Filmen im eigenen Ordner des Spiels. Wähle „Auf meiner Apple Vision Pro“, iCloud Drive oder einen Ordner darin. Das Spiel spielt die Filme dort ab, wo sie liegen; nichts wird kopiert.",
+                               noteEN: "A film in iCloud Drive that is not on the headset yet is downloaded when the game first reads it, which can take a while. " + nextStartEN,
+                               noteDE: "Ein Film in iCloud Drive, der noch nicht auf dem Headset ist, wird geladen, wenn das Spiel ihn zum ersten Mal liest; das kann dauern. " + nextStartDE)
         case "game":
             return KLHelpEntry(en: "The game", de: "Das Spiel",
                                textEN: "What is particular to this game: its language, your name in it, saves in Steam Cloud and the mods it runs with.",
@@ -1406,6 +1412,11 @@ struct KLGamePage: View {
             KLSection(title: klT("Player", "Spieler")) { PlayerNameView() }
         }
         WalkaboutUnlockView()
+        if KLBigscreenFolders.offered {
+            KLSection(title: klT("Films from the Files app", "Filme aus der Dateien-App")) {
+                BigscreenFoldersView()
+            }.klHelp("bigscreen.folders")
+        }
         ModCreditsView()
         if micUpFront { KLSection(title: klT("Microphone", "Mikrofon")) { MicView() } }
     }

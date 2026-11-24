@@ -168,6 +168,12 @@ void kl_guest_path_map(const char *apk, const char *unpacked_dir);
 // what Environment.getExternalStorageDirectory() answers, or the two doors onto
 // one directory disagree. See the implementation comment in kl_libc.c.
 void kl_guest_extstorage_map(const char *dir);
+// Folders outside the container that the guest sees inside its external
+// storage (Bigscreen Beta's films from the Files app). `spec` is one
+// "<guest dir>\t<host dir>\n" line per folder; the guest dir is relative to
+// external storage ("/Movies/iCloud Drive"). NULL or "" clears the list.
+// See the implementation comment in kl_libc.c.
+void kl_guest_dir_aliases_set(const char *spec);
 
 // How much memory the guest asked us to decommit, and how we served it. Zero
 // bytes here on a Unity guest means its VirtualMemory layer's decommit is doing

@@ -1731,6 +1731,76 @@ void kl_guest_extstorage_map(const char *dir) {
 // picking any of them means the same place and has to land in the same place.
 static const char *const g_ext_prefix[] = { "/sdcard", "/storage/emulated/0", "/mnt/sdcard" };
 
+// Folders outside the container, seen by the guest inside its external storage.
+// Bigscreen Beta lists its films from /storage/emulated/0/Movies and plays them
+// by that path; the player picks further folders in the Files app ("On My Apple
+// Vision Pro", iCloud Drive), and the app (KleptonBigscreenFolders.swift) keeps
+// their security-scoped access open for the whole run, makes an empty folder of
+// the same name inside Movies so the guest's listing shows it, and registers it
+// here. Every path at or below "<ext>/Movies/<name>" is then served from the
+// picked folder; the empty folder itself is never written. The list is empty
+// unless the app registers something, which it does only for Bigscreen, so for
+// every other guest this is one NULL load per external-storage path.
+//
+// A new list replaces the old one in one pointer store; the old one is left in
+// place (a few KB, replaced only when the player changes the folders), so a
+// lookup on another thread never reads freed memory.
+#define KL_DIR_ALIAS_MAX 8
+typedef struct {
+    int n;
+    struct { char rel[512]; size_t rel_len; char host[1024]; } e[KL_DIR_ALIAS_MAX];
+} kl_dir_alias_list;
+static _Atomic(kl_dir_alias_list *) g_dir_aliases;
+
+void kl_guest_dir_aliases_set(const char *spec) {
+    kl_dir_alias_list *l = NULL;
+    if (spec && *spec) {
+        l = calloc(1, sizeof *l);
+        if (!l) return;
+        const char *p = spec;
+        while (*p && l->n < KL_DIR_ALIAS_MAX) {
+            const char *tab = strchr(p, '\t');
+            const char *nl = strchr(p, '\n');
+            if (!nl) nl = p + strlen(p);
+            if (tab && tab < nl) {
+                size_t rl = (size_t)(tab - p), hl = (size_t)(nl - tab - 1);
+                // Rooted, at least one name below the root, and room for both.
+                if (rl > 1 && p[0] == '/' && rl < sizeof l->e[0].rel &&
+                    hl > 1 && tab[1] == '/' && hl < sizeof l->e[0].host) {
+                    memcpy(l->e[l->n].rel, p, rl);
+                    l->e[l->n].rel[rl] = '\0';
+                    l->e[l->n].rel_len = rl;
+                    memcpy(l->e[l->n].host, tab + 1, hl);
+                    l->e[l->n].host[hl] = '\0';
+                    fprintf(stderr, "  [fs] folder alias <ext>%s -> %s\n",
+                            l->e[l->n].rel, l->e[l->n].host);
+                    l->n++;
+                }
+            }
+            p = *nl ? nl + 1 : nl;
+        }
+    }
+    atomic_store(&g_dir_aliases, l);
+    if (!l) fprintf(stderr, "  [fs] folder aliases cleared\n");
+}
+
+// `sub` is the part of a guest path after its external-storage prefix
+// ("/Movies/iCloud Drive/Film.mp4"). When it names an aliased folder or
+// something below it, the host path goes into `buf` and the length of the
+// picked folder's own path is returned; 0 otherwise.
+static size_t kl_dir_alias(const char *sub, char *buf, size_t cap) {
+    kl_dir_alias_list *l = atomic_load(&g_dir_aliases);
+    if (!l) return 0;
+    for (int i = 0; i < l->n; i++) {
+        size_t n = l->e[i].rel_len;
+        if (strncmp(sub, l->e[i].rel, n) != 0) continue;
+        if (sub[n] != '/' && sub[n] != '\0') continue;
+        snprintf(buf, cap, "%s%s", l->e[i].host, sub + n);
+        return strlen(l->e[i].host);
+    }
+    return 0;
+}
+
 // Resolve `path` case-insensitively in place, over the REAL tree, starting after
 // `prefix` bytes (a known-correct-case container prefix — g_ext_target). iOS
 // APFS is CASE-SENSITIVE, but Android games (ext4 heritage) freely mix case:
@@ -2020,6 +2090,13 @@ static const char *kl_guest_path_inner(const char *path, char *buf, size_t cap) 
                 const char *obb = kl_jni_obb_dir();
                 snprintf(buf, cap, "%s%s", obb, path + n + on);
                 kl_casefix(buf, strlen(obb));
+                return buf;
+            }
+            // A folder picked in the Files app (Bigscreen Beta's films).
+            // Case is fixed below the picked folder only, as below the container.
+            size_t host_len = kl_dir_alias(path + n, buf, cap);
+            if (host_len) {
+                kl_casefix(buf, host_len);
                 return buf;
             }
             snprintf(buf, cap, "%s%s", g_ext_target, path + n);
