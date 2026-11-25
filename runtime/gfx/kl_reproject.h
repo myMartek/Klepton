@@ -172,6 +172,10 @@ enum {
     KL_EYE_ALPHA_OPAQUE   = 0,   // ignore it — the picture covers everything
     KL_EYE_ALPHA_COVERAGE = 1,   // 1 = the game's picture, 0 = the room
     KL_EYE_ALPHA_INVERSE  = 2,   // 0 = the game's picture, 1 = the room
+    // An underlay is drawn after the picture (KleptonCompositor, Bigscreen's
+    // film): the alpha is written out as it is, nothing is discarded, and the
+    // underlay fills in by 1 - alpha. The pass sets alpha back to 1 after it.
+    KL_EYE_ALPHA_UNDERLAY = 3,
 };
 void kl_reproject_set_eye_alpha(int mode);
 // The values every kl_reproject_build puts there from now on. Scale 1, offset

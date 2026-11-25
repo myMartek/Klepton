@@ -433,7 +433,9 @@ static const char kl_msl_reproject[] =
 // has always shown it that way). Partly transparent pixels go on as alpha.
 // What a discarded pixel keeps is the pass's clear colour, so the caller has
 // to clear to transparent while this is in force (KleptonCompositor does).
-"    if (in.eyeAlpha != 0u && c.a < 0.004 && max(c.r, max(c.g, c.b)) < 0.004)\n"
+// Not for an underlay (3): its hole has to keep alpha 0, which a discard over
+// an opaque clear would not.
+"    if ((in.eyeAlpha == 1u || in.eyeAlpha == 2u) && c.a < 0.004 && max(c.r, max(c.g, c.b)) < 0.004)\n"
 "        discard_fragment();\n"
 // The guest's own fade (ovrp_SetColorScaleAndOffset), before the matte: a
 // picture faded to black is black, not whatever the key colour makes of it.
