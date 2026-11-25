@@ -2,6 +2,12 @@
 // single V_VP8 video track in SimpleBlocks or BlockGroups. AVFoundation does
 // not open WebM at all, so kl_avdemux hands such a file here and serves the
 // frames to AMediaExtractor exactly as it serves an MP4's. See kl_webm.c.
+//
+// For every title, not only the one it was written for (Mixture, community
+// fix 115, toolchain 932): any guest that opens a WebM clip gets it, as does
+// the extractor lock in kl_mediandk.c from the same fix. 932's commit named
+// Mixture alone as the game it affects, which held back the update for every
+// other game built before it; this note is the commit that says otherwise.
 #ifndef KL_WEBM_H
 #define KL_WEBM_H
 #include <stddef.h>
