@@ -190,6 +190,12 @@ ANGLE = ["ANGLE_libEGL", "ANGLE_libGLESv2"]
 # would stop everyone's build for a dependency most targets do not use.
 MVK = ["MoltenVK"] if os.path.isdir(
     os.path.join(HERE, "Frameworks", "MoltenVK.xcframework")) else []
+# FFmpeg (KleptonFFmpeg, tools/ffmpeg_build.sh) for the films AVFoundation
+# cannot open: Bigscreen Beta only, the one game whose player
+# (runtime/media/kl_bsplayer.c) dlopens it. 7 MB, so no other app carries it.
+# Optional like MoltenVK: absent, Bigscreen plays what AVFoundation opens.
+FFMPEG = ["KleptonFFmpeg"] if KLT["name"] == "x2497738113633933" and os.path.isdir(
+    os.path.join(HERE, "Frameworks", "KleptonFFmpeg.xcframework")) else []
 # Where each set is staged on the SOURCE side. The guest's is per-target so the
 # two apps do not overwrite each other's translations in place; ANGLE's is not,
 # because it is the same renderer for every guest. Inside the built .app both
@@ -238,7 +244,7 @@ if SC2:
 # Both translate to libcxx_shared.framework, so embedding both is ambiguous.
 if SC2 and 'SC2_libcxx_shared' in SC2:
     GUEST = [name for name in GUEST if name not in ('libc++_shared', 'libcxx_shared')]
-EMBED = GUEST + ANGLE + MVK + SC2
+EMBED = GUEST + ANGLE + MVK + FFMPEG + SC2
 
 
 def detect_team():
@@ -1234,6 +1240,9 @@ def main():
     # Vulkan guest is on a headset — so the build says which one it made.
     print(f"  embedded MoltenVK:         "
           + (', '.join(MVK) if MVK else "(none - run 'make mvk' for a Vulkan guest)"))
+    if KLT["name"] == "x2497738113633933":
+        print(f"  embedded FFmpeg:           "
+              + (', '.join(FFMPEG) if FFMPEG else "(none - run 'make ffmpeg' for MKV, AVI, WebM and more)"))
     if not SURREAL_SUPPORT:
         print("  Surreal Touch:             off (KLEPTON_SURREAL_SUPPORT=0) - standard controllers only")
     else:

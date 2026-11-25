@@ -11,10 +11,16 @@
 
 #include "kl_avdec.h"
 #include "kl_env.h"
+#include "kl_ffplay.h"
 
 struct kl_bsplayer {
     kl_avdec *dec;
     kl_avdemux *dm;
+    // ...or, for a file AVFoundation refuses (MKV, AVI, WebM, TS, WMV, OGV),
+    // the same two halves through FFmpeg (kl_ffplay.h). fv set = this path;
+    // fa NULL there = a film without sound FFmpeg decodes.
+    kl_ffvid *fv;
+    kl_ffaud *fa;
     kl_bsplayer_upload_fn upload;
     void *uctx;
     unsigned long long presented;   // serial of the last latched frame
@@ -43,6 +49,56 @@ struct kl_bsplayer {
     unsigned long realigns;         // how many times that was needed
 };
 
+// One player, two engines: AVFoundation (dec + dm) or FFmpeg (fv + fa).
+static void bs_play(kl_bsplayer *p, int on) {
+    if (p->fv) kl_ffvid_play(p->fv, on); else kl_avdec_play(p->dec, on);
+}
+static void bs_seek(kl_bsplayer *p, long long ms) {
+    if (p->fv) kl_ffvid_seek(p->fv, ms); else kl_avdec_seek(p->dec, ms);
+}
+static long long bs_pos_ms(kl_bsplayer *p) {
+    return p->fv ? kl_ffvid_position_ms(p->fv) : kl_avdec_position_ms(p->dec);
+}
+static int bs_complete(kl_bsplayer *p) {
+    return p->fv ? kl_ffvid_complete(p->fv) : kl_avdec_complete(p->dec);
+}
+static const void *bs_frame(kl_bsplayer *p, int *w, int *h, size_t *bytes,
+                            unsigned long long *serial) {
+    return p->fv ? kl_ffvid_frame(p->fv, w, h, bytes, serial)
+                 : kl_avdec_frame(p->dec, w, h, bytes, serial);
+}
+static void bs_frame_lock(kl_bsplayer *p) {
+    if (p->fv) kl_ffvid_frame_lock(p->fv); else kl_avdec_frame_lock(p->dec);
+}
+static void bs_frame_unlock(kl_bsplayer *p) {
+    if (p->fv) kl_ffvid_frame_unlock(p->fv); else kl_avdec_frame_unlock(p->dec);
+}
+static int bs_info(kl_bsplayer *p, int *w, int *h, const char **mime,
+                   long long *dur_us, float *fps) {
+    return p->fv ? kl_ffvid_info(p->fv, w, h, mime, dur_us, fps)
+                 : kl_avdemux_info(p->dm, w, h, mime, dur_us, fps);
+}
+static int bs_a_info(kl_bsplayer *p, int *rate, int *ch) {
+    if (p->fv) return p->fa ? kl_ffaud_info(p->fa, rate, ch) : 0;
+    return kl_avdemux_audio_info(p->dm, rate, ch);
+}
+static long long bs_a_time_us(kl_bsplayer *p) {
+    if (p->fv) return p->fa ? kl_ffaud_time_us(p->fa) : -1;
+    return kl_avdemux_audio_time_us(p->dm);
+}
+static long bs_a_read(kl_bsplayer *p, unsigned char *buf, unsigned long cap) {
+    if (p->fv) return p->fa ? kl_ffaud_read(p->fa, buf, cap) : -1;
+    return kl_avdemux_audio_read(p->dm, buf, cap);
+}
+static int bs_a_advance(kl_bsplayer *p) {
+    if (p->fv) return p->fa ? kl_ffaud_advance(p->fa) : 0;
+    return kl_avdemux_audio_advance(p->dm);
+}
+static int bs_a_seek_us(kl_bsplayer *p, long long us) {
+    if (p->fv) return p->fa ? kl_ffaud_seek_us(p->fa, us) : -1;
+    return kl_avdemux_audio_seek_us(p->dm, us);
+}
+
 static void kl_bsplayer_fire(kl_bsplayer *p, kl_bsplayer_event ev) {
     if (p->listener) p->listener(p->lctx, ev);
 }
@@ -59,22 +115,37 @@ kl_bsplayer *kl_bsplayer_open(const char *path, char *reason, size_t cap) {
     }
     kl_avdemux *dm = kl_avdemux_open(path, 0, 0);
     kl_avdec *dec = dm ? kl_avdec_open(path, 0, 0) : NULL;
+    kl_ffvid *fv = NULL;
+    kl_ffaud *fa = NULL;
     if (!dm || !dec) {
         if (dec) kl_avdec_close(dec);
         if (dm) kl_avdemux_close(dm);
-        if (reason && cap)
-            snprintf(reason, cap, "unsupported container or no video track: %s", path);
-        return NULL;
+        dec = NULL;
+        dm = NULL;
+        // What AVFoundation cannot open, FFmpeg may (kl_ffplay.h).
+        char why[300] = "FFmpeg is not here";
+        fv = kl_ffvid_open(path, why, sizeof why);
+        if (!fv) {
+            if (reason && cap)
+                snprintf(reason, cap, "unsupported container or no video track: %s (%s)",
+                         path, why);
+            return NULL;
+        }
+        fa = kl_ffaud_open(path);
     }
     kl_bsplayer *p = calloc(1, sizeof *p);
     if (!p) {
-        kl_avdec_close(dec);
-        kl_avdemux_close(dm);
+        if (dec) kl_avdec_close(dec);
+        if (dm) kl_avdemux_close(dm);
+        kl_ffaud_close(fa);
+        kl_ffvid_close(fv);
         if (reason && cap) snprintf(reason, cap, "out of memory");
         return NULL;
     }
     p->dec = dec;
     p->dm = dm;
+    p->fv = fv;
+    p->fa = fa;
     p->volume = 1.0f;
     pthread_mutex_init(&p->amu, NULL);
     return p;
@@ -84,7 +155,7 @@ int kl_bsplayer_info(kl_bsplayer *p, int *w, int *h, const char **mime,
                      long long *dur_us) {
     if (!p) return -1;
     float fps = 0;
-    return kl_avdemux_info(p->dm, w, h, mime, dur_us, &fps) ? 0 : -1;
+    return bs_info(p, w, h, mime, dur_us, &fps) ? 0 : -1;
 }
 
 void kl_bsplayer_close(kl_bsplayer *p) {
@@ -97,8 +168,10 @@ void kl_bsplayer_close(kl_bsplayer *p) {
         pthread_mutex_unlock(&p->amu);
         pthread_join(p->athr, NULL);
     }
-    kl_avdec_close(p->dec);
-    kl_avdemux_close(p->dm);
+    if (p->dec) kl_avdec_close(p->dec);
+    if (p->dm) kl_avdemux_close(p->dm);
+    kl_ffaud_close(p->fa);
+    kl_ffvid_close(p->fv);
     pthread_mutex_destroy(&p->amu);
     free(p);
 }
@@ -120,7 +193,7 @@ void kl_bsplayer_set_listener(kl_bsplayer *p, kl_bsplayer_listener_fn fn,
 int kl_bsplayer_audio_info(kl_bsplayer *p, int *rate, int *channels) {
     if (!p) return 0;
     int r = 0, c = 0;
-    int has = kl_avdemux_audio_info(p->dm, &r, &c);
+    int has = bs_a_info(p, &r, &c);
     if (rate) *rate = r;
     if (channels) *channels = c;
     return has;
@@ -163,7 +236,7 @@ static long long bs_now_ms(void) {
 static void bs_audio_realign(kl_bsplayer *p, long long pic_ms, long long aud_us,
                              int thr_ms) {
     pthread_mutex_lock(&p->amu);
-    kl_avdemux_audio_seek_us(p->dm, pic_ms * 1000);
+    bs_a_seek_us(p, pic_ms * 1000);
     kl_bsplayer_audio_sink sink = p->sink;
     void *sctx = p->sctx;
     int open = p->sink_open;
@@ -186,7 +259,7 @@ static void *bs_audio_thread(void *arg) {
     kl_bsplayer *p = arg;
     int rate = 0, ch = 0;
     pthread_mutex_lock(&p->amu);
-    int has = kl_avdemux_audio_info(p->dm, &rate, &ch);
+    int has = bs_a_info(p, &rate, &ch);
     kl_bsplayer_audio_sink sink = p->sink;
     void *sctx = p->sctx;
     pthread_mutex_unlock(&p->amu);
@@ -230,9 +303,9 @@ static void *bs_audio_thread(void *arg) {
         // correction, and seeking every two seconds only churns the file. It
         // fires once, on the iteration after the sink accepts again.
         if (armed && !refusing && thr_ms > 0) {
-            long long pic = kl_avdec_position_ms(p->dec);
+            long long pic = bs_pos_ms(p);
             pthread_mutex_lock(&p->amu);
-            long long aud = kl_avdemux_audio_time_us(p->dm);
+            long long aud = bs_a_time_us(p);
             pthread_mutex_unlock(&p->amu);
             if (pic > 0) {
                 long long off = aud - pic * 1000;
@@ -247,10 +320,10 @@ static void *bs_audio_thread(void *arg) {
             }
         }
         pthread_mutex_lock(&p->amu);
-        long long pts = kl_avdemux_audio_time_us(p->dm);
+        long long pts = bs_a_time_us(p);
         long n = pts < 0 ? -1
-                         : kl_avdemux_audio_read(p->dm, buf, sizeof buf);
-        if (n > 0) kl_avdemux_audio_advance(p->dm);
+                         : bs_a_read(p, buf, sizeof buf);
+        if (n > 0) bs_a_advance(p);
         pthread_mutex_unlock(&p->amu);
         if (n <= 0) {   // end of sound: idle until seek/replay/close
             usleep(100000);
@@ -317,7 +390,7 @@ static void bs_audio_start(kl_bsplayer *p) {
 static void bs_audio_seek(kl_bsplayer *p, long long us) {
     if (!p) return;
     pthread_mutex_lock(&p->amu);
-    kl_avdemux_audio_seek_us(p->dm, us);
+    bs_a_seek_us(p, us);
     p->realign_armed = 0;       // a deliberate seek IS the alignment
     kl_bsplayer_audio_sink sink = p->sink;
     void *sctx = p->sctx;
@@ -332,13 +405,13 @@ static void bs_audio_rewind(kl_bsplayer *p) {
 
 void kl_bsplayer_play(kl_bsplayer *p) {
     if (!p || p->playing) return;
-    if (kl_avdec_complete(p->dec)) {
+    if (bs_complete(p)) {
         // Replay after the end restarts from the top: the old reader is
         // spent (its next sample is permanently EOS), so rewind first.
-        kl_avdec_seek(p->dec, 0);
+        bs_seek(p, 0);
         bs_audio_seek(p, 0);
     }
-    kl_avdec_play(p->dec, 1);
+    bs_play(p, 1);
     p->playing = 1;
     p->ended_fired = 0;
     bs_audio_start(p);   // idempotent: parks until the first play
@@ -352,7 +425,7 @@ void kl_bsplayer_play(kl_bsplayer *p) {
 
 void kl_bsplayer_pause(kl_bsplayer *p) {
     if (!p || !p->playing) return;
-    kl_avdec_play(p->dec, 0);
+    bs_play(p, 0);
     p->playing = 0;
     if (p->sink.pause && p->sink_open) p->sink.pause(p->sctx);
     kl_bsplayer_fire(p, KL_BS_EV_PAUSED);
@@ -365,8 +438,8 @@ void kl_bsplayer_resume(kl_bsplayer *p) {
 void kl_bsplayer_stop(kl_bsplayer *p) {
     if (!p) return;
     int was_playing = p->playing;
-    kl_avdec_play(p->dec, 0);
-    kl_avdec_seek(p->dec, 0);
+    bs_play(p, 0);
+    bs_seek(p, 0);
     p->playing = 0;
     bs_audio_rewind(p);   // audio cursor to 0 + sink flushed
     if (was_playing) kl_bsplayer_fire(p, KL_BS_EV_PAUSED);
@@ -375,10 +448,10 @@ void kl_bsplayer_stop(kl_bsplayer *p) {
 long long kl_bsplayer_seek_to_us(kl_bsplayer *p, long long us) {
     if (!p) return 0;
     long long dur = 0;
-    kl_avdemux_info(p->dm, NULL, NULL, NULL, &dur, NULL);
+    bs_info(p, NULL, NULL, NULL, &dur, NULL);
     if (us < 0) us = 0;
     if (us > dur) us = dur;
-    kl_avdec_seek(p->dec, us / 1000);
+    bs_seek(p, us / 1000);
     bs_audio_seek(p, us);   // audio cursor follows the picture, sink flushed
     return us;
 }
@@ -398,13 +471,13 @@ float kl_bsplayer_volume(kl_bsplayer *p) {
 
 long long kl_bsplayer_position_ms(kl_bsplayer *p) {
     if (!p) return 0;
-    return kl_avdec_position_ms(p->dec);
+    return bs_pos_ms(p);
 }
 
 long long kl_bsplayer_audio_position_us(kl_bsplayer *p) {
     if (!p) return -1;
     pthread_mutex_lock(&p->amu);
-    long long a = kl_avdemux_audio_time_us(p->dm);
+    long long a = bs_a_time_us(p);
     pthread_mutex_unlock(&p->amu);
     return a;
 }
@@ -419,7 +492,7 @@ unsigned long kl_bsplayer_av_realigns(kl_bsplayer *p) {
 
 int kl_bsplayer_update(kl_bsplayer *p) {
     if (!p) return -1;
-    if (!p->ended_fired && p->ready_fired && kl_avdec_complete(p->dec)) {
+    if (!p->ended_fired && p->ready_fired && bs_complete(p)) {
         p->ended_fired = 1;
         p->playing = 0;
         if (p->sink.pause && p->sink_open) p->sink.pause(p->sctx);
@@ -433,8 +506,8 @@ int kl_bsplayer_present(kl_bsplayer *p) {
     int w = 0, h = 0;
     size_t bytes = 0;
     unsigned long long serial = 0;
-    kl_avdec_frame_lock(p->dec);
-    const void *cur = kl_avdec_frame(p->dec, &w, &h, &bytes, &serial);
+    bs_frame_lock(p);
+    const void *cur = bs_frame(p, &w, &h, &bytes, &serial);
     unsigned char *copy = NULL;
     if (cur && serial != 0 && serial != p->presented && bytes) {
         size_t n = (size_t)w * h * 4;
@@ -446,7 +519,7 @@ int kl_bsplayer_present(kl_bsplayer *p) {
             copy = NULL;
         }
     }
-    kl_avdec_frame_unlock(p->dec);
+    bs_frame_unlock(p);
     if (!copy) return 1;   // no new frame (or out of memory: skip, retry next)
     int rc = -1;
     if (p->upload) rc = p->upload(p->uctx, copy, w, h, serial);
@@ -461,19 +534,19 @@ int kl_bsplayer_decode_first(kl_bsplayer *p, unsigned char **bgra, int *w,
     *bgra = NULL;
     if (w) *w = 0;
     if (h) *h = 0;
-    kl_avdec_play(p->dec, 1);
+    bs_play(p, 1);
     // The decoder pumps on its own thread; serial counts published frames.
     int fw = 0, fh = 0;
     size_t bytes = 0;
     unsigned long long serial = 0;
     for (int i = 0; i < 200; i++) {
-        const void *f = kl_avdec_frame(p->dec, &fw, &fh, &bytes, &serial);
+        const void *f = bs_frame(p, &fw, &fh, &bytes, &serial);
         if (f && serial != 0 && bytes) break;
         usleep(50000);
     }
     int rc = -1;
-    kl_avdec_frame_lock(p->dec);
-    const void *cur = kl_avdec_frame(p->dec, &fw, &fh, &bytes, &serial);
+    bs_frame_lock(p);
+    const void *cur = bs_frame(p, &fw, &fh, &bytes, &serial);
     if (cur && serial != 0 && bytes) {
         size_t n = (size_t)fw * fh * 4;
         if (n > bytes) n = bytes;
@@ -488,7 +561,7 @@ int kl_bsplayer_decode_first(kl_bsplayer *p, unsigned char **bgra, int *w,
             free(out);
         }
     }
-    kl_avdec_frame_unlock(p->dec);
-    kl_avdec_play(p->dec, 0);
+    bs_frame_unlock(p);
+    bs_play(p, 0);
     return rc;
 }
