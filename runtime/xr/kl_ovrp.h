@@ -157,7 +157,9 @@ int kl_ovrp_layer_lifecycle_selftest(void);
 
 // Menu-yields-film (Bigscreen x2497738113633933): while a room-menu BigUIPage
 // IsShowing, the film quad overlay is skipped host-side and the in-eye mesh
-// carries the picture. State is set from the frame-thread probe (kl_mprobe)
+// carries the picture. Outside menus the quad is an underlay, drawn under the
+// eye picture by the compositor (KL_BS_FILM_UNDERLAY).
+// State is set from the frame-thread probe (kl_mprobe)
 // and read by the compositor. 1 = passed. Host test tests/t_bigscreen_menu.c.
 void kl_bigscreen_menu_set(int open, int ineye_alive);
 int kl_bigscreen_menu_open(void);

@@ -11065,11 +11065,30 @@ int kl_bigscreen_menu_open(void) {
 // 1 = skip this overlay: menu open, in-eye alive, and this is the film quad
 // (shape 0, world-locked). Equirects (shape 5, backdrop) and head-locked
 // covers are never the film.
+//
+// KL_BS_FILM_INEYE=1 (default off): the film quad is skipped whenever the
+// in-eye mesh is alive, not only while a menu shows. Tried as the fix for the
+// film covering the game's UI (2026-11-25) and it is not one: outside menus
+// that mesh is Bigscreen's underlay impostor, a transparent hole in the eye
+// picture, so with the quad down there was no film at all. The film quad is
+// an UNDERLAY (submitted without OnTop, flags 0x44), and KleptonCompositor
+// draws it under the eye picture (KL_BS_FILM_UNDERLAY). Kept as a switch for
+// comparison.
+static int klovrp_bsfilm_ineye_on(void) {
+    static int on = -1;
+    if (on < 0) on = kl_env_on("KL_BS_FILM_INEYE", 0);
+    return on;
+}
 int kl_bigscreen_hide_film(int shape, int head_locked) {
-    if (!kl_bigscreen_menu_open()) return 0;
-    if (!__atomic_load_n(&g_bsfilm_alive, __ATOMIC_RELAXED)) return 0;
     if (shape != 0 || head_locked) return 0;
-    return 1;
+    if (!__atomic_load_n(&g_bsfilm_alive, __ATOMIC_RELAXED)) return 0;
+    if (klovrp_bsfilm_ineye_on()) {
+        static int said;
+        if (!said) { said = 1; fprintf(stderr, "  [ovrp] bigscreen: film quad down outside menus "
+                                               "(KL_BS_FILM_INEYE)\n"); }
+        return 1;
+    }
+    return kl_bigscreen_menu_open();
 }
 int kl_bigscreen_menu_selftest(void) {
 #define REQUIRE(x) do { if (!(x)) { fprintf(stderr, "menu selftest failed: %s\n", #x); return 0; } } while (0)
@@ -11095,8 +11114,15 @@ int kl_bigscreen_menu_selftest(void) {
     REQUIRE(kl_bigscreen_menu_open() == 1);
     kl_bigscreen_menu_set(0, 1);
     REQUIRE(kl_bigscreen_menu_open() == 0);
+    // Menu closed, film playing: the quad is up (it is drawn as an underlay),
+    // and down only under KL_BS_FILM_INEYE=1.
+    REQUIRE(kl_bigscreen_hide_film(0, 0) == klovrp_bsfilm_ineye_on());
+    REQUIRE(kl_bigscreen_hide_film(5, 0) == 0);
+    REQUIRE(kl_bigscreen_hide_film(0, 1) == 0);
     kl_bigscreen_menu_set(0, 0); kl_bigscreen_menu_set(0, 0);
     REQUIRE(kl_bigscreen_menu_open() == 0);
+    // No screen mesh (the DRM guard): never hidden, whatever the mode.
+    REQUIRE(kl_bigscreen_hide_film(0, 0) == 0);
     return 1;
 #undef REQUIRE
 }
@@ -11555,9 +11581,10 @@ static uint64_t klovrp_EnqueueSubmitLayer2(uint32_t flags, void *texL, void *tex
     { static int seen[128]; static int nseen;
       int known = 0; for (int i=0;i<nseen;i++) if (seen[i]==layer_id) { known=1; break; }
       if (!known && nseen < 128) { seen[nseen++]=layer_id;
-        fprintf(stderr, "  [ovrp] EnqueueSubmit texL: layer=%d texL=%#llx texR=%#llx\n",
+        fprintf(stderr, "  [ovrp] EnqueueSubmit texL: layer=%d texL=%#llx texR=%#llx "
+                "flags=%#x idx=%d\n",
                 layer_id, (unsigned long long)(uintptr_t)texL,
-                (unsigned long long)(uintptr_t)texR); } }
+                (unsigned long long)(uintptr_t)texR, flags, layer_index); } }
     (void)texL; (void)texR;
     static int logged;
     if (logged < 24) {

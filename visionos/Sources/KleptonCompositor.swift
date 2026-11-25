@@ -419,6 +419,11 @@ final class KleptonCompositor {
     /// The overlay pass — a guest's non-eye layers. nil when it failed to
     /// build, which is named at construction rather than per frame.
     private var overlayPipeline: MTLRenderPipelineState?
+    /// An underlay quad (Bigscreen's film): fills in what the eye picture left
+    /// transparent, by 1 - the alpha the eye pass wrote. See encodeOverlays.
+    private var underlayPipeline: MTLRenderPipelineState?
+    /// ...and the pass after it that puts the drawable's alpha back to 1.
+    private var alphaOnePipeline: MTLRenderPipelineState?
     /// The projection-layer pass for a layer that asks to be blended by its
     /// alpha (XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT): premultiplied
     /// colour, as OpenXR has it unless the layer says otherwise, and the
@@ -1287,6 +1292,31 @@ final class KleptonCompositor {
             odesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
             odesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             overlayPipeline = try? device.makeRenderPipelineState(descriptor: odesc)
+            // The underlay: the eye pass wrote the game's own alpha (KL_EYE_ALPHA_
+            // UNDERLAY), so where the game left a hole the destination alpha is 0
+            // and the film shows, and where it drew its UI it is 1 and the UI
+            // stays. The eye colour is taken as premultiplied, as a headset
+            // composites an eye layer over its underlays.
+            if Self.filmUnderlay {
+                odesc.colorAttachments[0].sourceRGBBlendFactor = .oneMinusDestinationAlpha
+                odesc.colorAttachments[0].destinationRGBBlendFactor = .one
+                odesc.colorAttachments[0].sourceAlphaBlendFactor = .zero
+                odesc.colorAttachments[0].destinationAlphaBlendFactor = .one
+                underlayPipeline = try? device.makeRenderPipelineState(descriptor: odesc)
+                let adesc = MTLRenderPipelineDescriptor()
+                let alib = try device.makeLibrary(source: Self.alphaOneMSL, options: nil)
+                adesc.vertexFunction = alib.makeFunction(name: "kl_alpha1_v")
+                adesc.fragmentFunction = alib.makeFunction(name: "kl_alpha1_f")
+                adesc.colorAttachments[0].pixelFormat = color
+                adesc.colorAttachments[0].writeMask = .alpha
+                adesc.depthAttachmentPixelFormat = .depth32Float
+                adesc.stencilAttachmentPixelFormat = KleptonImmersion.stencilFormat
+                adesc.maxVertexAmplificationCount = amplification
+                alphaOnePipeline = try? device.makeRenderPipelineState(descriptor: adesc)
+                if underlayPipeline == nil || alphaOnePipeline == nil {
+                    NSLog("[cp] the underlay pipelines failed to build — Bigscreen's film is drawn over the picture")
+                }
+            }
             if overlayPipeline == nil {
                 NSLog("[cp] the overlay pipeline failed to build — a guest's non-eye "
                       + "layers will not be composited (on Unreal that is its whole UI)")
@@ -4168,6 +4198,9 @@ final class KleptonCompositor {
         // the loop, including the ones that skip a view.
         var sources: [MTLTexture?] = []
         var visible = 0
+        // Bigscreen's film under the picture (filmUnderlay): the eye pass then
+        // writes the game's alpha, and encodeOverlays fills the hole.
+        let underlay = hasUnderlay()
         for vi in viewIndices {
             let view = drawable.views[vi]
             var a = eyeSource(vi, stage)
@@ -4216,6 +4249,7 @@ final class KleptonCompositor {
                 continue
             }
             u.visible = alloc == nil ? 0 : 1
+            if underlay && u.eye_alpha == 0 { u.eye_alpha = UInt32(KL_EYE_ALPHA_UNDERLAY) }
             uniforms.append(u)
             sources.append(alloc?.texture)
         }
@@ -4456,7 +4490,8 @@ final class KleptonCompositor {
         }
         let panels = encodeOverlays(enc, viewIndices: viewIndices, drawable: drawable,
                                     originFromHead: originFromHead,
-                                    writeDepth: visible == 0)
+                                    writeDepth: visible == 0,
+                                    underEye: underlay && visible > 0)
         drawable.endEncoding(enc)
         // "How many eyes got a picture", which is what the caller counts black
         // frames with — and a panel IS a picture. Without this a guest that
@@ -4741,8 +4776,10 @@ final class KleptonCompositor {
                                 drawable: KLDrawable,
                                 originFromHead: simd_float4x4,
                                 writeDepth: Bool,
-                                backdrop: Bool = true) -> Int {
-        guard overlaysEnabled, let pipe = overlayPipeline else { return 0 }
+                                backdrop: Bool = true,
+                                underEye: Bool = false) -> Int {
+        guard overlaysEnabled, let overPipe = overlayPipeline else { return 0 }
+        var pipe = overPipe
         // .greater against that same clear, and the shader's own projected
         // position carries the quad's real distance, so what lands in the
         // buffer is where the panel actually is.
@@ -4757,9 +4794,25 @@ final class KleptonCompositor {
         let n = Int(kl_ovrp_overlay_count())
         var drawn = 0
         var drewEquirect = false
+        // Two rounds when an underlay is under the eye picture: first the
+        // underlays alone, into the hole the eye pass left (underlayPipeline),
+        // then the drawable's alpha back to 1, then everything else as always.
+        var drewUnder = false
+        for round in (underEye ? [0, 1] : [1]) {
+        if round == 1 && drewUnder, let a1 = alphaOnePipeline {
+            if let depthPassState { enc.setDepthStencilState(depthPassState) }
+            enc.setRenderPipelineState(a1)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            // Back to the eye pass's state, which the panels below have always
+            // been drawn under.
+            if let depthState { enc.setDepthStencilState(depthState) }
+        }
+        pipe = round == 0 ? (underlayPipeline ?? overPipe) : overPipe
         for i in 0..<n {
             var ov = kl_ovrp_overlay()
             guard kl_ovrp_overlay_get(Int32(i), &ov) != 0 else { continue }
+            let under = underEye && Self.isUnderlay(ov)
+            if (round == 0) != under { continue }
             // Equirect layers are the loading/menu backdrop, which the host
             // draws itself from the real mp4 (drawLoadingSkybox). The guest's
             // own equirect layers here are 2x2 placeholders or the wild video
@@ -4858,7 +4911,10 @@ final class KleptonCompositor {
             }
             // The equirect branch above may have swapped the depth state for
             // its behind-everything compare; restore the quad's before drawing.
-            if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
+            // An underlay is drawn into the eye pass's hole whatever its distance:
+            // the eye pass's own depth is in front of it everywhere.
+            if round == 0, let depthPassState { enc.setDepthStencilState(depthPassState) }
+            else if writeDepth, let depthState { enc.setDepthStencilState(depthState) }
             // ...or, where asked for, the state that lets each quad land over
             // the ones before it whatever their distances.
             else if Self.overlaysInSubmitOrder, let overlayOrderState {
@@ -4876,13 +4932,16 @@ final class KleptonCompositor {
                 .map { u in var v = u; return Int(kl_overlay_strip_vertices(&v)) } ?? 4
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: stripVertices)
             drawn += 1
+            if round == 0 { drewUnder = true }
             if !loggedOverlayDraw.contains(ov.layer_id) {
                 loggedOverlayDraw.insert(ov.layer_id)
                 NSLog("[cp] compositing overlay layer \(ov.layer_id): "
                       + "\(ov.size.0)x\(ov.size.1) m at (\(ov.pose.4), \(ov.pose.5), "
                       + "\(ov.pose.6))"
-                      + (ov.head_locked != 0 ? ", HEAD-LOCKED" : ""))
+                      + (ov.head_locked != 0 ? ", HEAD-LOCKED" : "")
+                      + (round == 0 ? ", UNDER the eye picture (flags \(String(ov.flags, radix: 16)))" : ""))
             }
+        }
         }
         // The play area's edge (KleptonBoundary.swift), over the game and its panels, under our own cards.
         encodeBoundary(enc, viewIndices: viewIndices, drawable: drawable, originFromHead: originFromHead)
@@ -5722,6 +5781,40 @@ final class KleptonCompositor {
     private static let overlaysInSubmitOrder =
         klEnvOn("KL_OVERLAY_SUBMIT_ORDER",
                 default: ["x24882487241367228", "x5812519008825194"].contains(klTargetName()))
+    /// KL_BS_FILM_UNDERLAY (Bigscreen Beta, default on): a quad submitted without
+    /// OnTop (bit 0 of the enqueue flags; the film is 0x44, loading cards 0x1)
+    /// is an underlay, as on a Quest. It is drawn after the eye picture into
+    /// what the game left transparent there: Bigscreen draws a transparent
+    /// "impostor" where its screen is, and its UI, hands and name tags opaque
+    /// in front of it. Drawn over everything, as every overlay here is, the
+    /// film covered all of that (2026-11-25). =0 restores that.
+    private static let filmUnderlay =
+        klEnvOn("KL_BS_FILM_UNDERLAY", default: klTargetName() == "x2497738113633933")
+    private static let alphaOneMSL = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct KLA1 { float4 pos [[position]]; };
+        vertex KLA1 kl_alpha1_v(uint vid [[vertex_id]]) {
+            float2 p = float2(float((vid << 1) & 2u), float(vid & 2u));
+            KLA1 o; o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0); return o;
+        }
+        fragment float4 kl_alpha1_f() { return float4(0.0, 0.0, 0.0, 1.0); }
+        """
+    /// 1 when this frame has a visible underlay quad to draw under the eye picture.
+    private func hasUnderlay() -> Bool {
+        guard Self.filmUnderlay, underlayPipeline != nil, alphaOnePipeline != nil,
+              kl_probe_bigscreen() != 0, kl_ovrp_passthrough_live() == 0 else { return false }
+        let n = Int(kl_ovrp_overlay_count())
+        for i in 0..<n {
+            var ov = kl_ovrp_overlay()
+            guard kl_ovrp_overlay_get(Int32(i), &ov) != 0 else { continue }
+            if Self.isUnderlay(ov) && kl_bigscreen_hide_film(ov.shape, ov.head_locked) == 0 { return true }
+        }
+        return false
+    }
+    private static func isUnderlay(_ ov: kl_ovrp_overlay) -> Bool {
+        ov.shape == 0 && ov.head_locked == 0 && (ov.flags & 0x1) == 0
+    }
     private static let drawEquirectOverlays = klEnvOn("KL_OVERLAY_EQ", default: true)
     private static let eqFlipY = klEnvOn("KL_EQ_FLIP", default: false)
     private static let eqSrgbDecode = klEnvOn("KL_EQ_SRGB", default: false)
