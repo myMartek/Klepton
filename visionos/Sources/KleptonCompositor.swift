@@ -640,6 +640,15 @@ final class KleptonCompositor {
     // display period by more than 10%. See cadenceSummary().
     private var cadenceDisagreed = 0
     private let noFence = klEnvOn("KL_CP_NOFENCE", default: false)
+    /// KL_CP_FENCE_EYE=1/0: a finished eye picture counts as content for the fence wait below.
+    /// A guest that hands its eyes over through OVRPlugin's eye layer files no projection layers,
+    /// so the content gate saw "no layers yet" for the whole session and never waited: the
+    /// composite sampled the newest stage while ANGLE was still drawing into it, which shows the
+    /// picture three frames older (a ring of three). On the headset that is a second picture
+    /// beside the right one whenever a frame is late, and constantly at half rate
+    /// (I Expect You To Die, 2026-11-24: fence-skips on nearly every frame, layers=0).
+    /// On by default for that title only until other GL games are seen with it.
+    private let fenceEyeLayer = klEnvOn("KL_CP_FENCE_EYE", default: klTargetName() == "x1987283631365460")
     // The last device anchor the tracker actually answered with, and how often
     // it has had to stand in. See displayOriginFromDevice for why holding it is
     // not the same kind of guess as the identity it replaced.
@@ -2658,6 +2667,7 @@ final class KleptonCompositor {
         // submitted frame and is always one ANGLE has already been handed, so
         // waiting on it cannot be a wait on a guest that has gone quiet.
         let haveGuestContent = projLayerCount > 0 || kl_glfb_frame_fenced() != 0
+            || (fenceEyeLayer && completeStage >= 0 && kl_ovrp_eye_layer_live() != 0)
         if let ev = guestFrameEvent, glFence != 0, !noFence,
            haveGuestContent, outstanding <= maxFenceBacklog {
             cmd.encodeWaitForEvent(ev, value: glFence)

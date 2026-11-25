@@ -100,6 +100,9 @@ void kl_ovrp_get_head_pose(float *px, float *py, float *pz,
 // unsafe, only less useful: each call re-pins to the newest published pose.
 // KL_OVRP_LATCH=0 disables it and restores the live read.
 void kl_ovrp_frame_latch(void);
+// The driving frame loop's turn start, for an OVRPlugin guest that never calls
+// ovrp_WaitToBeginFrame: one head pose for the turn (KL_OVRP_ARM_AT_FRAME).
+void kl_ovrp_guest_frame_begin(void);
 
 // The pose-boundary gate for one pose per guest frame (kl_ovrp.c, "ONE POSE
 // PER GUEST FRAME"), as a host check: `make posebound`, in `make check`. It
@@ -125,11 +128,16 @@ void kl_ovrp_frame_latch(void);
 //   MIXED  an OpenXR frame loop whose Meta SDK also calls ovrp_Update2(step 0,
 //          frameIdx 0) in mid-frame (Walkabout): the head read before and
 //          after that call is the latch's one pose, nothing frozen.
+//   LEGACY an OVRPlugin guest that never calls ovrp_WaitToBeginFrame, driven
+//          by the frame loop (I Expect You To Die), KL_OVRP_ARM_AT_FRAME=1:
+//          the frontend publishes mid-frame, and every read and the record
+//          are still the pose the turn started with.
 enum {
     KL_OVRP_POSEBOUND_CYCLE = 0,
     KL_OVRP_POSEBOUND_INDEX,
     KL_OVRP_POSEBOUND_XR,
     KL_OVRP_POSEBOUND_MIXED,
+    KL_OVRP_POSEBOUND_LEGACY,
 };
 int kl_ovrp_pose_boundary_selftest(FILE *f, int which);
 

@@ -96,6 +96,7 @@ int main(void) {
     ok &= kl_ovrp_title_eye_cap("cs1") == 2560;
     ok &= kl_ovrp_title_eye_cap(ONIRI) == 0;
     ok &= kl_ovrp_title_eye_cap("x3713270985434472") == 4000;
+    ok &= kl_ovrp_title_eye_cap("x1987283631365460") == 4000;
     ok &= kl_ovrp_title_eye_cap(FLOORPLAN2) == 4096;
     ok &= kl_ovrp_title_eye_cap("x2108775495884888") == 4608;
     ok &= kl_ovrp_title_eye_cap("x2223615721048141") == 4608;
