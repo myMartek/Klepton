@@ -7,6 +7,7 @@ prebuilt third-party libraries:
 |---|---|---|---|
 | ANGLE (libEGL, libGLESv2), with the changes in `angle-patches/klepton.patch` | `vendor/out/xros`, `vendor/out/xrsim` | BSD-3-Clause | `ANGLE-LICENSE.txt` |
 | MoltenVK | `vendor-moltenvk/out` | Apache-2.0 | `MoltenVK-LICENSE.txt` |
+| FFmpeg 9.0.2 (ffmpeg.org, release tarball pinned by sha256), decoders and demuxers only, with the change in `tools/ffmpeg/visionos.patch`, linked with `tools/ffmpeg/klff_shim.c` into `KleptonFFmpeg.framework` by `tools/ffmpeg_build.sh`; embedded in Bigscreen Beta's app only and dlopened by `runtime/media/kl_ffplay.c`, never linked | `vendor/out/xros`, `vendor/out/xrsim` (built by `make ffmpeg`) | LGPL-2.1-or-later (no GPL or non-free parts; the build stops otherwise) | `FFmpeg-COPYING.LGPLv2.1` |
 | Surreal Interactive's visionOS SDK (`surreal_interactive_openxr_framework`, github.com/surreal-interactive/SwiftSDKBinary at a42deb0), linked into Surreal Touch builds only | `visionos/Frameworks/surreal_interactive_openxr_framework.xcframework` (fetched by `tools/surreal_sdk_fetch.sh`) | Apache-2.0 | `SurrealInteractiveSDK-LICENSE.txt` |
 
 It also carries third-party source that is compiled with the runtime:

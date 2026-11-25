@@ -234,6 +234,8 @@ fi
 # prebuilt — so the script just re-wraps whatever is vendored and says so when
 # nothing is. gen_xcodeproj.py embeds it only if this produced something.
 ./mkmvk.sh | tail -1
+# ...and FFmpeg for Bigscreen Beta's films (embedded for that game only).
+./mkffmpeg.sh | tail -1
 
 echo "[2/5] project…  custom launcher: $([ -n "$DD_SUFFIX" ] && echo "ON (HL*VR name + monogram icon + Boot button)" || echo "off (normal build; set KL_CUSTOM_LAUNCHER=1 to enable)")"
 python3 gen_xcodeproj.py | head -1

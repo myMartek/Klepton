@@ -29,6 +29,15 @@ VP8 decoder in libvpx (`vp8/decoder`, `vp8/common`, `vpx_dsp/intrapred.c`) at
 `8f9b84afccde`, Copyright (c) 2010 The WebM project authors, BSD-3-Clause; the license
 is `third-party-licenses/libvpx-LICENSE`.
 
+`KleptonFFmpeg.framework` (Bigscreen Beta's films in MKV, AVI, WebM, TS and
+other formats) is FFmpeg 9.0.2 from <https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz>
+(sha256 `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e`,
+signed with the FFmpeg release key), LGPL-2.1-or-later, built by
+`tools/ffmpeg_build.sh` with the one change in `tools/ffmpeg/visionos.patch`.
+It is a separate dynamic library that the runtime loads at run time, so it
+can be replaced by another build of the same source; the licence is
+`third-party-licenses/FFmpeg-COPYING.LGPLv2.1`, and the framework carries it too.
+
 The selected released QMOD libraries are separately fetched from their original
 release URLs and checked against `selected-mods.json` and the original inventory.
 Their original licenses and attribution remain applicable. Dependency archive
