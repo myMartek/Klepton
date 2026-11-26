@@ -730,7 +730,14 @@ answers GL and kl_glfb never initializes.
 - `KL_GLFB_EYE_CLEAR=0|1` — a provider-backed eye texture is cleared to opaque
   black once when it is bound, so a first frame cannot show what the memory
   held. Default 1 for Unreal guests and `x3327317663977182` (Ven VR Adventure,
-  Unity: a new eye swapchain at every scene change flashed magenta), else 0.
+  Unity: a new eye swapchain at every scene change flashed magenta) and
+  `x7384113925001901` (Solara One, Unity: its eye swapchain is replaced at a
+  larger size during startup, and the view flashed magenta once), else 0.
+- `KL_GLFB_EYE_CLEAR_FINISH=0|1` — after that clear, `glFinish` before the
+  eye texture is handed out, so the compositor (which samples it through Metal,
+  not through ANGLE) cannot read it before the clear has run. Default 1 for
+  `x7384113925001901` (Solara One: the view still flashed magenta once after
+  its title image, with the clear alone), else 0.
 - `KL_GLFB_LOG_UNITS=1` — log texture-unit traffic (the "Invalid texture
   unit!" neighbourhood — see `KL_POKE_CAP` under Viewer).
 
@@ -1289,7 +1296,8 @@ result is gated against the BGRA path by `make vidtex`.
   first audio track to 16-bit PCM (at most stereo), the track says
   `audio/raw`, and the codec behind it passes each buffer through. Default on
   for LES MILLS BODYCOMBAT (x4015163475201433), whose workout clips carry
-  their trainer's voice; off elsewhere, where every clip stays silent as
+  their trainer's voice, and Solara One (x7384113925001901), whose Starport
+  info clip has a sound track; off elsewhere, where every clip stays silent as
   before. Each codec says `[media] sound codec summary` when it is deleted.
 - `KL_VTDEC_REORDER=0|1`, `KL_VTDEC_REORDER_DEPTH=<n>` — (`kl_vtdec.c`) hand
   decoded frames out in presentation order, as Android's MediaCodec does, by
@@ -1298,7 +1306,8 @@ result is gated against the BGRA path by `make vidtex`.
   picture that jumps back every few seconds. VideoToolbox's own temporal
   processing did not reorder (55 of 120 frames out of order on a host test
   clip; 0 with the hold). Default on for LES MILLS BODYCOMBAT
-  (x4015163475201433), whose workout and tip clips carry B-frames.
+  (x4015163475201433), whose workout and tip clips carry B-frames, and
+  Solara One (x7384113925001901), whose Starport info clip does too.
 - `KL_VIDEO_EVEN=0|1` — (`kl_mediandk.c`, `klm_even_cadence`) a clip whose
   frame rate lies strictly between half the display's and the display's own
   (60 fps on a 100 Hz panel, 30 on 50) is put on a grid of two refreshes: each
@@ -1313,8 +1322,8 @@ result is gated against the BGRA path by `make vidtex`.
   pool, which wrote a later frame into it while guest frames already submitted
   still sampled it — a picture that jumped forward and back for a refresh.
   Default 6 for LES MILLS BODYCOMBAT (x4015163475201433), where it was found
-  (2026-10-15), and 0 — the old immediate destroy — for everyone else until
-  another title is seen with it. The reader heartbeat also counts latches
+  (2026-10-15), and Solara One (x7384113925001901, its Starport info clip
+  stuttered), and 0 — the old immediate destroy — for everyone else. The reader heartbeat also counts latches
   whose pts `went back`.
 - `KL_AVPRO_HOST=0` — (`kl_driver.c` `kl_driver_deovr_avpro`, read by
   `runtime/media/kl_avpro.m`, `kl_dl.c`, `kl_mediandk.c`, `kl_ndk.c`) DeoVR

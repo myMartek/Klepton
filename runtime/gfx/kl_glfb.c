@@ -9723,6 +9723,10 @@ int kl_glfb_bind_eye_mtl_texture(int eye, int stage, uint32_t gl_tex,
     // eye swapchain at a different size on every scene change (3993x3203 <->
     // 4608x3696), and until it drew into the new one the uncleared storage
     // flashed magenta between scenes (owner on the headset, 2026-11-16).
+    // Solara One (x7384113925001901, Unity, GLES) the same during startup: its
+    // eye swapchain is made at 3072x2464 and replaced at 3840x3080 a few
+    // seconds later, and the whole view flashed magenta once (owner on the
+    // headset, 2026-11-26).
     {
         static int clear = -1;
         if (clear < 0) {
@@ -9730,9 +9734,25 @@ int kl_glfb_bind_eye_mtl_texture(int eye, int stage, uint32_t gl_tex,
             extern const char *kl_driver_target_name(void);
             const char *t = kl_driver_target_name();
             clear = kl_env_on("KL_GLFB_EYE_CLEAR", kl_driver_kind() == KL_GUEST_UE4 ||
-                              (t && strcmp(t, "x3327317663977182") == 0));
+                              (t && (strcmp(t, "x3327317663977182") == 0 ||
+                                     strcmp(t, "x7384113925001901") == 0)));
         }
         if (clear) klfb_clear_tex_black(gl_tex);
+        // Solara One: the compositor sampled the new eye texture through Metal
+        // 1 ms after it was bound, while ANGLE still held the clear in an
+        // uncommitted command buffer, and the flash stayed magenta. Wait for
+        // the clear to reach the GPU before the texture is handed out (once
+        // per eye texture, at a swapchain change only).
+        {
+            static int finish = -1;
+            if (finish < 0) {
+                extern const char *kl_driver_target_name(void);
+                const char *t = kl_driver_target_name();
+                finish = kl_env_on("KL_GLFB_EYE_CLEAR_FINISH",
+                                   t && strcmp(t, "x7384113925001901") == 0);
+            }
+            if (clear && finish && a_glFinish) a_glFinish();
+        }
     }
     // Foveation, if a map is in force AND it was built for this size. Before the
     // guest renders into this texture, not after: ANGLE caches a framebuffer's
