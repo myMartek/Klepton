@@ -2098,7 +2098,9 @@ static int klplat_iap_empty(void) {
         on = kl_env_on("KL_PLAT_IAP_EMPTY", t &&
                        (strcmp(t, "x3484270071659289") == 0 ||
                         strcmp(t, "x7532973430077887") == 0 ||
-                        strcmp(t, "beatsaber140") == 0) ||
+                        strcmp(t, "beatsaber140") == 0 ||
+                        // Audio Trip: see klplat_User_GetOrgScopedID
+                        strcmp(t, "x2484044451715693") == 0) ||
                        kl_untested_profile());   // ...and untested titles (kl_driver.c)
     }
     return on;
@@ -2602,8 +2604,30 @@ static uint64_t klplat_User_Get(uint64_t user_id) {
 // and a proof only Meta can issue.
 #define KLPLAT_MSG_ORG_SCOPED_ID   0x18F0B01Bu  // .User_GetOrgScopedID (KL_PROBE_ENUM, Wooorld 2.4.0)
 static uint64_t klplat_init_fails(const char *name);
+//
+// Audio Trip (x2484044451715693) is the one guest that gets an ANSWER, because
+// neither a 0 nor an error lets it past: its add-on check
+// (Meta_IAPShim.GetListOfAllEntitledDLC) loops `while (UserIdentity.PlayerID
+// == null) yield return null;` before it asks anything, the error path only
+// logs and asks again, and the hub's song list and its fade-in wait on that
+// check — Freeplay stayed black and silent, and when the fade was forced open
+// the song list was empty (2026-11-25). The id it gets is the offline user's
+// own, the one GetLoggedInUser already handed it, per installation
+// (kl_ovrplat_user_id_per_install), so it names nobody else and no two
+// installations share it. It proves nothing to any server. What the add-on
+// check then hears is the truth: no add-on files (AssetFile_GetList) and no
+// purchases (klplat_iap_empty), so the paid song packs stay locked.
+// KL_PLAT_ORG_ID=0 goes back to the refusal.
 static uint64_t klplat_User_GetOrgScopedID(uint64_t user_id) {
-    (void)user_id;
+    static int answer = -1;
+    if (answer < 0) {
+        const char *t = kl_driver_target_name();
+        answer = kl_env_on("KL_PLAT_ORG_ID", t && strcmp(t, "x2484044451715693") == 0);
+    }
+    if (answer && user_id == klplat_user_id() && kl_env_on("KL_PLAT_USER", klplat_user_default())) {
+        plat_hit("ovr_User_GetOrgScopedID");
+        return klplat_request("ovr_User_GetOrgScopedID", KLPLAT_MSG_ORG_SCOPED_ID, 0);
+    }
     static int err = -1;
     if (err < 0) {
         const char *t = kl_driver_target_name();
@@ -2646,6 +2670,12 @@ static uint64_t klplat_User_GetLoggedInUserFriends(void) {
 // how it spells "absent" (see the launch-details note), so only these three are
 // set; the rest answer 0 permissively and are never even reached unless
 // KL_PLAT_USER handed out the user above.
+// The OrgScopedID the completion above carries (the handle is the message):
+// the offline user's own id, as klplat_User_GetOrgScopedID explains.
+static uint64_t klplat_OrgScopedID_GetID(const void *h) {
+    plat_hit("ovr_OrgScopedID_GetID"); (void)h;
+    return klplat_user_id();
+}
 static uint64_t klplat_User_GetID(const void *h) {
     plat_hit("ovr_User_GetID"); (void)h;
     return klplat_user_id();
@@ -3661,6 +3691,8 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     {"ovr_User_GetOrgScopedID",                (void *)klplat_User_GetOrgScopedID},
     // Overrides the name's entry in g_plat_request for one guest (see the handler).
     {"ovr_User_GetLoggedInUserFriends",        (void *)klplat_User_GetLoggedInUserFriends},
+    {"ovr_Message_GetOrgScopedID",             (void *)klplat_Message_GetPayload},
+    {"ovr_OrgScopedID_GetID",                  (void *)klplat_OrgScopedID_GetID},
     {"ovr_Message_GetUser",                    (void *)klplat_Message_GetPayload},
     {"ovr_Message_GetRoom",                    (void *)klplat_Message_GetPayload},
     {"ovr_User_GetID",                         (void *)klplat_User_GetID},

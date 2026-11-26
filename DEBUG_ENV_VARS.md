@@ -96,7 +96,16 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   for its purchases when its add-on files do not cover its songs (an
   installation without them); refused, the health warning waits about 5 s for
   "owned songs" after OK, with the warning scene still up, before it loads the
-  menu.
+  menu. Also on for Audio Trip (`x2484044451715693`), whose add-on check asks
+  for its purchases once `KL_PLAT_ORG_ID` has let it start; its paid song packs
+  stay locked.
+- `KL_PLAT_ORG_ID=0|1` — (`runtime/xr/kl_ovrplat.c`) answer
+  `ovr_User_GetOrgScopedID` for the offline user with that user's own id
+  (per installation, the one `ovr_User_GetLoggedInUser` gave) instead of
+  refusing it. Default on for Audio Trip (`x2484044451715693`) only: its add-on
+  check waits for a player id before it asks anything, and its hub's song list
+  and fade-in wait on that check, so Freeplay stayed black and silent. The id
+  proves nothing to any server; asked for any other user, the old answer stands.
 - `KL_PLAT_IAP_CONFIRMED=0|1` — (`runtime/xr/kl_ovrplat.c`) answer
   `ovr_IAP_GetViewerPurchases` with the SKUs in `klepton-entitlements.txt`,
   as they are — the purchases the store confirmed, written on the Mac. For a
@@ -879,7 +888,8 @@ Built for the loading-pace investigation; all default off.
 - `KL_METAXR_AUDIO_STUB=0|1` — serve `libMetaXRAudioUnity` (refused on every
   guest: it trips AMFI) as a library that is there, whose every function
   returns 0 (ovrSuccess) and whose version calls answer the shipped plugin's
-  version. On by default for `walkabout` only: its audio setup calls the SDK's
+  version. On by default for `walkabout` and `x2484044451715693` (Audio Trip,
+  same per-frame exceptions) only: its audio setup calls the SDK's
   managed interface and each P/Invoke behind it threw DllNotFoundException,
   every frame, cutting those methods short. The engine registers no
   spatializer either way. `0` is the plain refusal again; `1` serves the stub

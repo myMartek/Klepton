@@ -552,7 +552,13 @@ static const char *kl_mxa_version(int *major, int *minor, int *patch) {
 static int kl_mxa_claims(const char *path) {
     if (!path || !strstr(path, "MetaXRAudioUnity")) return 0;
     const char *t = kl_driver_target_name();
-    return kl_env_on("KL_METAXR_AUDIO_STUB", t && strcmp(t, "walkabout") == 0);
+    // Audio Trip (x2484044451715693) has Walkabout's shape: its hub calls the
+    // managed Meta XR Audio interface every frame (5000+ DllNotFoundException
+    // in one boot log, each cutting the calling method short). With the stub
+    // there are none. (Its black Freeplay was a different cause: see
+    // klplat_User_GetOrgScopedID.)
+    int dflt = t && (strcmp(t, "walkabout") == 0 || strcmp(t, "x2484044451715693") == 0);
+    return kl_env_on("KL_METAXR_AUDIO_STUB", dflt);
 }
 static void *kl_mxa_dlopen(const char *path) {
     if (!kl_mxa_claims(path)) return NULL;
