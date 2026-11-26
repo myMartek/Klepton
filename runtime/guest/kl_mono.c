@@ -85,6 +85,22 @@ static const struct { const char *domain; int subdomains; } g_web_hosts[] = {
     { "meta.com", 1 },    { "oculus.com", 1 },  { "facebook.com", 0 },
     { "accounts.google.com", 0 }, { "bit.ly", 0 },
 };
+// ...and, for one title, its community server: Epyka's (x8266573286749577)
+// Discord button opens an invite through Unreal's LaunchURL
+// (klj_GA_launchURL); an invite link redirects from discord.gg to discord.com.
+static int kl_mono_web_extra(const char *host, size_t hl) {
+    extern const char *kl_driver_target_name(void);
+    const char *t = kl_driver_target_name();
+    if (!t || strcmp(t, "x8266573286749577")) return 0;
+    static const char *const extra[] = { "discord.com", "discord.gg", "discordapp.com" };
+    for (size_t k = 0; k < sizeof extra / sizeof extra[0]; k++) {
+        size_t dl = strlen(extra[k]);
+        if ((hl == dl && !strcmp(host, extra[k])) ||
+            (hl > dl && host[hl - dl - 1] == '.' && !strcmp(host + hl - dl, extra[k])))
+            return 1;
+    }
+    return 0;
+}
 int kl_mono_web_url(const char *in, char *out, unsigned long cap, int navigation,
                     const char **why) {
     const char *dummy;
@@ -143,6 +159,7 @@ int kl_mono_web_url(const char *in, char *out, unsigned long cap, int navigation
              (g_web_hosts[k].subdomains && hl > dl && host[hl - dl - 1] == '.' &&
               !strcmp(host + hl - dl, d));
     }
+    if (!ok) ok = kl_mono_web_extra(host, hl);
     if (!ok) { *why = "host not on the list"; return 0; }
     int w = snprintf(out, cap, "https://%s", rest);
     if (w < 0 || (unsigned long)w >= cap) { *why = "address too long"; return 0; }

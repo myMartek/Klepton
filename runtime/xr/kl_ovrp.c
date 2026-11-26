@@ -4628,6 +4628,7 @@ static int klovrp_submit_viewports(const void *layer_submits, int count, int vp[
 // declared for the same reason as the line above: ovrpLayerSubmit's layout is
 // stated further down, next to the DWARF it was read out of.
 static int klovrp_submit_stage(const void *layer_submits, int count);
+static int klovrp_has_splash_backdrop(const void *layer_submits, int count, float min_w);
 static void klovrp_submit_eye_color(const void *layer_submits, int count);
 // ...and the census of the whole list, for the same forward-declaration reason.
 static void klovrp_census_submits(const void *layer_submits, int count);
@@ -5243,21 +5244,81 @@ static uint64_t klovrp_EndFrame4(int guest_frame_index, const void *layer_submit
     // a 32x32 one), "eye stage NOT observed", and the picture flickered with
     // the two eyes not matching while a scene loaded (2026-11-23).
     //   default 1 for x5767635983306831, wrath2, x24882487241367228,
-    //   x6605328856182465 and x6744365485575791, else 0 (every other OVRPlugin
-    //   guest is left with the eye pass always on, as before)
-    static int eyeless = -1;
+    //   x6605328856182465, x6744365485575791 and x8266573286749577, else 0
+    //   (every other OVRPlugin guest is left with the eye pass always on)
+    //
+    // KL_OVRP_SPLASH_HIDES_EYE=0|1 — with the above, also treat a frame as
+    // eyeless when its submit list carries a splash backdrop (a world quad
+    // wider than 50 m) even though an eye layer rides along. Epyka
+    // (x8266573286749577, UE 5.1, Vulkan) submits its eye layer UNDER its
+    // shader-compile splash (backdrop 179.6x101 m, title, caption), and what
+    // it leaves in those eye images is not a picture: KL_VK_OUT_ALL showed
+    // stage 0 black and stages 1/2 holding red striped blocks, different per
+    // eye — the owner's "coloured blocks around the title image, the eyes not
+    // matching" (2026-11-26). The room after it submits the eye layer alone.
+    // Default 1 for x8266573286749577 only.
+    static int eyeless = -1, splash_hides_eye = 0;
     if (eyeless < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
+        int epyka = t && !strcmp(t, "x8266573286749577");
         eyeless = kl_env_on("KL_OVRP_EYELESS_FRAMES",
                             t && (!strcmp(t, "x5767635983306831") || !strcmp(t, "wrath2") ||
                                   !strcmp(t, "x24882487241367228") ||
                                   !strcmp(t, "x6605328856182465") ||
-                                  !strcmp(t, "x6744365485575791")));
+                                  !strcmp(t, "x6744365485575791") || epyka));
+        splash_hides_eye = kl_env_on("KL_OVRP_SPLASH_HIDES_EYE", epyka);
     }
     if (eyeless && layer_submits && layer_submit_count > 0) {
-        kl_ovrp_eye_layer_external(named >= 0);
-        kl_ovrp_set_eyeless_black(named < 0);
+        int has_eye = named >= 0;
+        int backdrop = has_eye && splash_hides_eye &&
+            klovrp_has_splash_backdrop(layer_submits, layer_submit_count, 50.0f);
+        if (backdrop) has_eye = 0;
+        // ...and for a while after the splash is gone. Epyka's first room
+        // frames are not a picture either: KL_VK_OUT showed scattered tiles
+        // of the room over black for the first frames after the hand-over,
+        // which the owner saw as 1-2 s of coloured blocks (2026-11-26).
+        // KL_OVRP_SPLASH_EYE_HOLD_MS (default 2000 for Epyka, else 0) keeps
+        // the eye pass off that long from the first frame after a splash
+        // that brings an eye layer without the backdrop.
+        if (splash_hides_eye) {
+            static int hold_ms = -1, after_splash;
+            static uint64_t eye_back_ns;
+            if (hold_ms < 0) {
+                const char *h = getenv("KL_OVRP_SPLASH_EYE_HOLD_MS");
+                extern const char *kl_driver_target_name(void);
+                const char *t = kl_driver_target_name();
+                hold_ms = h ? atoi(h)
+                            : (t && !strcmp(t, "x8266573286749577")) ? 2000 : 0;
+                if (hold_ms < 0) hold_ms = 0;
+            }
+            if (backdrop) { after_splash = 1; eye_back_ns = 0; }
+            else if (has_eye && after_splash) {
+                uint64_t now = klovrp_mono_ns();
+                if (!eye_back_ns) {
+                    eye_back_ns = now;
+                    fprintf(stderr, "  [ovrp] splash over: eye pass held off %d ms more "
+                                    "(KL_OVRP_SPLASH_EYE_HOLD_MS)\n", hold_ms);
+                }
+                if (now - eye_back_ns < (uint64_t)hold_ms * 1000000ull) has_eye = 0;
+                else after_splash = 0;
+            }
+        }
+        kl_ovrp_eye_layer_external(has_eye);
+        kl_ovrp_set_eyeless_black(!has_eye);
+        // Say when the eye layer leaves and comes back, so a log shows
+        // whether a loading screen really was quads alone.
+        static int prev_eye = -1;
+        static unsigned flips;
+        if (has_eye != prev_eye && flips < 40) {
+            flips++;
+            fprintf(stderr, "  [ovrp] eyeless frames: submit list %s an eye layer "
+                            "(%d layer(s)) — eye pass %s\n",
+                    has_eye ? "has" : backdrop ? "hides (splash backdrop)" : "has NO",
+                    layer_submit_count,
+                    has_eye ? "on" : "off, black behind the quads");
+        }
+        prev_eye = has_eye;
     }
     klovrp_submit_eye_color(layer_submits, layer_submit_count);
     klovrp_pt_submits(layer_submits, layer_submit_count);
@@ -8742,6 +8803,23 @@ static void klovrp_quad_size(const ovrp_layer_submit *s, float out[2]) {
     }
     const float *q = klovrp_quad_size_off == 0xb0 ? b0 : bc;
     out[0] = q[0]; out[1] = q[1];
+}
+// Does this submit list carry a splash BACKDROP — a world quad wider than
+// `min_w` metres? No in-game panel is that size; Unreal's splash backdrop is
+// (Epyka: 179.6x101.0 m, 146 m out, beside its title and caption quads).
+static int klovrp_has_splash_backdrop(const void *layer_submits, int count, float min_w) {
+    const ovrp_layer_submit *const *list = layer_submits;
+    if (!list) return 0;
+    for (int i = 0; i < count; i++) {
+        const ovrp_layer_submit *s = list[i];
+        if (!s) continue;
+        struct klovrp_layer *l = klovrp_layer(s->layer_id);
+        if (!l || l->is_eye || l->desc.shape != 0) continue;   // Quad only
+        float sz[2];
+        klovrp_quad_size(s, sz);
+        if (sz[0] > min_w) return 1;
+    }
+    return 0;
 }
 // The Cylinder arm of the same union: ArcWidth, Height, Radius, three floats
 // where the Quad arm has its two — at +0xb0 in a guest built against the older

@@ -1213,6 +1213,12 @@ the run as an unimplemented JNI call.
   immediately by committing the text the guest opened it with — the engine's
   only end-of-entry native is an accept, and an entry nobody closes leaves the
   widget holding input for the rest of the session.
+- `KL_UE4_OPEN_URL=0|1` — (`runtime/jni/kl_jni_ue4.c`, Unreal's
+  `AndroidThunkJava_LaunchURL`) open the address in the same web window and
+  under the same rule as `KL_JNI_OPEN_URL` below, instead of dropping it.
+  Default 1 for Epyka (`x8266573286749577`), whose Discord button calls it;
+  for that title alone the rule also allows discord.com, discord.gg and
+  discordapp.com (and their subdomains). Else 0: logged and dropped.
 - `KL_JNI_OPEN_URL=0|1` — (`runtime/jni/kl_jni_android.c`,
   `Context.startActivity`) an intent to VIEW a web page (or a Quest app link
   with a web counterpart: Spotify, YouTube) is handed to the app, which opens
@@ -1927,9 +1933,22 @@ puts the camera on the ground with its hands underneath it.
   Grand Getaway (`x6744365485575791`, UE 4.27, Vulkan) shows only quads while a
   scene loads, and there the picture flickered and the eyes did not match.
   Default 1 for `x5767635983306831`, `wrath2`, `x24882487241367228`,
-  `x6605328856182465` and `x6744365485575791`, else 0. While the eye pass is off this way the compositor draws black behind
+  `x6605328856182465`, `x6744365485575791` and `x8266573286749577`, else 0.
+  The log names each time the eye layer leaves or returns (`[ovrp] eyeless
+  frames: ...`, at most 40 lines). While the eye pass is off this way the compositor draws black behind
   the frame's quads (a mixed space shows the room wherever no depth was
   written).
+- `KL_OVRP_SPLASH_HIDES_EYE=0|1` — with `KL_OVRP_EYELESS_FRAMES`, also treat a
+  frame as eyeless when its submit list carries a splash backdrop (a world quad
+  wider than 50 m), even though an eye layer rides along. Epyka
+  (`x8266573286749577`, UE 5.1, Vulkan) submits its eye layer under its
+  shader-compile splash, and those eye images held red striped blocks in two of
+  the three stages, different per eye. Default 1 for `x8266573286749577`, else 0.
+- `KL_OVRP_SPLASH_EYE_HOLD_MS=<ms>` — with `KL_OVRP_SPLASH_HIDES_EYE`, keep the
+  eye pass off this long from the first frame after a splash that brings an eye
+  layer without the backdrop (the log says `[ovrp] splash over: ...`).
+  Epyka's first room frames are scattered tiles of the room over black (seen
+  as 1-2 s of coloured blocks). Default 2000 for `x8266573286749577`, else 0.
 - `KL_OVRP_GL_EYE_FENCE=0|1` — a GL guest's `ovrp_EndFrame4` with an eye layer
   publishes a GPU fence (`kl_glfb_frame_fence`) on the submitting thread before
   the frame record announces the stage. For a guest that draws straight into

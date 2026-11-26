@@ -30,6 +30,7 @@
 #include "kl_jni_int.h"
 #include "kl_driver.h"
 #include "kl_ue4.h"
+#include "kl_mono.h"   /* kl_mono_web_url, kl_mono_request_open_url (LaunchURL) */
 
 // ---- UE4's MessageBox01 ----
 // `FPlatformMisc::MessageBoxExt` on Android: the engine news up one of these,
@@ -2011,6 +2012,33 @@ static klj_val klj_GA_void_noop(void *env, void *self, const klj_val *a, int n) 
     return (klj_val){.l = NULL};
 }
 
+// AndroidThunkJava_LaunchURL(String): Unreal's "open this in a browser"
+// (FPlatformProcess::LaunchURL). There is no browser to hand it to, and
+// Safari would send this app to the background, which ends it. A web page
+// can still open in the app's own web window beside the game
+// (kl_mono_request_open_url; KleptonApp.swift), under kl_mono_web_url's rule.
+//   KL_UE4_OPEN_URL=0|1 — default 1 for Epyka (x8266573286749577, whose
+//   Discord button calls it), else 0: the address is logged and dropped.
+static klj_val klj_GA_launchURL(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    const char *url = n > 0 ? klj_str(a[0].l) : NULL;
+    static int on = -1;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        on = kl_env_on("KL_UE4_OPEN_URL", t && !strcmp(t, "x8266573286749577"));
+    }
+    char page[2048];
+    const char *why = NULL;
+    if (!on) why = "off for this title (KL_UE4_OPEN_URL)";
+    else if (kl_mono_web_url(url, page, sizeof page, 0, &why)) {
+        KLJ_LOG("LaunchURL(%s) -> opening it in a web window", page);
+        kl_mono_request_open_url(page);
+        return (klj_val){.l = NULL};
+    }
+    KLJ_LOG("LaunchURL(%s) — not opened: %s", url ? url : "(null)", why ? why : "?");
+    return (klj_val){.l = NULL};
+}
+
 // The bHaptics plugin's thunks (haptic vests and sleeves, reached through the
 // bHaptics Player app on a Quest). There is no such device or app here, so the
 // family answers as a headset with none paired: nothing registered, nothing
@@ -2511,7 +2539,7 @@ const klj_binding klj_bind_ue4[] = {
     // Things this process will not do to itself or to the system.
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_Minimize", "()V", klj_GA_void_noop},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_LaunchURL",
-     "(Ljava/lang/String;)V", klj_GA_void_noop},
+     "(Ljava/lang/String;)V", klj_GA_launchURL},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_ShareURL",
      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;II)V", klj_GA_void_noop},
     {"com/epicgames/ue4/GameActivity", "AndroidThunkJava_SendBroadcast",

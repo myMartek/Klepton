@@ -609,7 +609,19 @@ struct KleptonWebWindow: UIViewRepresentable {
     func makeCoordinator() -> Navigation { Navigation() }
 
     func makeUIView(context: Context) -> WKWebView {
-        let view = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let config = WKWebViewConfiguration()
+        // Epyka (x8266573286749577): its Discord invite stayed an empty dark
+        // window (2026-11-26). The page was there, but navigator.maxTouchPoints
+        // > 0 puts Discord's web app on a touch layout that shows nothing in an
+        // embedded web view — reproduced with WKWebView on a Mac by setting
+        // that one value, and gone again with it at 0. Pinches still arrive as
+        // clicks; only the page's guess at a touch screen is taken away.
+        if klTargetName() == "x8266573286749577" {
+            config.userContentController.addUserScript(WKUserScript(
+                source: "try{Object.defineProperty(Navigator.prototype,'maxTouchPoints',{get:function(){return 0},configurable:true})}catch(e){}",
+                injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        }
+        let view = WKWebView(frame: .zero, configuration: config)
         // A long press shows no preview: a preview loads the link outside the
         // navigation rule below.
         view.allowsLinkPreview = false
