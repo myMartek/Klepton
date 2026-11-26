@@ -173,6 +173,9 @@ int  kl_audio_active(void);
 // a missed notification degrades to a ~0.5 s gap rather than to silence.
 void kl_audio_interrupted(int began);
 int  kl_audio_restart(void);
+// A guest web window opened (1) or closed (0): while one is open, an
+// interruption (a video in it playing) is not escaped as a lost notification.
+void kl_audio_web_window(int open);
 // The scene says the app is off screen — a deliberate silence, latching, so
 // the watchdog's lost-notification escape cannot "recover" the stream back.
 void kl_audio_set_silenced(int silenced);

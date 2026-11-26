@@ -467,6 +467,8 @@ static uint64_t klplat_called(const char *name) {
 #define KLPLAT_MSG_ACCESS_TOKEN     0x06A85ABEu  // .User_GetAccessToken (Message<string>)
 #define KLPLAT_MSG_ACHIEVEMENT_DEFS 0x03D3458Du  // .Achievements_GetAllDefinitions (empty array)
 #define KLPLAT_MSG_ACHIEVEMENT_PROG 0x4F9FDE1Du  // .Achievements_GetAllProgress (empty array)
+#define KLPLAT_MSG_ACHIEVEMENT_PROG_BY_NAME 0x152663B1u  // .Achievements_GetProgressByName (empty array;
+                                                //   Escaping Wonderland's global-metadata)
 #define KLPLAT_MSG_LOGGED_IN_USER  0x436F345Du  // .User_GetLoggedInUser (Message<User>)
 #define KLPLAT_MSG_RICH_DESTINATIONS 0x586F2D14u // .RichPresence_GetDestinations (empty array).
                                                 //   Read from AC Nexus's, Demeo's and Premium
@@ -2316,6 +2318,23 @@ static uint64_t klplat_Achievements_GetAllProgress(void) {
                           KLPLAT_MSG_ACHIEVEMENT_PROG, 0);
 }
 
+// ...and progress for a NAMED set of achievements, the same answer: an empty
+// AchievementProgressArray, "nothing achieved yet". Escaping Wonderland
+// (x6146292702126753) asks it once its first scene is up, the bare 0 lands on
+// "An unknown error occurred. Request failed." and the game goes no further
+// than its bunny head loading animation (on device, 2026-11-26). Nothing is
+// reported as unlocked. Only that title for now; every other keeps the 0.
+static uint64_t klplat_init_fails(const char *name);
+static uint64_t klplat_Achievements_GetProgressByName(const char **names, int count) {
+    (void)names; (void)count;
+    const char *t = kl_driver_target_name();
+    if (!(t && strcmp(t, "x6146292702126753") == 0))
+        return klplat_init_fails("ovr_Achievements_GetProgressByName");
+    plat_hit("ovr_Achievements_GetProgressByName");
+    return klplat_request("ovr_Achievements_GetProgressByName",
+                          KLPLAT_MSG_ACHIEVEMENT_PROG_BY_NAME, 0);
+}
+
 // The rich-presence DESTINATIONS — the places inside the game its developer
 // registered with the store, which a game reads to offer "join me here". They
 // say where a player can be, not what a player owns, and no service here has a
@@ -2602,6 +2621,10 @@ static uint64_t klplat_User_Get(uint64_t user_id) {
 // handler instead ("Error getting OrgScopedId: ..." in its log; it asks again
 // some time later). It does NOT sign the game in: Wooorld's cloud wants an id
 // and a proof only Meta can issue.
+// Escaping Wonderland (x6146292702126753, Unity 2022.3) is the same wait: with
+// the offline user handed out it asks GetOrgScopedID, the SDK logs "An unknown
+// error occurred. Request failed." on the 0, and the game stays on its bunny
+// head loading animation for good (on device, 2026-11-26).
 #define KLPLAT_MSG_ORG_SCOPED_ID   0x18F0B01Bu  // .User_GetOrgScopedID (KL_PROBE_ENUM, Wooorld 2.4.0)
 static uint64_t klplat_init_fails(const char *name);
 //
@@ -2632,7 +2655,8 @@ static uint64_t klplat_User_GetOrgScopedID(uint64_t user_id) {
     if (err < 0) {
         const char *t = kl_driver_target_name();
         err = t && (strcmp(t, "x4360608937312293") == 0 ||
-                    strcmp(t, "x2497738113633933") == 0);
+                    strcmp(t, "x2497738113633933") == 0 ||
+                    strcmp(t, "x6146292702126753") == 0);
     }
     if (!err) return klplat_init_fails("ovr_User_GetOrgScopedID");
     plat_hit("ovr_User_GetOrgScopedID");
@@ -3672,6 +3696,7 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
                                                (void *)klplat_Leaderboard_WriteEntryWithSupplementaryMetric},
     {"ovr_Message_GetAchievementDefinitionArray", (void *)klplat_Message_GetPayload},
     {"ovr_Achievements_GetAllProgress",        (void *)klplat_Achievements_GetAllProgress},
+    {"ovr_Achievements_GetProgressByName",     (void *)klplat_Achievements_GetProgressByName},
     // Writes: 0 as before, or an error completion per target (see the handlers).
     {"ovr_Achievements_Unlock",                (void *)klplat_Achievements_Unlock},
     {"ovr_Achievements_AddCount",              (void *)klplat_Achievements_AddCount},

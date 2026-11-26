@@ -618,10 +618,19 @@ struct KleptonWebWindow: UIViewRepresentable {
         if let url, let ok = KleptonWebWindow.allowed(url, navigation: false) {
             view.load(URLRequest(url: ok))
         }
+        // A video in the page takes the audio session; while the window is
+        // open the game's sound waits for that to end instead of taking it back
+        // (kl_audio_web_window).
+        kl_audio_web_window(1)
         return view
     }
 
     func updateUIView(_ view: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ view: WKWebView, coordinator: Navigation) {
+        view.stopLoading()
+        kl_audio_web_window(0)
+    }
 
     /// kl_mono_web_url for a URL: the address to load, or nil (refused, logged).
     static func allowed(_ url: URL, navigation: Bool) -> URL? {
