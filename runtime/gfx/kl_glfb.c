@@ -2933,6 +2933,10 @@ int kl_glfb_compute_stub(void) {
 // shaders failed on "'std430' : invalid layout qualifier" and it hung on its
 // logo (2026-10-31). While it is on, the shader-storage binding points are kept
 // here as they are for the compute kernels above.
+// Dungeons Of Eternity (x6341779295861881): its GPU-instanced mesh particles
+// read unity_ParticleInstanceData from a read-only std430 buffer; three such
+// shaders failed to compile every run and those effects (on goblets and glass,
+// seen from some angles) were Unity's magenta error shader (2026-11-26).
 int kl_glfb_ssbo_tex(void) {
     static int on = -1;
     if (!kl_glfb_enabled()) return 0;
@@ -2940,6 +2944,7 @@ int kl_glfb_ssbo_tex(void) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
         on = kl_env_on("KL_GLFB_SSBO_TEX", t && (strcmp(t, "x3684804704932159") == 0 ||
+                                                 strcmp(t, "x6341779295861881") == 0 ||
                                                  strcmp(t, "x2190353671014400") == 0 ||
                                                  strcmp(t, "x2497738113633933") == 0));
     }

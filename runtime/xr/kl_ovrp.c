@@ -3974,6 +3974,12 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
     // that merely has not said. Catan VR (x3882524545155280) never says at all,
     // reads EyeLevel back and recenters: the head came in 1.1 m up and the
     // player stood far above the table (2026-10-17).
+    // Dungeons Of Eternity (x6341779295861881, Unity 2022.3 + OpenXR) likewise:
+    // it never names an origin here, polls its head through GetNodePoseState and
+    // adds its own standing height — seated the player stood far too high and
+    // caught on doorways, standing higher still. Told FloorLevel instead, it
+    // switched Unity to Device (eye-level) at once: EyeLevel is what it wants
+    // (headset 2026-11-26).
     if (!g_eye_origin_have && !g_eye_origin_want && g_tracking_origin == 0) {
         static int dflt = -1;
         if (dflt < 0) {
@@ -3981,6 +3987,7 @@ void kl_ovrp_set_head_pose(float px, float py, float pz,
             dflt = kl_env_on("KL_OVRP_EYELEVEL_DEFAULT",
                              t && (strcmp(t, "x2897337400373711") == 0 ||
                                    strcmp(t, "x3882524545155280") == 0 ||
+                                   strcmp(t, "x6341779295861881") == 0 ||
                                    strcmp(t, "x2371757336252737") == 0));
         }
         if (dflt) klovrp_eye_origin_capture(py, "KL_OVRP_EYELEVEL_DEFAULT: the guest starts "

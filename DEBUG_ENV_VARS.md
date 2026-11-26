@@ -321,7 +321,8 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   ES 3.1 compile on the ES 3.0 backend; also answers the ES 3.1 storage limits.
   Default 1 for `x3684804704932159` (Garden of the Sea),
   `x2190353671014400` (Arizona Sunshine), `x8016534201745429` (Space Atlas
-  VR) and `x2933720383334150` (Gloomy Eyes), else 0.
+  VR), `x2933720383334150` (Gloomy Eyes) and `x6341779295861881` (Dungeons Of
+  Eternity: magenta mesh particles), else 0.
 - `KL_FUTEX_SPURIOUS_MS=<ms>` — (`runtime/libc/kl_libc.c`, the default futex)
   no futex wait sleeps longer than this before coming back as woken, which the
   futex contract allows; a wake that went missing becomes a pause of that
@@ -838,6 +839,9 @@ gamelift region probes failed EINVAL in a retry storm.
   The abort this used to cause was *not* a DNS bug — it was the empty
   `dl_iterate_phdr` breaking the guest's unwinder, so the `SocketException`
   could never reach its handler. See trap 8.
+  Default on for Dungeons Of Eternity (`x6341779295861881`, `kl_driver.c`):
+  it chooses its offline mode only when its internet probe fails, and online
+  it waits for a sign-in with a Meta user proof that nothing here can issue.
 
 ## TLS trust store (`runtime/kl_cacerts.c`)
 
@@ -2379,7 +2383,9 @@ puts the camera on the ground with its hands underneath it.
   while the head turns). Default 1 for Unreal guests, else 0.
 - `KL_OVRP_EYELEVEL_DEFAULT=0|1` — a guest that has not named a tracking
   origin is taken as EyeLevel from the first head pose. Default 1 for
-  `x2897337400373711` (its title appeared at the player's feet), else 0.
+  `x2897337400373711` (its title appeared at the player's feet) and Dungeons
+  Of Eternity (`x6341779295861881`, which adds its own standing height: the
+  player stood far too high), else 0.
 - `KL_OVRP_HEADLOCK_BIT0=0|1` — in the layer list EndFrame is handed, bit 0 of
   a layer's flags means head-locked (beside 0x2, which is where the flag is
   for `ovrp_EnqueueSubmitLayer`). Found independently for The Walking Dead:
@@ -4146,7 +4152,10 @@ except its own control vars (next section).
   `x2933720383334150` (Gloomy Eyes, with `KL_UNITY_QUIT_TEARDOWN`: its main
   menu's Exit left a dark picture and the app open) and
   `x3327317663977182` (Ven VR Adventure, with `KL_UNITY_QUIT_TEARDOWN`: its
-  quit froze the last picture and left the app open), else 0: no
+  quit froze the last picture and left the app open) and `x6341779295861881`
+  (Dungeons Of Eternity, with `KL_UNITY_QUIT_TEARDOWN` and a 2000 ms
+  `KL_UNITY_QUIT_LIMIT_MS`, set in `kl_driver.c`: its "leave game" froze the
+  last picture), else 0: no
   other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
 - `KL_OVRP_CONFIRM_QUIT=0|1` — (`runtime/xr/kl_ovrp.c`) answer
   `ovrp_ShowSystemUI(ConfirmQuit)` / `ovrp_ShowSystemUI2(ConfirmQuit)` —
