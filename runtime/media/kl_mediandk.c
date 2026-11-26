@@ -1155,7 +1155,9 @@ void kl_mediandk_reader_delete(void *reader) { klm_AImageReader_delete(reader); 
 // guest on this path renders ahead the same way, but only this one has been
 // seen with it, so the others keep the immediate destroy until one is.
 // KL_VIDEO_RETIRE=<n> (0..8; default 6 for LES MILLS BODYCOMBAT
-// (x4015163475201433), else 0, which destroys at once as before).
+// (x4015163475201433) and Lucky's Tale (x3652037328256745), whose opening
+// scene's screen clip jumped the same way once it played (on device,
+// 2026-11-26), else 0, which destroys at once as before).
 static int klm_retire_depth(void) {
     static int n = -1;
     if (n < 0) {
@@ -1163,7 +1165,8 @@ static int klm_retire_depth(void) {
         // Solara One (x7384113925001901) has BODYCOMBAT's pipeline (backpressure,
         // reorder, sound) and its Starport clip stuttered there (2026-11-26).
         n = (int)kl_env_int("KL_VIDEO_RETIRE", t && (!strcmp(t, "x4015163475201433") ||
-                                                     !strcmp(t, "x7384113925001901")) ? 6 : 0);
+                                                     !strcmp(t, "x7384113925001901") ||
+                                                     !strcmp(t, "x3652037328256745")) ? 6 : 0);
         if (n < 0) n = 0;
         if (n > 8) n = 8;
     }
@@ -1518,11 +1521,15 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     // Solara One (x7384113925001901) like BODYCOMBAT: the Starport info panel's
     // clip queued in=1774 and got two frames out, the first one stayed on
     // screen (on device, 2026-11-26).
+    // Lucky's Tale (x3652037328256745): the 3D opening scene's screen clip
+    // queued in=5067 (the whole 169 s clip) and got four frames out — the
+    // screen in the scene stayed empty (on device, 2026-11-26).
     c->playback_backpressure=target && (!strcmp(target,"x2249318828413747") ||
                                         !strcmp(target,"x4015163475201433") ||
                                         !strcmp(target,"x2933720383334150") ||
                                         !strcmp(target,"x8057795767629913") ||
-                                        !strcmp(target,"x7384113925001901"));
+                                        !strcmp(target,"x7384113925001901") ||
+                                        !strcmp(target,"x3652037328256745"));
     snprintf(c->mime, sizeof c->mime, "%s", mime ? mime : "");
     pthread_mutex_init(&c->lock, NULL);
     if (mime && !strcmp(mime, "audio/raw")) {

@@ -213,11 +213,15 @@ static klj_val klj_Handler_init(void *env, void *clazz, const klj_val *a, int n)
         // its first message after the decoder setup went to the main queue,
         // the clip stopped after two or three frames and the credits at the
         // start of an episode were missing (2026-11-10).
+        // Lucky's Tale (x3652037328256745): the same Unity VideoPlayer, made
+        // after its first scene loads; pinned with the backpressure it gets in
+        // kl_mediandk.c so a later message cannot fall to the main queue.
         static int pin = -1;
         if (pin < 0) {
             const char *t = kl_driver_target_name();
             pin = kl_env_on("KL_JNI_PIN_LOOPER", t && (strcmp(t, "x4015163475201433") == 0 ||
-                                                         strcmp(t, "x2933720383334150") == 0));
+                                                         strcmp(t, "x2933720383334150") == 0 ||
+                                                         strcmp(t, "x3652037328256745") == 0));
         }
         klj_object *lo = klj_as_object(h->looper);
         if (pin && lo && lo->data && strcmp(lo->cls, "android/os/Looper") == 0)

@@ -4290,6 +4290,10 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
             // flashlight's spot light is a ForwardAdd pass drawn over the base
             // pass, and its lit cone flickered in squares (owner on the
             // headset, 2026-11-17; foveation off made no difference).
+            // Lucky's Tale (x3652037328256745, Unity 2019.4): the controller
+            // models in its menu dark grey to black, all over or only their top
+            // plate, with flickering lines and shapes on them; gone with
+            // KL_GLFB_INVARIANT=1 (owner on the headset, 2026-11-26).
             {
                 static int inv = -1;
                 if (inv < 0) {
@@ -4297,7 +4301,8 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
                     const char *t = kl_driver_target_name();
                     inv = kl_env_on("KL_GLFB_INVARIANT", t && (strcmp(t, "doom3quest") == 0 ||
                                                              strcmp(t, "x2933720383334150") == 0 ||
-                                                             strcmp(t, "x3688751474502123") == 0));
+                                                             strcmp(t, "x3688751474502123") == 0 ||
+                                                             strcmp(t, "x3652037328256745") == 0));
                 }
                 if (inv && klfb_shader_type(shader) == 0x8B31 /* GL_VERTEX_SHADER */ &&
                     strncmp(buf, "#version 3", 10) == 0 && !strstr(buf, "invariant gl_Position")) {
@@ -9727,6 +9732,8 @@ int kl_glfb_bind_eye_mtl_texture(int eye, int stage, uint32_t gl_tex,
     // eye swapchain is made at 3072x2464 and replaced at 3840x3080 a few
     // seconds later, and the whole view flashed magenta once (owner on the
     // headset, 2026-11-26).
+    // Lucky's Tale (x3652037328256745, Unity 2019.4): a whole-screen magenta
+    // flash just before the Playful logo (owner on the headset, 2026-11-26).
     {
         static int clear = -1;
         if (clear < 0) {
@@ -9735,7 +9742,8 @@ int kl_glfb_bind_eye_mtl_texture(int eye, int stage, uint32_t gl_tex,
             const char *t = kl_driver_target_name();
             clear = kl_env_on("KL_GLFB_EYE_CLEAR", kl_driver_kind() == KL_GUEST_UE4 ||
                               (t && (strcmp(t, "x3327317663977182") == 0 ||
-                                     strcmp(t, "x7384113925001901") == 0)));
+                                     strcmp(t, "x7384113925001901") == 0 ||
+                                     strcmp(t, "x3652037328256745") == 0)));
         }
         if (clear) klfb_clear_tex_black(gl_tex);
         // Solara One: the compositor sampled the new eye texture through Metal

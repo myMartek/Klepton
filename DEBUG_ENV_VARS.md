@@ -314,7 +314,8 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   disagree in places and whole faces flash black. Default 1 for `doom3quest`
   and `x2933720383334150` (Gloomy Eyes: ground and objects flickering black)
   and `x3688751474502123` (Cosmodread: the flashlight's lit cone flickering in
-  squares), else 0.
+  squares) and `x3652037328256745` (Lucky's Tale: its menu's controller models
+  dark and flickering), else 0.
 - `KL_GLFB_SSBO_TEX=0|1` — (`runtime/gfx/kl_glfb.c`, `kl_glfb_ssbo_tex`) read a
   shader's read-only storage buffers through textures, so shaders built for
   ES 3.1 compile on the ES 3.0 backend; also answers the ES 3.1 storage limits.
@@ -729,10 +730,12 @@ answers GL and kl_glfb never initializes.
   Default 1; 0 passes the guest's divisor through unchanged.
 - `KL_GLFB_EYE_CLEAR=0|1` — a provider-backed eye texture is cleared to opaque
   black once when it is bound, so a first frame cannot show what the memory
-  held. Default 1 for Unreal guests and `x3327317663977182` (Ven VR Adventure,
-  Unity: a new eye swapchain at every scene change flashed magenta) and
+  held. Default 1 for Unreal guests, `x3327317663977182` (Ven VR Adventure,
+  Unity: a new eye swapchain at every scene change flashed magenta),
   `x7384113925001901` (Solara One, Unity: its eye swapchain is replaced at a
-  larger size during startup, and the view flashed magenta once), else 0.
+  larger size during startup, and the view flashed magenta once) and
+  `x3652037328256745` (Lucky's Tale, Unity: a magenta flash before its
+  logo), else 0.
 - `KL_GLFB_EYE_CLEAR_FINISH=0|1` — after that clear, `glFinish` before the
   eye texture is handed out, so the compositor (which samples it through Metal,
   not through ANGLE) cannot read it before the clear has run. Default 1 for
@@ -1328,8 +1331,10 @@ result is gated against the BGRA path by `make vidtex`.
   pool, which wrote a later frame into it while guest frames already submitted
   still sampled it — a picture that jumped forward and back for a refresh.
   Default 6 for LES MILLS BODYCOMBAT (x4015163475201433), where it was found
-  (2026-10-15), and Solara One (x7384113925001901, its Starport info clip
-  stuttered), and 0 — the old immediate destroy — for everyone else. The reader heartbeat also counts latches
+  (2026-10-15), Solara One (x7384113925001901, its Starport info clip
+  stuttered) and Lucky's Tale (x3652037328256745), whose opening-scene
+  clip jumped the same way (2026-11-26); 0 — the old immediate destroy — for
+  everyone else. The reader heartbeat also counts latches
   whose pts `went back`.
 - `KL_AVPRO_HOST=0` — (`kl_driver.c` `kl_driver_deovr_avpro`, read by
   `runtime/media/kl_avpro.m`, `kl_dl.c`, `kl_mediandk.c`, `kl_ndk.c`) DeoVR
@@ -1394,7 +1399,8 @@ result is gated against the BGRA path by `make vidtex`.
   HandlerThread. Default 1 for LES MILLS BODYCOMBAT (x4015163475201433), whose
   level-start clip showed nothing that way (2026-10-15), and Gloomy Eyes
   (x2933720383334150), whose episode credits stopped after two or three
-  frames (2026-11-10), else 0.
+  frames (2026-11-10), and Lucky's Tale (x3652037328256745), alongside its
+  codec backpressure (2026-11-26), else 0.
 - `KL_VTDEC_BGRA=1` — request `kCVPixelFormatType_32BGRA` from VideoToolbox
   and take the IOSurface-pbuffer route into ANGLE instead. The A/B for the
   native path, and the escape hatch should VideoToolbox ever hand back a
