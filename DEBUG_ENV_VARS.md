@@ -1008,7 +1008,9 @@ The guest's own memory management, and the three seams that used to disable it.
   device where the app's working directory is `/`. AC Nexus opens its animator
   controller bundle that way. Default 1 for `x5812519008825194`,
   `x2773034772778845` (Premium Bowling: every hall's scene bundle) and
-  `x3231001163584154` (Battle Sister: its five store bundles), else 0.
+  `x3231001163584154` (Battle Sister: its five store bundles) and
+  `x6074227932599910` (The House of Da Vinci VR: its scene manager bundle),
+  else 0.
 - `KL_FS_SDCARD_OBB=0|1` — serve `/sdcard/Android/obb/<package>/…` (or
   another spelling of external storage) from the directory `getObbDirs()`
   answers, as on a device where they are one directory. Arizona Sunshine opens
