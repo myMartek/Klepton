@@ -586,6 +586,25 @@ static void kl_driver_env_defaults(const kl_target *t) {
             }
         }
     }
+    if (!strcmp(t->name, "x6341779295861881")) {
+        // Dungeons Of Eternity 1.3 (4146) signs in to its backend (PlayFab) with
+        // a Meta user proof, which nothing here can issue (kl_ovrplat.c). With
+        // a network it stays "online": its internet probe to playfabapi.com
+        // answers, so it waits on "loading, please wait" for that sign-in for
+        // good. Its offline mode (solo play on an offline save) is chosen only
+        // when "every probe host failed" — so present the headset it would be
+        // without a network, and it takes that path itself (2026-11-26).
+        setenv("KL_NET_OFFLINE", "1", 0);
+        // Its menu's "leave game" calls Application.Quit() ("[MultiPlatformManager]
+        // QuitApplication"), after which it submits no frame: the last picture
+        // stood until the app was closed by hand (headset 2026-11-26). End the
+        // loop on that quit and give Unity Android's pause and teardown first,
+        // so its own quit handlers run (it keeps an offline save); bounded, in
+        // case nativeDone does not come back, as Ven VR's did not.
+        setenv("KL_UNITY_QUIT_EXITS", "1", 0);
+        setenv("KL_UNITY_QUIT_TEARDOWN", "1", 0);
+        setenv("KL_UNITY_QUIT_LIMIT_MS", "2000", 0);
+    }
 }
 
 void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) {

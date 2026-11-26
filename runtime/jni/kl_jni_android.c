@@ -1076,15 +1076,19 @@ static klj_val klj_Uri_parse(void *env, void *clazz, const klj_val *a, int n) {
 // ActivityNotFoundException; doing nothing is the gentler of the two for a guest
 // that does not catch it.)
 //   KL_JNI_OPEN_URL=0|1 — hand such a page to the frontend. Default 1 for
-//       DreamSpace (x9449316705178989), else 0: every other guest's intent is
-//       logged and refused, as before. Only what kl_mono_web_url allows is
-//       handed over.
+//       DreamSpace (x9449316705178989) and Escaping Wonderland
+//       (x6146292702126753, whose settings book has a "Manual" button that
+//       VIEWs a bit.ly link to its tutorial videos on YouTube; refused, the
+//       button did nothing — on device, 2026-11-26), else 0: every other
+//       guest's intent is logged and refused, as before. Only what
+//       kl_mono_web_url allows is handed over.
 static int klj_open_url_on(void) {
     static int on = -1;
     if (on < 0) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        on = kl_env_on("KL_JNI_OPEN_URL", t && !strcmp(t, "x9449316705178989"));
+        on = kl_env_on("KL_JNI_OPEN_URL", t && (!strcmp(t, "x9449316705178989") ||
+                                                !strcmp(t, "x6146292702126753")));
     }
     return on;
 }

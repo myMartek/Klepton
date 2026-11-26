@@ -40,6 +40,7 @@ static int          g_interrupted;    // the OS took the stream
 static int          g_silenced;       // the scene took it — deliberate, see below
 static uint64_t     g_interrupt_ns;   // ...when, so a lost `.ended` is escapable
 static unsigned     g_interrupt_max_ms = 1500;
+static int          g_web_windows;    // guest web windows open (kl_audio_web_window)
 // The recovery machinery lives at the bottom of the file, beside the producer
 // it used to be part of; kl_audio_open and kl_audio_interrupted are above it.
 static unsigned     g_wd_streak;      // consecutive restarts, for the backoff
@@ -1164,6 +1165,21 @@ void kl_audio_interrupted(int began) {
     }
 }
 
+// A web window the guest opened (an intent to VIEW a page; KleptonWebWindow) is
+// open. A video in it takes the audio session, which reaches us as an
+// interruption that is REAL and has no `.ended` while the video plays — and the
+// lost-notification escape below "recovered" from it after 1.5 s, taking the
+// session back and stopping the video. Escaping Wonderland's manual (YouTube
+// tutorials) played for about three seconds and stopped, every time (on device,
+// 2026-11-26). While one is open, the interruption is left to its own `.ended`;
+// once the last one closes the escape applies again, at once if it is due.
+void kl_audio_web_window(int open) {
+    g_web_windows += open ? 1 : -1;
+    if (g_web_windows < 0) g_web_windows = 0;
+    fprintf(stderr, "  [au] web window %s (%d open)%s\n", open ? "opened" : "closed",
+            g_web_windows, g_web_windows ? " — an interruption waits for its own end" : "");
+}
+
 // The scene saying the app is off screen (crown press / immersive dismissal) —
 // a DELIBERATE silence, not an OS interruption. The distinction has to exist in
 // C because the watchdog thread's stuck-interruption escape force-resumes a
@@ -1415,7 +1431,7 @@ static void *watchdog_thread(void *unused) {
         // that is the one state where resuming is wrong by definition.
         if (g_interrupted && g_playing && !g_silenced) {
             uint64_t since = now_ns() - g_interrupt_ns;
-            if (since > (uint64_t)g_interrupt_max_ms * 1000000ull) {
+            if (!g_web_windows && since > (uint64_t)g_interrupt_max_ms * 1000000ull) {
                 fprintf(stderr, "  [au] interrupted for %.1f s with no resume — "
                                 "assuming the notification was lost\n",
                         (double)since / 1e9);

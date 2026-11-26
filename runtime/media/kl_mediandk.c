@@ -552,11 +552,14 @@ static int klm_AMediaExtractor_setDataSourceCustom(void *ex, void *src) {
 // extractor had one track. KL_MEDIA_SOUND=0|1; on by default for LES MILLS
 // BODYCOMBAT (x4015163475201433), whose workout clips carry their trainer's
 // voice (on device, 2026-10-15), and off elsewhere until a title is seen with it.
+// Solara One (x7384113925001901) too: its Starport info clip carries a stereo
+// AAC track (~160 kbit/s), and it played silent (on device, 2026-11-26).
 static int klm_sound_enabled(void) {
     static int on = -1;
     if (on < 0) {
         const char *t = kl_driver_target_name();
-        on = kl_env_on("KL_MEDIA_SOUND", t && !strcmp(t, "x4015163475201433"));
+        on = kl_env_on("KL_MEDIA_SOUND", t && (!strcmp(t, "x4015163475201433") ||
+                                               !strcmp(t, "x7384113925001901")));
     }
     return on;
 }
@@ -1152,12 +1155,18 @@ void kl_mediandk_reader_delete(void *reader) { klm_AImageReader_delete(reader); 
 // guest on this path renders ahead the same way, but only this one has been
 // seen with it, so the others keep the immediate destroy until one is.
 // KL_VIDEO_RETIRE=<n> (0..8; default 6 for LES MILLS BODYCOMBAT
-// (x4015163475201433), else 0, which destroys at once as before).
+// (x4015163475201433) and Lucky's Tale (x3652037328256745), whose opening
+// scene's screen clip jumped the same way once it played (on device,
+// 2026-11-26), else 0, which destroys at once as before).
 static int klm_retire_depth(void) {
     static int n = -1;
     if (n < 0) {
         const char *t = kl_driver_target_name();
-        n = (int)kl_env_int("KL_VIDEO_RETIRE", t && !strcmp(t, "x4015163475201433") ? 6 : 0);
+        // Solara One (x7384113925001901) has BODYCOMBAT's pipeline (backpressure,
+        // reorder, sound) and its Starport clip stuttered there (2026-11-26).
+        n = (int)kl_env_int("KL_VIDEO_RETIRE", t && (!strcmp(t, "x4015163475201433") ||
+                                                     !strcmp(t, "x7384113925001901") ||
+                                                     !strcmp(t, "x3652037328256745")) ? 6 : 0);
         if (n < 0) n = 0;
         if (n > 8) n = 8;
     }
@@ -1509,10 +1518,18 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     // at the end of the intro clip: the frame thread in a futex wait, the
     // decoder thread still polling dequeueOutputBuffer, which a plain codec's
     // stop never ends (headset, 2026-11-18 and 2026-11-23; the next start ran).
+    // Solara One (x7384113925001901) like BODYCOMBAT: the Starport info panel's
+    // clip queued in=1774 and got two frames out, the first one stayed on
+    // screen (on device, 2026-11-26).
+    // Lucky's Tale (x3652037328256745): the 3D opening scene's screen clip
+    // queued in=5067 (the whole 169 s clip) and got four frames out — the
+    // screen in the scene stayed empty (on device, 2026-11-26).
     c->playback_backpressure=target && (!strcmp(target,"x2249318828413747") ||
                                         !strcmp(target,"x4015163475201433") ||
                                         !strcmp(target,"x2933720383334150") ||
-                                        !strcmp(target,"x8057795767629913"));
+                                        !strcmp(target,"x8057795767629913") ||
+                                        !strcmp(target,"x7384113925001901") ||
+                                        !strcmp(target,"x3652037328256745"));
     snprintf(c->mime, sizeof c->mime, "%s", mime ? mime : "");
     pthread_mutex_init(&c->lock, NULL);
     if (mime && !strcmp(mime, "audio/raw")) {
@@ -1527,11 +1544,14 @@ static void *klm_AMediaCodec_createDecoderByType(const char *mime) {
     // Presentation order out of the decoder (kl_vtdec_want_reorder).
     // KL_VTDEC_REORDER=0|1; on by default for LES MILLS BODYCOMBAT, whose
     // workout and tip clips carry B-frames and jumped back every few seconds
-    // in decode order (on device, 2026-10-15).
+    // in decode order (on device, 2026-10-15). Solara One (x7384113925001901)
+    // too: its Starport info clip is H.264 with B-frames (a ctts box).
     {
         static int reorder = -1;
         if (reorder < 0)
-            reorder = kl_env_on("KL_VTDEC_REORDER", target && !strcmp(target, "x4015163475201433"));
+            reorder = kl_env_on("KL_VTDEC_REORDER", target &&
+                                (!strcmp(target, "x4015163475201433") ||
+                                 !strcmp(target, "x7384113925001901")));
         if (reorder) kl_vtdec_want_reorder(c->dec, 1);
     }
     if (!c->dec) {

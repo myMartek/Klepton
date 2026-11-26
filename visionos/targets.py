@@ -1280,6 +1280,15 @@ GENERIC_OBB = {
     "x1540210": "Android/obb/com.vertigogames.azs2",
     "x3635172946605196": "Android/obb/com.brink.vr.oculus.quest",
     "x2544573735586536": "Android/obb/com.JustAddWater.SniperEliteVR",
+    # Lucky's Tale (com.playful.LuckysTale, x3652037328256745) is Unity; past
+    # its intro it loads every level from allscenes.obb, a content bundle the
+    # store delivers into Android's obb directory, while @obb went to
+    # <files>/obb. The game looked for <files>/obb/allscenes.obb ("Asset bundle
+    # ... not found - don't use asset bundles"), and when the intro clip ended
+    # level 3 "couldn't be loaded" — the scene stood still with the
+    # controllers apparently dead (on device, 2026-11-26). One directory, as on
+    # Android.
+    "x3652037328256745": "Android/obb/com.playful.LuckysTale",
     # Ghost Town (com.FireproofStudios.GhostTown, x9531494193591052) is Unity,
     # and its scenes are loose AssetBundles the store delivers into Android's
     # obb directory, not a main.<version>.<package>.obb. At the fade-in it
@@ -1515,6 +1524,12 @@ STORE_DEFAULTS = {
     # "Foveated rendering" switch off (its owner, 2026-11-16). "foveation_reset"
     # calls back a stored "on" once; a player can still turn it on afterwards.
     "x5017327094985781": {"foveation": False, "foveation_reset": 1},
+    # Lucky's Tale (Unity 2019.4.35f1, OpenGL ES). Foveation off by default:
+    # with it on, broken picture areas showed before and after the Playful
+    # logo; with KL_VRR=0 they were gone (owner on the headset, 2026-11-26).
+    # "foveation_reset" calls back a stored "on" once; a player can still turn
+    # it on again afterwards.
+    "x3652037328256745": {"foveation": False, "foveation_reset": 1},
     # HITMAN 3 VR: Reloaded (Glacier, Vulkan, OpenXR). Its owner's choices in
     # the start window, made the default for new players (2026-10-20): 100 Hz
     # (the mixed space, the default anyway), a frame on every second refresh —

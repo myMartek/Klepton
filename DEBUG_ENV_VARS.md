@@ -96,7 +96,16 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   for its purchases when its add-on files do not cover its songs (an
   installation without them); refused, the health warning waits about 5 s for
   "owned songs" after OK, with the warning scene still up, before it loads the
-  menu.
+  menu. Also on for Audio Trip (`x2484044451715693`), whose add-on check asks
+  for its purchases once `KL_PLAT_ORG_ID` has let it start; its paid song packs
+  stay locked.
+- `KL_PLAT_ORG_ID=0|1` — (`runtime/xr/kl_ovrplat.c`) answer
+  `ovr_User_GetOrgScopedID` for the offline user with that user's own id
+  (per installation, the one `ovr_User_GetLoggedInUser` gave) instead of
+  refusing it. Default on for Audio Trip (`x2484044451715693`) only: its add-on
+  check waits for a player id before it asks anything, and its hub's song list
+  and fade-in wait on that check, so Freeplay stayed black and silent. The id
+  proves nothing to any server; asked for any other user, the old answer stands.
 - `KL_PLAT_IAP_CONFIRMED=0|1` — (`runtime/xr/kl_ovrplat.c`) answer
   `ovr_IAP_GetViewerPurchases` with the SKUs in `klepton-entitlements.txt`,
   as they are — the purchases the store confirmed, written on the Mac. For a
@@ -305,13 +314,15 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   disagree in places and whole faces flash black. Default 1 for `doom3quest`
   and `x2933720383334150` (Gloomy Eyes: ground and objects flickering black)
   and `x3688751474502123` (Cosmodread: the flashlight's lit cone flickering in
-  squares), else 0.
+  squares) and `x3652037328256745` (Lucky's Tale: its menu's controller models
+  dark and flickering), else 0.
 - `KL_GLFB_SSBO_TEX=0|1` — (`runtime/gfx/kl_glfb.c`, `kl_glfb_ssbo_tex`) read a
   shader's read-only storage buffers through textures, so shaders built for
   ES 3.1 compile on the ES 3.0 backend; also answers the ES 3.1 storage limits.
   Default 1 for `x3684804704932159` (Garden of the Sea),
   `x2190353671014400` (Arizona Sunshine), `x8016534201745429` (Space Atlas
-  VR) and `x2933720383334150` (Gloomy Eyes), else 0.
+  VR), `x2933720383334150` (Gloomy Eyes) and `x6341779295861881` (Dungeons Of
+  Eternity: magenta mesh particles), else 0.
 - `KL_FUTEX_SPURIOUS_MS=<ms>` — (`runtime/libc/kl_libc.c`, the default futex)
   no futex wait sleeps longer than this before coming back as woken, which the
   futex contract allows; a wake that went missing becomes a pause of that
@@ -720,8 +731,17 @@ answers GL and kl_glfb never initializes.
   Default 1; 0 passes the guest's divisor through unchanged.
 - `KL_GLFB_EYE_CLEAR=0|1` — a provider-backed eye texture is cleared to opaque
   black once when it is bound, so a first frame cannot show what the memory
-  held. Default 1 for Unreal guests and `x3327317663977182` (Ven VR Adventure,
-  Unity: a new eye swapchain at every scene change flashed magenta), else 0.
+  held. Default 1 for Unreal guests, `x3327317663977182` (Ven VR Adventure,
+  Unity: a new eye swapchain at every scene change flashed magenta),
+  `x7384113925001901` (Solara One, Unity: its eye swapchain is replaced at a
+  larger size during startup, and the view flashed magenta once) and
+  `x3652037328256745` (Lucky's Tale, Unity: a magenta flash before its
+  logo), else 0.
+- `KL_GLFB_EYE_CLEAR_FINISH=0|1` — after that clear, `glFinish` before the
+  eye texture is handed out, so the compositor (which samples it through Metal,
+  not through ANGLE) cannot read it before the clear has run. Default 1 for
+  `x7384113925001901` (Solara One: the view still flashed magenta once after
+  its title image, with the clear alone), else 0.
 - `KL_GLFB_LOG_UNITS=1` — log texture-unit traffic (the "Invalid texture
   unit!" neighbourhood — see `KL_POKE_CAP` under Viewer).
 
@@ -819,6 +839,9 @@ gamelift region probes failed EINVAL in a retry storm.
   The abort this used to cause was *not* a DNS bug — it was the empty
   `dl_iterate_phdr` breaking the guest's unwinder, so the `SocketException`
   could never reach its handler. See trap 8.
+  Default on for Dungeons Of Eternity (`x6341779295861881`, `kl_driver.c`):
+  it chooses its offline mode only when its internet probe fails, and online
+  it waits for a sign-in with a Meta user proof that nothing here can issue.
 
 ## TLS trust store (`runtime/kl_cacerts.c`)
 
@@ -879,7 +902,8 @@ Built for the loading-pace investigation; all default off.
 - `KL_METAXR_AUDIO_STUB=0|1` — serve `libMetaXRAudioUnity` (refused on every
   guest: it trips AMFI) as a library that is there, whose every function
   returns 0 (ovrSuccess) and whose version calls answer the shipped plugin's
-  version. On by default for `walkabout` only: its audio setup calls the SDK's
+  version. On by default for `walkabout` and `x2484044451715693` (Audio Trip,
+  same per-frame exceptions) only: its audio setup calls the SDK's
   managed interface and each P/Invoke behind it threw DllNotFoundException,
   every frame, cutting those methods short. The engine registers no
   spatializer either way. `0` is the plain refusal again; `1` serves the stub
@@ -998,7 +1022,9 @@ The guest's own memory management, and the three seams that used to disable it.
   device where the app's working directory is `/`. AC Nexus opens its animator
   controller bundle that way. Default 1 for `x5812519008825194`,
   `x2773034772778845` (Premium Bowling: every hall's scene bundle) and
-  `x3231001163584154` (Battle Sister: its five store bundles), else 0.
+  `x3231001163584154` (Battle Sister: its five store bundles) and
+  `x6074227932599910` (The House of Da Vinci VR: its scene manager bundle),
+  else 0.
 - `KL_FS_SDCARD_OBB=0|1` — serve `/sdcard/Android/obb/<package>/…` (or
   another spelling of external storage) from the directory `getObbDirs()`
   answers, as on a device where they are one directory. Arizona Sunshine opens
@@ -1194,6 +1220,12 @@ the run as an unimplemented JNI call.
   immediately by committing the text the guest opened it with — the engine's
   only end-of-entry native is an accept, and an entry nobody closes leaves the
   widget holding input for the rest of the session.
+- `KL_UE4_OPEN_URL=0|1` — (`runtime/jni/kl_jni_ue4.c`, Unreal's
+  `AndroidThunkJava_LaunchURL`) open the address in the same web window and
+  under the same rule as `KL_JNI_OPEN_URL` below, instead of dropping it.
+  Default 1 for Epyka (`x8266573286749577`), whose Discord button calls it;
+  for that title alone the rule also allows discord.com, discord.gg and
+  discordapp.com (and their subdomains). Else 0: logged and dropped.
 - `KL_JNI_OPEN_URL=0|1` — (`runtime/jni/kl_jni_android.c`,
   `Context.startActivity`) an intent to VIEW a web page (or a Quest app link
   with a web counterpart: Spotify, YouTube) is handed to the app, which opens
@@ -1277,7 +1309,8 @@ result is gated against the BGRA path by `make vidtex`.
   first audio track to 16-bit PCM (at most stereo), the track says
   `audio/raw`, and the codec behind it passes each buffer through. Default on
   for LES MILLS BODYCOMBAT (x4015163475201433), whose workout clips carry
-  their trainer's voice; off elsewhere, where every clip stays silent as
+  their trainer's voice, and Solara One (x7384113925001901), whose Starport
+  info clip has a sound track; off elsewhere, where every clip stays silent as
   before. Each codec says `[media] sound codec summary` when it is deleted.
 - `KL_VTDEC_REORDER=0|1`, `KL_VTDEC_REORDER_DEPTH=<n>` — (`kl_vtdec.c`) hand
   decoded frames out in presentation order, as Android's MediaCodec does, by
@@ -1286,7 +1319,8 @@ result is gated against the BGRA path by `make vidtex`.
   picture that jumps back every few seconds. VideoToolbox's own temporal
   processing did not reorder (55 of 120 frames out of order on a host test
   clip; 0 with the hold). Default on for LES MILLS BODYCOMBAT
-  (x4015163475201433), whose workout and tip clips carry B-frames.
+  (x4015163475201433), whose workout and tip clips carry B-frames, and
+  Solara One (x7384113925001901), whose Starport info clip does too.
 - `KL_VIDEO_EVEN=0|1` — (`kl_mediandk.c`, `klm_even_cadence`) a clip whose
   frame rate lies strictly between half the display's and the display's own
   (60 fps on a 100 Hz panel, 30 on 50) is put on a grid of two refreshes: each
@@ -1301,8 +1335,10 @@ result is gated against the BGRA path by `make vidtex`.
   pool, which wrote a later frame into it while guest frames already submitted
   still sampled it — a picture that jumped forward and back for a refresh.
   Default 6 for LES MILLS BODYCOMBAT (x4015163475201433), where it was found
-  (2026-10-15), and 0 — the old immediate destroy — for everyone else until
-  another title is seen with it. The reader heartbeat also counts latches
+  (2026-10-15), Solara One (x7384113925001901, its Starport info clip
+  stuttered) and Lucky's Tale (x3652037328256745), whose opening-scene
+  clip jumped the same way (2026-11-26); 0 — the old immediate destroy — for
+  everyone else. The reader heartbeat also counts latches
   whose pts `went back`.
 - `KL_AVPRO_HOST=0` — (`kl_driver.c` `kl_driver_deovr_avpro`, read by
   `runtime/media/kl_avpro.m`, `kl_dl.c`, `kl_mediandk.c`, `kl_ndk.c`) DeoVR
@@ -1367,7 +1403,8 @@ result is gated against the BGRA path by `make vidtex`.
   HandlerThread. Default 1 for LES MILLS BODYCOMBAT (x4015163475201433), whose
   level-start clip showed nothing that way (2026-10-15), and Gloomy Eyes
   (x2933720383334150), whose episode credits stopped after two or three
-  frames (2026-11-10), else 0.
+  frames (2026-11-10), and Lucky's Tale (x3652037328256745), alongside its
+  codec backpressure (2026-11-26), else 0.
 - `KL_VTDEC_BGRA=1` — request `kCVPixelFormatType_32BGRA` from VideoToolbox
   and take the IOSurface-pbuffer route into ANGLE instead. The A/B for the
   native path, and the escape hatch should VideoToolbox ever hand back a
@@ -1906,9 +1943,22 @@ puts the camera on the ground with its hands underneath it.
   Grand Getaway (`x6744365485575791`, UE 4.27, Vulkan) shows only quads while a
   scene loads, and there the picture flickered and the eyes did not match.
   Default 1 for `x5767635983306831`, `wrath2`, `x24882487241367228`,
-  `x6605328856182465` and `x6744365485575791`, else 0. While the eye pass is off this way the compositor draws black behind
+  `x6605328856182465`, `x6744365485575791` and `x8266573286749577`, else 0.
+  The log names each time the eye layer leaves or returns (`[ovrp] eyeless
+  frames: ...`, at most 40 lines). While the eye pass is off this way the compositor draws black behind
   the frame's quads (a mixed space shows the room wherever no depth was
   written).
+- `KL_OVRP_SPLASH_HIDES_EYE=0|1` — with `KL_OVRP_EYELESS_FRAMES`, also treat a
+  frame as eyeless when its submit list carries a splash backdrop (a world quad
+  wider than 50 m), even though an eye layer rides along. Epyka
+  (`x8266573286749577`, UE 5.1, Vulkan) submits its eye layer under its
+  shader-compile splash, and those eye images held red striped blocks in two of
+  the three stages, different per eye. Default 1 for `x8266573286749577`, else 0.
+- `KL_OVRP_SPLASH_EYE_HOLD_MS=<ms>` — with `KL_OVRP_SPLASH_HIDES_EYE`, keep the
+  eye pass off this long from the first frame after a splash that brings an eye
+  layer without the backdrop (the log says `[ovrp] splash over: ...`).
+  Epyka's first room frames are scattered tiles of the room over black (seen
+  as 1-2 s of coloured blocks). Default 2000 for `x8266573286749577`, else 0.
 - `KL_OVRP_GL_EYE_FENCE=0|1` — a GL guest's `ovrp_EndFrame4` with an eye layer
   publishes a GPU fence (`kl_glfb_frame_fence`) on the submitting thread before
   the frame record announces the stage. For a guest that draws straight into
@@ -2333,7 +2383,9 @@ puts the camera on the ground with its hands underneath it.
   while the head turns). Default 1 for Unreal guests, else 0.
 - `KL_OVRP_EYELEVEL_DEFAULT=0|1` — a guest that has not named a tracking
   origin is taken as EyeLevel from the first head pose. Default 1 for
-  `x2897337400373711` (its title appeared at the player's feet), else 0.
+  `x2897337400373711` (its title appeared at the player's feet) and Dungeons
+  Of Eternity (`x6341779295861881`, which adds its own standing height: the
+  player stood far too high), else 0.
 - `KL_OVRP_HEADLOCK_BIT0=0|1` — in the layer list EndFrame is handed, bit 0 of
   a layer's flags means head-locked (beside 0x2, which is where the flag is
   for `ovrp_EnqueueSubmitLayer`). Found independently for The Walking Dead:
@@ -4100,7 +4152,10 @@ except its own control vars (next section).
   `x2933720383334150` (Gloomy Eyes, with `KL_UNITY_QUIT_TEARDOWN`: its main
   menu's Exit left a dark picture and the app open) and
   `x3327317663977182` (Ven VR Adventure, with `KL_UNITY_QUIT_TEARDOWN`: its
-  quit froze the last picture and left the app open), else 0: no
+  quit froze the last picture and left the app open) and `x6341779295861881`
+  (Dungeons Of Eternity, with `KL_UNITY_QUIT_TEARDOWN` and a 2000 ms
+  `KL_UNITY_QUIT_LIMIT_MS`, set in `kl_driver.c`: its "leave game" froze the
+  last picture), else 0: no
   other game has been watched answering false. Not on the `KL_SYNC_GUEST` path.
 - `KL_OVRP_CONFIRM_QUIT=0|1` — (`runtime/xr/kl_ovrp.c`) answer
   `ovrp_ShowSystemUI(ConfirmQuit)` / `ovrp_ShowSystemUI2(ConfirmQuit)` —

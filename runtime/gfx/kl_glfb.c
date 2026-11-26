@@ -2933,6 +2933,10 @@ int kl_glfb_compute_stub(void) {
 // shaders failed on "'std430' : invalid layout qualifier" and it hung on its
 // logo (2026-10-31). While it is on, the shader-storage binding points are kept
 // here as they are for the compute kernels above.
+// Dungeons Of Eternity (x6341779295861881): its GPU-instanced mesh particles
+// read unity_ParticleInstanceData from a read-only std430 buffer; three such
+// shaders failed to compile every run and those effects (on goblets and glass,
+// seen from some angles) were Unity's magenta error shader (2026-11-26).
 int kl_glfb_ssbo_tex(void) {
     static int on = -1;
     if (!kl_glfb_enabled()) return 0;
@@ -2940,6 +2944,7 @@ int kl_glfb_ssbo_tex(void) {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
         on = kl_env_on("KL_GLFB_SSBO_TEX", t && (strcmp(t, "x3684804704932159") == 0 ||
+                                                 strcmp(t, "x6341779295861881") == 0 ||
                                                  strcmp(t, "x2190353671014400") == 0 ||
                                                  strcmp(t, "x2497738113633933") == 0));
     }
@@ -4290,6 +4295,10 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
             // flashlight's spot light is a ForwardAdd pass drawn over the base
             // pass, and its lit cone flickered in squares (owner on the
             // headset, 2026-11-17; foveation off made no difference).
+            // Lucky's Tale (x3652037328256745, Unity 2019.4): the controller
+            // models in its menu dark grey to black, all over or only their top
+            // plate, with flickering lines and shapes on them; gone with
+            // KL_GLFB_INVARIANT=1 (owner on the headset, 2026-11-26).
             {
                 static int inv = -1;
                 if (inv < 0) {
@@ -4297,7 +4306,8 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
                     const char *t = kl_driver_target_name();
                     inv = kl_env_on("KL_GLFB_INVARIANT", t && (strcmp(t, "doom3quest") == 0 ||
                                                              strcmp(t, "x2933720383334150") == 0 ||
-                                                             strcmp(t, "x3688751474502123") == 0));
+                                                             strcmp(t, "x3688751474502123") == 0 ||
+                                                             strcmp(t, "x3652037328256745") == 0));
                 }
                 if (inv && klfb_shader_type(shader) == 0x8B31 /* GL_VERTEX_SHADER */ &&
                     strncmp(buf, "#version 3", 10) == 0 && !strstr(buf, "invariant gl_Position")) {
@@ -9723,6 +9733,12 @@ int kl_glfb_bind_eye_mtl_texture(int eye, int stage, uint32_t gl_tex,
     // eye swapchain at a different size on every scene change (3993x3203 <->
     // 4608x3696), and until it drew into the new one the uncleared storage
     // flashed magenta between scenes (owner on the headset, 2026-11-16).
+    // Solara One (x7384113925001901, Unity, GLES) the same during startup: its
+    // eye swapchain is made at 3072x2464 and replaced at 3840x3080 a few
+    // seconds later, and the whole view flashed magenta once (owner on the
+    // headset, 2026-11-26).
+    // Lucky's Tale (x3652037328256745, Unity 2019.4): a whole-screen magenta
+    // flash just before the Playful logo (owner on the headset, 2026-11-26).
     {
         static int clear = -1;
         if (clear < 0) {
@@ -9730,9 +9746,26 @@ int kl_glfb_bind_eye_mtl_texture(int eye, int stage, uint32_t gl_tex,
             extern const char *kl_driver_target_name(void);
             const char *t = kl_driver_target_name();
             clear = kl_env_on("KL_GLFB_EYE_CLEAR", kl_driver_kind() == KL_GUEST_UE4 ||
-                              (t && strcmp(t, "x3327317663977182") == 0));
+                              (t && (strcmp(t, "x3327317663977182") == 0 ||
+                                     strcmp(t, "x7384113925001901") == 0 ||
+                                     strcmp(t, "x3652037328256745") == 0)));
         }
         if (clear) klfb_clear_tex_black(gl_tex);
+        // Solara One: the compositor sampled the new eye texture through Metal
+        // 1 ms after it was bound, while ANGLE still held the clear in an
+        // uncommitted command buffer, and the flash stayed magenta. Wait for
+        // the clear to reach the GPU before the texture is handed out (once
+        // per eye texture, at a swapchain change only).
+        {
+            static int finish = -1;
+            if (finish < 0) {
+                extern const char *kl_driver_target_name(void);
+                const char *t = kl_driver_target_name();
+                finish = kl_env_on("KL_GLFB_EYE_CLEAR_FINISH",
+                                   t && strcmp(t, "x7384113925001901") == 0);
+            }
+            if (clear && finish && a_glFinish) a_glFinish();
+        }
     }
     // Foveation, if a map is in force AND it was built for this size. Before the
     // guest renders into this texture, not after: ANGLE caches a framebuffer's

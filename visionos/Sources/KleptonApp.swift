@@ -609,7 +609,19 @@ struct KleptonWebWindow: UIViewRepresentable {
     func makeCoordinator() -> Navigation { Navigation() }
 
     func makeUIView(context: Context) -> WKWebView {
-        let view = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let config = WKWebViewConfiguration()
+        // Epyka (x8266573286749577): its Discord invite stayed an empty dark
+        // window (2026-11-26). The page was there, but navigator.maxTouchPoints
+        // > 0 puts Discord's web app on a touch layout that shows nothing in an
+        // embedded web view — reproduced with WKWebView on a Mac by setting
+        // that one value, and gone again with it at 0. Pinches still arrive as
+        // clicks; only the page's guess at a touch screen is taken away.
+        if klTargetName() == "x8266573286749577" {
+            config.userContentController.addUserScript(WKUserScript(
+                source: "try{Object.defineProperty(Navigator.prototype,'maxTouchPoints',{get:function(){return 0},configurable:true})}catch(e){}",
+                injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        }
+        let view = WKWebView(frame: .zero, configuration: config)
         // A long press shows no preview: a preview loads the link outside the
         // navigation rule below.
         view.allowsLinkPreview = false
@@ -618,10 +630,19 @@ struct KleptonWebWindow: UIViewRepresentable {
         if let url, let ok = KleptonWebWindow.allowed(url, navigation: false) {
             view.load(URLRequest(url: ok))
         }
+        // A video in the page takes the audio session; while the window is
+        // open the game's sound waits for that to end instead of taking it back
+        // (kl_audio_web_window).
+        kl_audio_web_window(1)
         return view
     }
 
     func updateUIView(_ view: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ view: WKWebView, coordinator: Navigation) {
+        view.stopLoading()
+        kl_audio_web_window(0)
+    }
 
     /// kl_mono_web_url for a URL: the address to load, or nil (refused, logged).
     static func allowed(_ url: URL, navigation: Bool) -> URL? {

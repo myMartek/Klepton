@@ -467,6 +467,8 @@ static uint64_t klplat_called(const char *name) {
 #define KLPLAT_MSG_ACCESS_TOKEN     0x06A85ABEu  // .User_GetAccessToken (Message<string>)
 #define KLPLAT_MSG_ACHIEVEMENT_DEFS 0x03D3458Du  // .Achievements_GetAllDefinitions (empty array)
 #define KLPLAT_MSG_ACHIEVEMENT_PROG 0x4F9FDE1Du  // .Achievements_GetAllProgress (empty array)
+#define KLPLAT_MSG_ACHIEVEMENT_PROG_BY_NAME 0x152663B1u  // .Achievements_GetProgressByName (empty array;
+                                                //   Escaping Wonderland's global-metadata)
 #define KLPLAT_MSG_LOGGED_IN_USER  0x436F345Du  // .User_GetLoggedInUser (Message<User>)
 #define KLPLAT_MSG_RICH_DESTINATIONS 0x586F2D14u // .RichPresence_GetDestinations (empty array).
                                                 //   Read from AC Nexus's, Demeo's and Premium
@@ -2098,7 +2100,9 @@ static int klplat_iap_empty(void) {
         on = kl_env_on("KL_PLAT_IAP_EMPTY", t &&
                        (strcmp(t, "x3484270071659289") == 0 ||
                         strcmp(t, "x7532973430077887") == 0 ||
-                        strcmp(t, "beatsaber140") == 0) ||
+                        strcmp(t, "beatsaber140") == 0 ||
+                        // Audio Trip: see klplat_User_GetOrgScopedID
+                        strcmp(t, "x2484044451715693") == 0) ||
                        kl_untested_profile());   // ...and untested titles (kl_driver.c)
     }
     return on;
@@ -2312,6 +2316,23 @@ static uint64_t klplat_Achievements_GetAllProgress(void) {
     plat_hit("ovr_Achievements_GetAllProgress");
     return klplat_request("ovr_Achievements_GetAllProgress",
                           KLPLAT_MSG_ACHIEVEMENT_PROG, 0);
+}
+
+// ...and progress for a NAMED set of achievements, the same answer: an empty
+// AchievementProgressArray, "nothing achieved yet". Escaping Wonderland
+// (x6146292702126753) asks it once its first scene is up, the bare 0 lands on
+// "An unknown error occurred. Request failed." and the game goes no further
+// than its bunny head loading animation (on device, 2026-11-26). Nothing is
+// reported as unlocked. Only that title for now; every other keeps the 0.
+static uint64_t klplat_init_fails(const char *name);
+static uint64_t klplat_Achievements_GetProgressByName(const char **names, int count) {
+    (void)names; (void)count;
+    const char *t = kl_driver_target_name();
+    if (!(t && strcmp(t, "x6146292702126753") == 0))
+        return klplat_init_fails("ovr_Achievements_GetProgressByName");
+    plat_hit("ovr_Achievements_GetProgressByName");
+    return klplat_request("ovr_Achievements_GetProgressByName",
+                          KLPLAT_MSG_ACHIEVEMENT_PROG_BY_NAME, 0);
 }
 
 // The rich-presence DESTINATIONS — the places inside the game its developer
@@ -2600,15 +2621,42 @@ static uint64_t klplat_User_Get(uint64_t user_id) {
 // handler instead ("Error getting OrgScopedId: ..." in its log; it asks again
 // some time later). It does NOT sign the game in: Wooorld's cloud wants an id
 // and a proof only Meta can issue.
+// Escaping Wonderland (x6146292702126753, Unity 2022.3) is the same wait: with
+// the offline user handed out it asks GetOrgScopedID, the SDK logs "An unknown
+// error occurred. Request failed." on the 0, and the game stays on its bunny
+// head loading animation for good (on device, 2026-11-26).
 #define KLPLAT_MSG_ORG_SCOPED_ID   0x18F0B01Bu  // .User_GetOrgScopedID (KL_PROBE_ENUM, Wooorld 2.4.0)
 static uint64_t klplat_init_fails(const char *name);
+//
+// Audio Trip (x2484044451715693) is the one guest that gets an ANSWER, because
+// neither a 0 nor an error lets it past: its add-on check
+// (Meta_IAPShim.GetListOfAllEntitledDLC) loops `while (UserIdentity.PlayerID
+// == null) yield return null;` before it asks anything, the error path only
+// logs and asks again, and the hub's song list and its fade-in wait on that
+// check — Freeplay stayed black and silent, and when the fade was forced open
+// the song list was empty (2026-11-25). The id it gets is the offline user's
+// own, the one GetLoggedInUser already handed it, per installation
+// (kl_ovrplat_user_id_per_install), so it names nobody else and no two
+// installations share it. It proves nothing to any server. What the add-on
+// check then hears is the truth: no add-on files (AssetFile_GetList) and no
+// purchases (klplat_iap_empty), so the paid song packs stay locked.
+// KL_PLAT_ORG_ID=0 goes back to the refusal.
 static uint64_t klplat_User_GetOrgScopedID(uint64_t user_id) {
-    (void)user_id;
+    static int answer = -1;
+    if (answer < 0) {
+        const char *t = kl_driver_target_name();
+        answer = kl_env_on("KL_PLAT_ORG_ID", t && strcmp(t, "x2484044451715693") == 0);
+    }
+    if (answer && user_id == klplat_user_id() && kl_env_on("KL_PLAT_USER", klplat_user_default())) {
+        plat_hit("ovr_User_GetOrgScopedID");
+        return klplat_request("ovr_User_GetOrgScopedID", KLPLAT_MSG_ORG_SCOPED_ID, 0);
+    }
     static int err = -1;
     if (err < 0) {
         const char *t = kl_driver_target_name();
         err = t && (strcmp(t, "x4360608937312293") == 0 ||
-                    strcmp(t, "x2497738113633933") == 0);
+                    strcmp(t, "x2497738113633933") == 0 ||
+                    strcmp(t, "x6146292702126753") == 0);
     }
     if (!err) return klplat_init_fails("ovr_User_GetOrgScopedID");
     plat_hit("ovr_User_GetOrgScopedID");
@@ -2646,6 +2694,12 @@ static uint64_t klplat_User_GetLoggedInUserFriends(void) {
 // how it spells "absent" (see the launch-details note), so only these three are
 // set; the rest answer 0 permissively and are never even reached unless
 // KL_PLAT_USER handed out the user above.
+// The OrgScopedID the completion above carries (the handle is the message):
+// the offline user's own id, as klplat_User_GetOrgScopedID explains.
+static uint64_t klplat_OrgScopedID_GetID(const void *h) {
+    plat_hit("ovr_OrgScopedID_GetID"); (void)h;
+    return klplat_user_id();
+}
 static uint64_t klplat_User_GetID(const void *h) {
     plat_hit("ovr_User_GetID"); (void)h;
     return klplat_user_id();
@@ -3642,6 +3696,7 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
                                                (void *)klplat_Leaderboard_WriteEntryWithSupplementaryMetric},
     {"ovr_Message_GetAchievementDefinitionArray", (void *)klplat_Message_GetPayload},
     {"ovr_Achievements_GetAllProgress",        (void *)klplat_Achievements_GetAllProgress},
+    {"ovr_Achievements_GetProgressByName",     (void *)klplat_Achievements_GetProgressByName},
     // Writes: 0 as before, or an error completion per target (see the handlers).
     {"ovr_Achievements_Unlock",                (void *)klplat_Achievements_Unlock},
     {"ovr_Achievements_AddCount",              (void *)klplat_Achievements_AddCount},
@@ -3661,6 +3716,8 @@ static const struct { const char *name; void *fn; } g_plat_impl[] = {
     {"ovr_User_GetOrgScopedID",                (void *)klplat_User_GetOrgScopedID},
     // Overrides the name's entry in g_plat_request for one guest (see the handler).
     {"ovr_User_GetLoggedInUserFriends",        (void *)klplat_User_GetLoggedInUserFriends},
+    {"ovr_Message_GetOrgScopedID",             (void *)klplat_Message_GetPayload},
+    {"ovr_OrgScopedID_GetID",                  (void *)klplat_OrgScopedID_GetID},
     {"ovr_Message_GetUser",                    (void *)klplat_Message_GetPayload},
     {"ovr_Message_GetRoom",                    (void *)klplat_Message_GetPayload},
     {"ovr_User_GetID",                         (void *)klplat_User_GetID},

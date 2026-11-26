@@ -424,6 +424,12 @@ extern const char *kl_driver_target_name(void);
 // Shapelab Max (x25089943080625464) and Shapelab Lite (x27072987655679670), Unity
 // 6000.0.64 + OpenXR with OVRPlugin: a pure black eye picture until told the three
 // names (avp-play issue #115, eye-texture mean 0.00 -> 6.8; with LOCAL_FLOOR 35).
+// Dungeons Of Eternity (x6341779295861881, 1.3 build 4146, Unity 2022.3.62f3 +
+// OpenXR, "Rendering Mode - SinglePassInstanced", 2x anti-aliasing, a 2-slice
+// array swapchain): told none of the three names, glFramebufferTextureMultiviewOVR
+// was never called, an OPENGL NATIVE PLUG-IN ERROR (GL_INVALID_OPERATION) came
+// every frame, and only slice 0 was drawn — the left eye showed the loading
+// scene, the right eye stayed black (2026-11-26).
 static int klgl_want_msrtt(void) {
     static int v = -1;
     if (v < 0) {
@@ -440,6 +446,8 @@ static int klgl_want_msrtt(void) {
                                             /* Shapelab Max, Shapelab Lite (issue #115). */
                                             strcmp(t, "x25089943080625464") == 0 ||
                                             strcmp(t, "x27072987655679670") == 0 ||
+                                            /* Dungeons Of Eternity: only the left eye. */
+                                            strcmp(t, "x6341779295861881") == 0 ||
                                             strcmp(t, "x3967680489996895") == 0)));
     }
     return v;

@@ -273,10 +273,15 @@ static void vk_init(void) {
     // texel-buffer emu already moves manual-fetch buffers to textures, so discrete
     // binding pressure should still fit Metal's per-stage limit. wanderer-gated,
     // env-overridable (KL_MVK_NO_ARGBUF).
+    // Epyka (x8266573286749577, UE 5.1) hits the same MaterialCollection0/1
+    // compile failure ~8 s in; UE's Vulkan RHI then calls ForceQuit, which the
+    // runtime ignores, and the half-torn-down engine later crashes in GC on the
+    // first Menu press (BeginDestroy through a garbage vtable). Same cure.
     {
         extern const char *kl_driver_target_name(void);
         const char *t = kl_driver_target_name();
-        int def = (t && strcmp(t, "wanderer") == 0) ? 1 : 0;
+        int def = (t && (strcmp(t, "wanderer") == 0 ||
+                         strcmp(t, "x8266573286749577") == 0)) ? 1 : 0;
         if (kl_env_on("KL_MVK_NO_ARGBUF", def))
             setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 0);  // 0 = NEVER
     }
