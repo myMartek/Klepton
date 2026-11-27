@@ -165,7 +165,15 @@ klff *klff_open_io(klff_read_fn read, klff_done_fn done, void *ctx, long long si
 static klff *klff_open_with(klff *f, const char *path, int kind, char *err, int cap) {
     f->kind = kind;
     f->skip_to_us = -1;
-    int rc = avformat_open_input(&f->fmt, path, NULL, NULL);
+    // Chapters are not read: an MP4's chapter track is a sample per chapter
+    // spread over the whole file, and reading them at open is a jump through
+    // it per chapter. A 1.8 GB film on pCloud with 12 chapters opened its
+    // sound in 8.9 s / 41 MB with them, 2.2 s / 8.5 MB without (2026-11-27).
+    // Nothing here shows chapters; demuxers without the option ignore it.
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "ignore_chapters", "1", 0);
+    int rc = avformat_open_input(&f->fmt, path, NULL, &opts);
+    av_dict_free(&opts);
     if (rc < 0) { klff_err(err, cap, "cannot open", rc); klff_close(f); return NULL; }
     rc = avformat_find_stream_info(f->fmt, NULL);
     if (rc < 0) { klff_err(err, cap, "cannot read the streams", rc); klff_close(f); return NULL; }
