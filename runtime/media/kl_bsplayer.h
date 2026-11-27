@@ -20,6 +20,13 @@ typedef struct kl_bsplayer kl_bsplayer;
 // cap > 0) if the file is missing, unreadable, or carries no AVFoundation
 // video track. Opening reads the header only, never the whole file.
 kl_bsplayer *kl_bsplayer_open(const char *path, char *reason, size_t cap);
+// The same with flags. KL_BS_NO_SOUND: no sound is opened (a thumbnail).
+// KL_BS_SOUND_ASYNC: a sound only FFmpeg gives (an MKV's, an MP4's DTS) is
+// opened on a thread of the player's; until it is in, audio_info says
+// silent and the pump waits for it. For a caller on the game's thread with
+// a film on a server (pCloud), where that open is network-bound.
+enum { KL_BS_NO_SOUND = 1, KL_BS_SOUND_ASYNC = 2 };
+kl_bsplayer *kl_bsplayer_open2(const char *path, int flags, char *reason, size_t cap);
 // Track facts off the asset (`mime` is "video/avc"/"video/hevc", static).
 // Any out-param may be NULL. 0 = ok, -1 = bad player.
 int kl_bsplayer_info(kl_bsplayer *p, int *w, int *h, const char **mime,

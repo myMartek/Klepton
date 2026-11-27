@@ -358,7 +358,19 @@ struct kl_ffaud {
 kl_ffaud *kl_ffaud_open(const char *path) {
     if (!kl_ff_available()) return NULL;
     char e[256] = "";
+    // How long the open took and what it fetched from a server: a 4K film
+    // on pCloud held the game ~8 s here (2026-11-27), cause not yet seen.
+    long long t0 = ff_now_ms();
+    unsigned long rq0 = 0, rs0 = 0;
+    unsigned long long by0 = 0;
+    kl_remote_stats(&rq0, &by0, &rs0);
     klff *f = ff_open(path, KLFF_AUDIO, e, (int)sizeof e);
+    unsigned long rq1 = 0, rs1 = 0;
+    unsigned long long by1 = 0;
+    kl_remote_stats(&rq1, &by1, &rs1);
+    if (kl_remote_is(path))
+        fprintf(stderr, "  [ff] sound open: %lld ms, %lu request(s), %.1f MB from the server\n",
+                ff_now_ms() - t0, rq1 - rq0, (double)(by1 - by0) / 1e6);
     if (!f) {
         fprintf(stderr, "  [ff] %s: no sound (%s)\n", path, e);
         return NULL;

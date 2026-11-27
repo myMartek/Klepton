@@ -236,7 +236,7 @@ static struct bsinfo *bsinfo_by_key(const char *key) {
 static void *bsinfo_worker(void *arg) {
     struct bsinfo *e = arg;
     char reason[256];
-    kl_bsplayer *p = kl_bsplayer_open(e->host, reason, sizeof reason);
+    kl_bsplayer *p = kl_bsplayer_open2(e->host, KL_BS_NO_SOUND, reason, sizeof reason);
     if (!p) {
         pthread_mutex_lock(&g_infos_mu);
         e->failed = 1;
@@ -469,7 +469,9 @@ static void bs_film_open(const char *path) {
     char kp[1024];
     const char *host = kl_guest_path(path, kp, sizeof kp);
     char reason[256];
-    g_film = kl_bsplayer_open(host, reason, sizeof reason);
+    // The sound FFmpeg gives opens on the player's own thread: on pCloud it
+    // took ~8 s of this (the game's) thread for a 4K film (2026-11-27).
+    g_film = kl_bsplayer_open2(host, KL_BS_SOUND_ASYNC, reason, sizeof reason);
     if (!g_film) {
         KLJ_LOG("BigMediaPlayerAPI — film session refused \"%s\" (host \"%s\"): %s",
                 path, host, reason);

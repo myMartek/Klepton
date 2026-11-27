@@ -2,9 +2,12 @@
 # A web server for tests/t_bsremote.c: serves tests/data with byte ranges
 # (what pCloud's download links answer). Under /flaky/ every file is refused
 # once (403, as an expired link is) before it is served. Prints the port.
-import http.server, os, re, socketserver, sys
+# KL_RANGE_ROOT serves another folder, KL_RANGE_DELAY_MS waits that long
+# before each answer (a far server, for timing an open by hand).
+import http.server, os, re, socketserver, sys, time
 
-ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+ROOT = os.environ.get("KL_RANGE_ROOT") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+DELAY = int(os.environ.get("KL_RANGE_DELAY_MS", "0")) / 1000.0
 refused = set()
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -12,6 +15,8 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if DELAY:
+            time.sleep(DELAY)
         path = self.path.split("?")[0]
         flaky = path.startswith("/flaky/")
         name = os.path.basename(path)

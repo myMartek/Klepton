@@ -59,6 +59,11 @@ struct kl_bsplayer {
     int sink_reformat;
     pthread_t tthr;                 // kl_bsplayer_audio_tracks_prefetch
     int tthr_live;
+    // KL_BS_SOUND_ASYNC: FFmpeg's sound is opened on sthr; until it is in
+    // (fa_pending, under amu) the pump waits instead of calling it silent.
+    pthread_t sthr;
+    int sthr_live;
+    int fa_pending;
 };
 
 // One player, two engines: AVFoundation (dec + dm) or FFmpeg (fv + fa).
@@ -120,7 +125,13 @@ static void kl_bsplayer_fire(kl_bsplayer *p, kl_bsplayer_event ev) {
     if (p->listener) p->listener(p->lctx, ev);
 }
 
+static void *bs_sound_open_thread(void *arg);
+
 kl_bsplayer *kl_bsplayer_open(const char *path, char *reason, size_t cap) {
+    return kl_bsplayer_open2(path, 0, reason, cap);
+}
+
+kl_bsplayer *kl_bsplayer_open2(const char *path, int flags, char *reason, size_t cap) {
     if (!path || !*path) {
         if (reason && cap) snprintf(reason, cap, "empty path");
         return NULL;
@@ -148,8 +159,9 @@ kl_bsplayer *kl_bsplayer_open(const char *path, char *reason, size_t cap) {
                          path, why);
             return NULL;
         }
-        fa = kl_ffaud_open(path);
-    } else if (!kl_avdemux_audio_info(dm, NULL, NULL)) {
+        if (!(flags & (KL_BS_NO_SOUND | KL_BS_SOUND_ASYNC))) fa = kl_ffaud_open(path);
+    } else if (!kl_avdemux_audio_info(dm, NULL, NULL) &&
+               !(flags & (KL_BS_NO_SOUND | KL_BS_SOUND_ASYNC))) {
         // Picture through AVFoundation, sound through FFmpeg: an MP4/MOV
         // whose sound no Apple decoder takes (a Blu-ray remux with DTS,
         // DTS-HD MA or TrueHD). AVFoundation does not even list a DTS track
@@ -177,6 +189,15 @@ kl_bsplayer *kl_bsplayer_open(const char *path, char *reason, size_t cap) {
     p->volume = 1.0f;
     p->path = strdup(path);
     pthread_mutex_init(&p->amu, NULL);
+    // The sound FFmpeg would give (an MKV's, an MP4's DTS) opened off the
+    // caller's thread: for a film on pCloud that open is network-bound, and
+    // the caller is the game's main thread.
+    if ((flags & KL_BS_SOUND_ASYNC) && !(flags & KL_BS_NO_SOUND) &&
+        (fv || !kl_avdemux_audio_info(dm, NULL, NULL)) && kl_ff_available()) {
+        p->fa_pending = 1;
+        if (pthread_create(&p->sthr, NULL, bs_sound_open_thread, p) == 0) p->sthr_live = 1;
+        else p->fa_pending = 0;
+    }
     return p;
 }
 
@@ -190,6 +211,7 @@ int kl_bsplayer_info(kl_bsplayer *p, int *w, int *h, const char **mime,
 void kl_bsplayer_close(kl_bsplayer *p) {
     if (!p) return;
     if (p->tthr_live) pthread_join(p->tthr, NULL);   // a track list being read
+    if (p->sthr_live) pthread_join(p->sthr, NULL);   // the sound being opened
     // Park the audio thread first: it owns sink.close and must not touch
     // the demuxer past this point.
     if (p->arun) {
@@ -289,12 +311,19 @@ static void bs_audio_realign(kl_bsplayer *p, long long pic_ms, long long aud_us,
 
 static void *bs_audio_thread(void *arg) {
     kl_bsplayer *p = arg;
-    int rate = 0, ch = 0;
-    pthread_mutex_lock(&p->amu);
-    int has = bs_a_info(p, &rate, &ch);
-    kl_bsplayer_audio_sink sink = p->sink;
-    void *sctx = p->sctx;
-    pthread_mutex_unlock(&p->amu);
+    int rate = 0, ch = 0, has = 0;
+    kl_bsplayer_audio_sink sink;
+    void *sctx;
+    for (;;) {      // a sound still being opened (KL_BS_SOUND_ASYNC) is waited for
+        pthread_mutex_lock(&p->amu);
+        has = bs_a_info(p, &rate, &ch);
+        sink = p->sink;
+        sctx = p->sctx;
+        int wait = !has && p->fa_pending && p->arun;
+        pthread_mutex_unlock(&p->amu);
+        if (!wait) break;
+        usleep(20000);
+    }
     if (!has || !sink.open || !sink.write) return NULL;   // silent clip/host
     if (rate <= 0) rate = 44100;
     if (ch <= 0 || ch > 2) ch = 2;
@@ -664,6 +693,13 @@ int kl_bsplayer_audio_tracks(kl_bsplayer *p, char *buf, size_t cap) {
     int done = p->tracks_done;
     pthread_mutex_unlock(&p->amu);
     if (!done) {
+        for (;;) {      // the sound FFmpeg is opening answers the list itself
+            pthread_mutex_lock(&p->amu);
+            int pending = p->fa_pending;
+            pthread_mutex_unlock(&p->amu);
+            if (!pending) break;
+            usleep(20000);
+        }
         char *list = malloc(8192);
         int n = -1;
         if (list) {
@@ -758,4 +794,29 @@ int kl_bsplayer_audio_tracks_peek(kl_bsplayer *p, char *buf, size_t cap) {
     int done = p->tracks_done;
     pthread_mutex_unlock(&p->amu);
     return done ? kl_bsplayer_audio_tracks(p, buf, cap) : -1;
+}
+
+static void *bs_sound_open_thread(void *arg) {
+    kl_bsplayer *p = arg;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    kl_ffaud *fa = kl_ffaud_open(p->path);
+    long long us = bs_pos_ms(p) * 1000;      // the picture ran on meanwhile
+    if (fa && us > 0) kl_ffaud_seek_us(fa, us);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    pthread_mutex_lock(&p->amu);
+    if (fa && !p->fa) {         // a SelectAudioTrack may have been quicker
+        p->fa = fa;
+        fa = NULL;
+        p->sink_reformat = 1;
+    }
+    int got = p->fa != NULL;
+    p->fa_pending = 0;
+    pthread_mutex_unlock(&p->amu);
+    kl_ffaud_close(fa);
+    fprintf(stderr, "  [bs] %s: sound through FFmpeg %s after %lld ms (picture at %.1f s)\n",
+            p->path, got ? "in" : "failed, the film plays silent",
+            (long long)(t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000,
+            (double)us / 1e6);
+    return NULL;
 }

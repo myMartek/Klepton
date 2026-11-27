@@ -120,6 +120,30 @@ static void hear(const char *path, const char *what) {
     kl_bsplayer_close(p);
 }
 
+// The game's way (KL_BS_SOUND_ASYNC): open returns before FFmpeg's sound is
+// in, and the sound still comes.
+static void hear_async(const char *path, const char *what) {
+    printf("--- %s\n", what);
+    char reason[512] = "";
+    kl_bsplayer *p = kl_bsplayer_open2(path, KL_BS_SOUND_ASYNC, reason, sizeof reason);
+    ok(p != NULL, "opens");
+    if (!p) { printf("    %s\n", reason); return; }
+    struct ear e = {0};
+    kl_bsplayer_audio_sink sink = { ear_open, ear_write, ear_nop, ear_nop, ear_nop, ear_nop };
+    kl_bsplayer_set_audio_sink(p, &sink, &e);
+    kl_bsplayer_play(p);
+    for (int i = 0; i < 150 && e.bytes < 48000 * 4 / 4; i++) usleep(20000);
+    kl_bsplayer_stop(p);
+    printf("    %zu bytes, %zu loud samples\n", e.bytes, e.loud);
+    ok(e.ch == 2 && e.bytes >= 48000 * 4 / 4, "the sound arrives after the open");
+    ok(e.loud > 1000, "and it is the tone");
+    kl_bsplayer_close(p);
+    p = kl_bsplayer_open2(path, KL_BS_NO_SOUND, reason, sizeof reason);
+    int rate = 0, ch = 0;
+    ok(p && kl_bsplayer_audio_info(p, &rate, &ch) == 0, "KL_BS_NO_SOUND (a thumbnail) opens no sound");
+    kl_bsplayer_close(p);
+}
+
 // Play until the sink got `frames` more stereo frames; how many were loud.
 static double loud_share(kl_bsplayer *p, struct ear *e, size_t frames) {
     (void)p;
@@ -225,6 +249,8 @@ int main(int argc, char **argv) {
         play(dts, "MP4 with DTS 5.1 sound: picture through AVFoundation");
         hear(dts, "its sound through FFmpeg, from the server");
         hear("tests/data/bs_tiny_dts.mp4", "and from a file");
+        hear_async(dts, "DTS sound opened off the caller's thread, from the server");
+        hear_async(mkv, "an MKV's sound opened off the caller's thread");
         tracks(two, "two sound tracks, from the server");
         tracks("tests/data/bs_tiny_2audio.mp4", "and from a file");
     } else {
@@ -235,7 +261,7 @@ int main(int argc, char **argv) {
     unsigned long long bytes = 0;
     kl_remote_stats(&req, &bytes, &res);
     printf("  %lu requests, %llu bytes\n", req, bytes);
-    ok(bytes > 0 && bytes <= (unsigned long long)(3 * n4 + nk + 3 * nd + 3 * n2) * 2,
+    ok(bytes > 0 && bytes <= (unsigned long long)(3 * n4 + 2 * nk + 5 * nd + 3 * n2) * 2,
        "each film read about once, not copied over and over");
 
     unlink(two); unlink(dts); unlink(mp4); unlink(mkv); unlink(flaky); unlink(stray); rmdir(dir);
