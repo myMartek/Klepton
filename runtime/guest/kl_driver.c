@@ -649,6 +649,16 @@ void kl_driver_init(const kl_target *t, const char *libdir, kl_slink_door door) 
         kl_egl_set_gles_version(3, 0);
         fprintf(stderr, "  [gl] Until You Fall: GLES 3.0 capability profile (ANGLE backend)\n");
     }
+    if (t && !strcmp(t->name, "x2970998659623177")) {
+        // I Expect You To Die 2 (Unity 2019.4.18f1, multiview like Until You
+        // Fall): told 3.2, it made seven compute shaders that were refused
+        // (shader 0, "GLSL compilation failed, no infolog provided"), and the
+        // eye pictures it drew held huge triangles stretched across the view,
+        // flickering everywhere but the menu panels (eye dumps and owner on the
+        // headset, 2026-11-26) — Gods of Gravity's large flat surfaces again.
+        kl_egl_set_gles_version(3, 0);
+        fprintf(stderr, "  [gl] I Expect You To Die 2: GLES 3.0 capability profile (ANGLE backend)\n");
+    }
     if (t && !strcmp(t->name, "x3919415921458774")) {
         // Gods of Gravity (Unity 2021.3.45f2): told 3.2, its wand models came
         // out as large flat surfaces of a different colour each run, from the

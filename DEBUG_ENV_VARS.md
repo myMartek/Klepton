@@ -314,8 +314,9 @@ C `getenv` checks) turns the knob on, the default is off, and the reader is the
   disagree in places and whole faces flash black. Default 1 for `doom3quest`
   and `x2933720383334150` (Gloomy Eyes: ground and objects flickering black)
   and `x3688751474502123` (Cosmodread: the flashlight's lit cone flickering in
-  squares) and `x3652037328256745` (Lucky's Tale: its menu's controller models
-  dark and flickering), else 0.
+  squares), `x3652037328256745` (Lucky's Tale: its menu's controller models
+  dark and flickering) and `x2970998659623177` (I Expect You To Die 2:
+  flickering polygons on the world's surfaces), else 0.
 - `KL_GLFB_SSBO_TEX=0|1` — (`runtime/gfx/kl_glfb.c`, `kl_glfb_ssbo_tex`) read a
   shader's read-only storage buffers through textures, so shaders built for
   ES 3.1 compile on the ES 3.0 backend; also answers the ES 3.1 storage limits.
@@ -1044,6 +1045,8 @@ The guest's own memory management, and the three seams that used to disable it.
   `ovrp_SetupEyeTexture2` name gets two-layer array storage, copied a layer per
   eye into the compositor at `ovrp_EndFrame`. Without it a Scriptable Render
   Pipeline drops stereo and draws a flat picture nobody composites.
+  Also on for I Expect You To Die 2 (`x2970998659623177`, Oculus XR Plugin):
+  without it the left eye had the picture and the right eye solid magenta.
 - `KL_OVRP_IMPLICIT_BEGIN=0|1` — (`runtime/xr/kl_ovrp.c`, `klovrp_EndFrame`)
   for a guest that calls `ovrp_EndFrame` and never `ovrp_BeginFrame`, open the
   next frame's record at each EndFrame, so the compositor has a frame to show.
@@ -1089,7 +1092,9 @@ The guest's own memory management, and the three seams that used to disable it.
 - `KL_GLES_VERSION=<major>.<minor>` — (`runtime/guest/kl_driver.c`) the GLES
   level described to the guest, over the per-title choice (3.2 by default; 3.0
   for Space Channel, DreamSpace, Catan VR, Gods of Gravity, Space Atlas VR
-  and Gloomy Eyes). For trying a
+  and Gloomy Eyes, Until You Fall and I Expect You To Die 2 — whose
+  multiview pictures held huge triangles stretched across the view under
+  3.2). For trying a
   title on the 3.0 profile without a build: told 3.0, Unity stays off the ES
   3.1/3.2 paths this backend only translates (compute kernels, the separate
   vertex-format calls, base-vertex draws). Gods of Gravity: under 3.2 its wand

@@ -1153,7 +1153,17 @@ int kl_ovrp_gl_array_for(const char *t) {
                                                    // framebuffers (eye 1's: never, in a whole
                                                    // run) and the right eye stayed black
                                                    // (owner on the headset, 2026-11-16).
-                                                   strcmp(t, "x2567459230020142") == 0));
+                                                   strcmp(t, "x2567459230020142") == 0 ||
+                                                   // I Expect You To Die 2 (Unity 2019.4.18f1,
+                                                   // Oculus XR Plugin, OVRPlugin 1.55, build
+                                                   // 171177): the store name of what kl_egl.c
+                                                   // knows as the multiview-only "ieytd2".
+                                                   // Told no array, it took the Stereo layout,
+                                                   // rendered one pass a frame into eye 0 and
+                                                   // the right eye showed undrawn storage —
+                                                   // solid magenta (owner on the headset,
+                                                   // 2026-11-26).
+                                                   strcmp(t, "x2970998659623177") == 0));
     }
 }
 
