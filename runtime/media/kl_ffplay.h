@@ -50,6 +50,18 @@ int       kl_ffaud_tracks(kl_ffaud *a, char *buf, size_t cap);
 // then reports the new stream's rate and channels.
 int       kl_ffaud_select(kl_ffaud *a, int nth);
 
+// Subtitles (text only): a source is a film's subtitle stream or a file
+// beside it. tracks lists a file's subtitle streams (klff_sub_tracks' lines),
+// 0 for none, -1 without a framework that reads them. A cue is plain text,
+// lines split by '\n', with its start and end in us: next gives 1, 0 at the
+// end. seek drops cues that ended before the target.
+typedef struct kl_ffsub kl_ffsub;
+int       kl_ffsub_tracks(const char *path, char *buf, size_t cap);
+kl_ffsub *kl_ffsub_open(const char *path, int nth);
+void      kl_ffsub_close(kl_ffsub *s);
+int       kl_ffsub_next(kl_ffsub *s, char *text, size_t cap, long long *start_us, long long *end_us);
+int       kl_ffsub_seek_us(kl_ffsub *s, long long us);
+
 #ifdef __cplusplus
 }
 #endif

@@ -160,8 +160,10 @@ const unsigned char *kl_bigscreen_film_frame(int *w, int *h,
 // message. Observed registrations pass (name, null), replicated verbatim.
 typedef struct { char *go; char *fn; } bs_cb;
 static bs_cb g_cb_success, g_cb_failed, g_cb_ready,
-    g_cb_playing, g_cb_ended, g_cb_error, g_cb_atracks;
+    g_cb_playing, g_cb_ended, g_cb_error, g_cb_atracks, g_cb_ttracks, g_cb_subcue;
 static int g_film_tracks_fired;     // AudioTracksChanged sent for this film
+static int g_film_texts_fired;      // TextTracksChanged sent for this film
+static int g_text_sel = -1;         // the subtitle track shown, -1 none
 
 static void bs_cb_store(bs_cb *slot, const char *go,
                         const char *fn, const char *what) {
@@ -492,7 +494,9 @@ static void bs_film_open(const char *path) {
     // (a pCloud film is a few range requests away); the pump below says
     // AudioTracksChanged once the list is there and the picture is up.
     g_film_tracks_fired = 0;
-    kl_bsplayer_audio_tracks_prefetch(g_film);
+    g_film_texts_fired = 0;
+    g_text_sel = -1;
+    kl_bsplayer_audio_tracks_prefetch(g_film);   // the subtitle list too
 }
 
 
@@ -571,13 +575,19 @@ static klj_val register_playing_cb(void *env, void *self, const klj_val *a, int 
     return (klj_val){0};
 }
 static klj_val register_subtitle_cue_cb(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigMediaPlayerCallbacks.RegisterSubtitleCueCallback — registration accepted (no media session on this host)");
+    (void)env; (void)self;
+    bs_cb_store(&g_cb_subcue,
+                n > 0 && a[0].l ? klj_str(a[0].l) : NULL,
+                n > 1 && a[1].l ? klj_str(a[1].l) : NULL,
+                "RegisterSubtitleCueCallback");
     return (klj_val){0};
 }
 static klj_val register_text_tracks_cb(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigMediaPlayerCallbacks.RegisterTextTracksChangedCallback — registration accepted (no media session on this host)");
+    (void)env; (void)self;
+    bs_cb_store(&g_cb_ttracks,
+                n > 0 && a[0].l ? klj_str(a[0].l) : NULL,
+                n > 1 && a[1].l ? klj_str(a[1].l) : NULL,
+                "RegisterTextTracksChangedCallback");
     return (klj_val){0};
 }
 
@@ -682,6 +692,26 @@ static klj_val update_media_players(void *env, void *self, const klj_val *a, int
             kl_bsplayer_audio_tracks_peek(g_film, NULL, 0) >= 0) {
             g_film_tracks_fired = 1;
             bs_send(env, &g_cb_atracks, "", "AudioTracksChangedCallback");
+        }
+        if (g_film_ready && !g_film_texts_fired &&
+            kl_bsplayer_text_tracks_peek(g_film, NULL, 0) >= 0) {
+            g_film_texts_fired = 1;
+            bs_send(env, &g_cb_ttracks, "", "TextTracksChangedCallback");
+        }
+        // Subtitle cues due at the picture: the Java player sends each cue of
+        // ExoPlayer's onCues as a base64 SubtitleCue (start, length, text);
+        // the game shows it for its length.
+        static char cue[4096];
+        long long cs = 0, ce = 0;
+        for (int i = 0; i < 4 && kl_bsplayer_sub_poll(g_film, cue, sizeof cue, &cs, &ce); i++) {
+            unsigned char *fb = NULL;
+            size_t fbn = 0;
+            char *b64 = NULL;
+            if (kl_bscue_encode((int)(cs / 1000), (int)((ce - cs) / 1000), cue, &fb, &fbn) == 0)
+                b64 = kl_bsinfo_base64(fb, fbn);
+            free(fb);
+            if (b64) bs_send(env, &g_cb_subcue, b64, "SubtitleCueCallback");
+            free(b64);
         }
     }
     bsinfo_pump(env);
@@ -1147,6 +1177,87 @@ static klj_val media_deselect_all_audio_tracks(void *env, void *self, const klj_
     return (klj_val){0};
 }
 
+// ---- Subtitles menu (2026-11-27) ----
+//
+// GetTextTracks is the same TrackInfoList as the audio one, from ExoPlayer's
+// text formats; the Java side labels a text track with Format.label alone
+// (its title). Here: the title, else the language, and "(file)" for a
+// subtitle file beside the film. SelectTextTrack(player, id, on) shows or
+// hides one; the cues then go out through SubtitleCueCallback (the pump in
+// update_media_players).
+static klj_val media_get_text_tracks(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    enum { MAXT = 32 };
+    static char list[8192];
+    int count = g_film ? kl_bsplayer_text_tracks_peek(g_film, list, sizeof list) : -1;
+    if (count < 0) { count = 0; list[0] = 0; }
+    if (count > MAXT) count = MAXT;
+    int ids[MAXT];
+    const char *langs[MAXT], *labels[MAXT];
+    static char labbuf[MAXT][200];
+    char *line = list;
+    int k = 0;
+    for (; k < count && line && *line; k++) {
+        char *end = strchr(line, '\n');
+        if (end) *end = 0;
+        char *f[5] = {0};
+        char *q = line;
+        for (int i = 0; i < 5 && q; i++) {
+            f[i] = q;
+            q = strchr(q, '\t');
+            if (q) *q++ = 0;
+        }
+        const char *lname = NULL;
+        langs[k] = bs_lang(f[0], &lname);
+        int flags = f[3] ? atoi(f[3]) : 0, file = f[4] ? atoi(f[4]) : 0;
+        char who[160];
+        if (f[1] && *f[1]) snprintf(who, sizeof who, "%s", f[1]);
+        else if (lname) snprintf(who, sizeof who, "%s", lname);
+        else if (*langs[k]) snprintf(who, sizeof who, "%s", langs[k]);
+        else snprintf(who, sizeof who, "Subtitles %d", k + 1);
+        snprintf(labbuf[k], sizeof labbuf[k], "%s%s%s", who,
+                 (flags & 2) ? " (forced)" : "", file ? " (file)" : "");
+        labels[k] = labbuf[k];
+        ids[k] = k;
+        line = end ? end + 1 : NULL;
+    }
+    unsigned char *fb = NULL;
+    size_t fbn = 0;
+    char *b64 = NULL;
+    if (kl_bstracks_encode(k, ids, langs, labels, &fb, &fbn) == 0)
+        b64 = kl_bsinfo_base64(fb, fbn);
+    free(fb);
+    KLJ_LOG("BigMediaPlayerAPI.GetTextTracks — %d track(s)%s%s", k,
+            k ? ", first: " : "", k ? labels[0] : "");
+    klj_val r = {.l = kl_jni_new_string(b64 ? b64 : "")};
+    free(b64);
+    return r;
+}
+
+static klj_val media_select_text_track(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    int id = n > 1 ? (int)(int32_t)a[1].j : -1;
+    int on = n > 2 ? (int)(a[2].j & 0xff) != 0 : 1;
+    int rc = -1;
+    if (g_film) {
+        if (on) rc = kl_bsplayer_select_text(g_film, id);
+        else if (id == g_text_sel) rc = kl_bsplayer_select_text(g_film, -1);
+        else rc = 0;
+        if (rc == 0) g_text_sel = on ? id : (id == g_text_sel ? -1 : g_text_sel);
+    }
+    KLJ_LOG("BigMediaPlayerAPI.SelectTextTrack — track %d %s%s", id, on ? "on" : "off",
+            rc == 0 ? "" : " (refused)");
+    return (klj_val){0};
+}
+
+static klj_val media_deselect_all_text_tracks(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    if (g_film) kl_bsplayer_select_text(g_film, -1);
+    g_text_sel = -1;
+    KLJ_LOG("BigMediaPlayerAPI.DeselectAllTextTracks — subtitles off");
+    return (klj_val){0};
+}
+
 // The registrations in the order the dex declares them, then the media
 // manager's and web wrapper's calls beside them; the run takes whatever
 // subset it reaches.
@@ -1194,6 +1305,10 @@ static const klj_binding bindings[] = {
     {BIGSCREEN_API, "GetAudioTracks", "(I)Ljava/lang/String;", media_get_audio_tracks},
     {BIGSCREEN_API, "SelectAudioTrack", "(II)V", media_select_audio_track},
     {BIGSCREEN_API, "DeselectAllAudioTracks", "(I)V", media_deselect_all_audio_tracks},
+    // The Subtitles menu: the list, a pick (on/off), and "none".
+    {BIGSCREEN_API, "GetTextTracks", "(I)Ljava/lang/String;", media_get_text_tracks},
+    {BIGSCREEN_API, "SelectTextTrack", "(IIZ)V", media_select_text_track},
+    {BIGSCREEN_API, "DeselectAllTextTracks", "(I)V", media_deselect_all_text_tracks},
     // The drive surface beside those settings: the seek that ended the run
     // that reached it, the volume and transport controls, the starts in all
     // their spellings, and the shutdown. All void, all accepted once.

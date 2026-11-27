@@ -71,6 +71,24 @@ static const char *fb_string(const unsigned char *b, size_t field, char *tmp, si
     return tmp;
 }
 
+static void cue_case(void) {
+    unsigned char *b = NULL;
+    size_t n = 0;
+    ok(kl_bscue_encode(62500, 3000, "Line one\nLine two", &b, &n) == 0 && b, "cue encodes");
+    if (!b) return;
+    ok(n % 4 == 0, "cue is 4-aligned");
+    size_t t = rd32(b, 0);
+    size_t fs = fb_field(b, t, 2), fd = fb_field(b, t, 3), fl = fb_field(b, t, 10);
+    ok(fs && rd32(b, fs) == 62500, "startTime = 62500 ms");
+    ok(fd && rd32(b, fd) == 3000, "duration = 3000 ms");
+    ok(!fb_field(b, t, 0) && !fb_field(b, t, 5), "id and styling unset, as the Java side writes");
+    size_t vec = fl ? fl + rd32(b, fl) : 0;
+    char tmp[64];
+    ok(vec && rd32(b, vec) == 1 &&
+       !strcmp(fb_string(b, vec + 4, tmp, sizeof tmp), "Line one\nLine two"), "one line, the whole text");
+    free(b);
+}
+
 static void tracks_case(void) {
     int ids[2] = {0, 1};
     const char *langs[2] = {"de", "en"};
@@ -267,6 +285,7 @@ int main(void) {
     }
 
     tracks_case();
+    cue_case();
     printf("%s bigscreen mediainfo\n", g_fail ? "FAIL" : "PASS");
     return g_fail;
 }

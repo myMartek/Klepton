@@ -201,3 +201,35 @@ int kl_bstracks_encode(int n, const int *ids, const char *const *langs,
     *len = total;
     return 0;
 }
+
+// ---- SubtitleCue ----
+//
+// Front to back like the track list: root, vtable (11 slots, 26 bytes + 2
+// pad), table { soffset, startTime, duration, lines }, the one-string vector,
+// the string.
+int kl_bscue_encode(int start_ms, int duration_ms, const char *text,
+                    unsigned char **out, size_t *len) {
+    if (!out || !len || !text) return -1;
+    enum { VT = 4, T = 32, V = 48, S = 56 };
+    size_t tn = strlen(text);
+    size_t total = S + ((4 + tn + 1 + 3) & ~(size_t)3);
+    unsigned char *b = calloc(1, total);
+    if (!b) return -1;
+    fb_u32(b, 0, T);
+    fb_u16(b, VT + 0, 26);
+    fb_u16(b, VT + 2, 16);
+    fb_u16(b, VT + 4 + 2 * 2, 4);               // startTime
+    fb_u16(b, VT + 4 + 2 * 3, 8);               // duration
+    fb_u16(b, VT + 4 + 2 * 10, 12);             // lines
+    fb_u32(b, T + 0, T - VT);
+    fb_u32(b, T + 4, (uint32_t)start_ms);
+    fb_u32(b, T + 8, (uint32_t)duration_ms);
+    fb_u32(b, T + 12, V - (T + 12));
+    fb_u32(b, V, 1);
+    fb_u32(b, V + 4, S - (V + 4));
+    fb_u32(b, S, (uint32_t)tn);
+    memcpy(b + S + 4, text, tn);
+    *out = b;
+    *len = total;
+    return 0;
+}

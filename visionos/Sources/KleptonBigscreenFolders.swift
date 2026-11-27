@@ -83,7 +83,7 @@ final class KLBigscreenFolders: ObservableObject {
         }
         for p in pclouds {
             trees[p.name] = Self.loadTree(p)
-            filmCount[p.name] = trees[p.name]?.count ?? 0
+            filmCount[p.name] = trees[p.name]?.filter(Self.isFilm).count ?? 0
         }
     }
 
@@ -191,6 +191,14 @@ final class KLBigscreenFolders: ObservableObject {
     /// The containers Bigscreen's own browser lists (its dex, 2026-11-25).
     private static let filmTypes: Set<String> = ["mp4", "m4v", "mov", "mkv", "avi", "webm", "m2ts", "ts",
                                                  "mpg", "mpeg", "ogv", "wmv"]
+    /// Subtitle files beside a film (Film.srt, Film.de.srt): mirrored too, so
+    /// the runtime finds them next to the film's placeholder (the Subtitles
+    /// menu); they are not films and are not counted.
+    private static let subtitleTypes: Set<String> = ["srt", "ass", "ssa", "vtt"]
+
+    private static func isFilm(_ f: RemoteFile) -> Bool {
+        filmTypes.contains((f.path as NSString).pathExtension.lowercased())
+    }
 
     /// A pasted link: read it, mirror it, show it. Returns a message on failure.
     func addPCloud(_ text: String) async -> String? {
@@ -210,10 +218,10 @@ final class KLBigscreenFolders: ObservableObject {
             try? JSONEncoder().encode(files).write(to: Self.treeFile(p))
             pclouds.append(p)
             trees[p.name] = files
-            filmCount[p.name] = files.count
+            filmCount[p.name] = files.filter(Self.isFilm).count
             save()
             register()
-            NSLog("[bigscreen] pCloud link added: \"\(p.name)\", \(files.count) film(s) (\(host))")
+            NSLog("[bigscreen] pCloud link added: \"\(p.name)\", \(files.filter(Self.isFilm).count) film(s) (\(host))")
             return nil
         } catch {
             NSLog("[bigscreen] pCloud link refused: \(error.localizedDescription)")
@@ -252,10 +260,10 @@ final class KLBigscreenFolders: ObservableObject {
                     unreachable.removeValue(forKey: p.name)
                     if files != trees[p.name] {
                         trees[p.name] = files
-                        filmCount[p.name] = files.count
+                        filmCount[p.name] = files.filter(Self.isFilm).count
                         register()
                     }
-                    NSLog("[bigscreen] pCloud \"\(p.name)\": \(files.count) film(s)")
+                    NSLog("[bigscreen] pCloud \"\(p.name)\": \(files.filter(Self.isFilm).count) film(s)")
                 } catch {
                     // The tree read last time stays; its films play while their links answer.
                     unreachable[p.name] = error.localizedDescription
@@ -285,7 +293,8 @@ final class KLBigscreenFolders: ObservableObject {
                     dirs.insert(path)
                     walk(c, path)
                 } else if let id = c.fileid, let size = c.size, size > 0,
-                          filmTypes.contains((n as NSString).pathExtension.lowercased()) {
+                          filmTypes.contains((n as NSString).pathExtension.lowercased()) ||
+                          subtitleTypes.contains((n as NSString).pathExtension.lowercased()) {
                     files.append(RemoteFile(path: path, fileid: id, size: size))
                 }
             }

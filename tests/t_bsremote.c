@@ -10,6 +10,9 @@
 //   an MP4 with two sound tracks (English AAC silence, German DTS tone,
 //   German the default): both listed, German played though AVFoundation
 //   sees only the AAC, and a pick switches the sound,
+//   subtitles: an MKV's two SRT tracks, an MP4's text track and an .srt file
+//   beside a film are listed, and a pick hands out its cues when the picture
+//   reaches them (again after a seek back, none once switched off),
 //   and nothing is ever read from the placeholder itself.
 //
 // `make bsremote` starts tests/range_server.py and passes its port.
@@ -190,6 +193,58 @@ static void tracks(const char *path, const char *what) {
     g_ear_us = 5000;
 }
 
+// Play `path` with subtitle source `sel`; the cues the poll hands out, with
+// where the picture was. Returns how many (texts in got[]).
+static int watch_cues(kl_bsplayer *p, int ms, char got[][128], long long *late, int max) {
+    int n = 0;
+    for (int t = 0; t < ms / 10 && n < max; t++) {
+        char text[512];
+        long long st = 0, en = 0;
+        while (n < max && kl_bsplayer_sub_poll(p, text, sizeof text, &st, &en)) {
+            long long pos = kl_bsplayer_position_ms(p) * 1000;
+            snprintf(got[n], 128, "%s", text);
+            late[n] = pos - st;           // how far past its start it came
+            n++;
+        }
+        usleep(10000);
+    }
+    return n;
+}
+
+static void subs(const char *path, const char *what, int want_tracks, const char *want_list,
+                 int sel, const char *first, const char *second) {
+    printf("--- %s\n", what);
+    char reason[512] = "";
+    kl_bsplayer *p = kl_bsplayer_open2(path, KL_BS_SOUND_ASYNC, reason, sizeof reason);
+    ok(p != NULL, "opens");
+    if (!p) { printf("    %s\n", reason); return; }
+    char list[2048] = "";
+    int n = kl_bsplayer_text_tracks(p, list, sizeof list);
+    printf("%s", list);
+    char msg[96];
+    snprintf(msg, sizeof msg, "%d subtitle track(s) listed", want_tracks);
+    ok(n == want_tracks, msg);
+    ok(strstr(list, want_list) != NULL, "with language and title");
+    ok(kl_bsplayer_select_text(p, n) == -1, "a track that is not there is refused");
+    ok(kl_bsplayer_select_text(p, sel) == 0, "pick one");
+    kl_bsplayer_play(p);
+    char got[8][128];
+    long long late[8];
+    int k = watch_cues(p, second ? 2400 : 1200, got, late, 8);
+    for (int i = 0; i < k; i++) printf("    cue %d (%+lld ms): %s\n", i, late[i] / 1000, got[i]);
+    ok(k >= 1 && !strcmp(got[0], first), "the first cue, as plain text");
+    ok(k >= 1 && late[0] >= -20000 && late[0] < 300000, "handed out when the picture reaches it");
+    if (second) ok(k >= 2 && !strcmp(got[1], second), "the second cue (styling dropped, two lines)");
+    kl_bsplayer_seek_to_us(p, 0);
+    k = watch_cues(p, 1200, got, late, 8);
+    ok(k >= 1 && !strcmp(got[0], first), "after a seek back the first cue comes again");
+    kl_bsplayer_seek_to_us(p, 0);
+    ok(kl_bsplayer_select_text(p, -1) == 0, "subtitles off");
+    k = watch_cues(p, 900, got, late, 8);
+    ok(k == 0, "and no cue comes");
+    kl_bsplayer_close(p);
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("=== bigscreen films from a server ===\n");
@@ -201,31 +256,47 @@ int main(int argc, char **argv) {
     char dir[] = "/tmp/kl-bsremote-XXXXXX";
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
     char mp4[256], mkv[256], flaky[256], stray[256], dts[256], two[256];
+    char smkv[256], smp4[256], side[256], sidesrt[256];
     snprintf(mp4, sizeof mp4, "%s/Film.mp4", dir);
     snprintf(mkv, sizeof mkv, "%s/Film.mkv", dir);
     snprintf(flaky, sizeof flaky, "%s/Expired.mp4", dir);
     snprintf(stray, sizeof stray, "%s/Local.mp4", dir);
     snprintf(dts, sizeof dts, "%s/Remux-DTS.mp4", dir);
     snprintf(two, sizeof two, "%s/Two-Tracks.mp4", dir);
+    snprintf(smkv, sizeof smkv, "%s/Subs.mkv", dir);
+    snprintf(smp4, sizeof smp4, "%s/Subs.mp4", dir);
+    snprintf(side, sizeof side, "%s/Side.mkv", dir);
+    snprintf(sidesrt, sizeof sidesrt, "%s/Side.en.srt", dir);
     long long n4 = fsize("tests/data/bs_tiny_remote.mp4");
     long long nk = fsize("tests/data/bs_tiny.mkv");
     long long nd = fsize("tests/data/bs_tiny_dts.mp4");
     placeholder(dts, nd);
     long long n2 = fsize("tests/data/bs_tiny_2audio.mp4");
     placeholder(two, n2);
+    long long nsk = fsize("tests/data/bs_tiny_subs.mkv"), nsm = fsize("tests/data/bs_tiny_subs.mp4");
+    long long nss = fsize("tests/data/bs_tiny_side.en.srt");
+    placeholder(smkv, nsk);
+    placeholder(smp4, nsm);
+    placeholder(side, nsk);
+    placeholder(sidesrt, nss);
     placeholder(mp4, n4);
     placeholder(mkv, nk);
     placeholder(flaky, n4);
     placeholder(stray, n4);
 
-    char spec[3072];
+    char spec[4096];
     snprintf(spec, sizeof spec,
              "%s\turl\thttp://127.0.0.1:%s/bs_tiny_remote.mp4\t-\t-\t%lld\n"
              "%s\turl\thttp://127.0.0.1:%s/bs_tiny.mkv\t-\t-\t%lld\n"
              "%s\turl\thttp://127.0.0.1:%s/flaky/bs_tiny_remote.mp4\t-\t-\t%lld\n"
              "%s\turl\thttp://127.0.0.1:%s/bs_tiny_dts.mp4\t-\t-\t%lld\n"
-             "%s\turl\thttp://127.0.0.1:%s/bs_tiny_2audio.mp4\t-\t-\t%lld\n",
-             mp4, port, n4, mkv, port, nk, flaky, port, n4, dts, port, nd, two, port, n2);
+             "%s\turl\thttp://127.0.0.1:%s/bs_tiny_2audio.mp4\t-\t-\t%lld\n"
+             "%s\turl\thttp://127.0.0.1:%s/bs_tiny_subs.mkv\t-\t-\t%lld\n"
+             "%s\turl\thttp://127.0.0.1:%s/bs_tiny_subs.mp4\t-\t-\t%lld\n"
+             "%s\turl\thttp://127.0.0.1:%s/bs_tiny_subs.mkv\t-\t-\t%lld\n"
+             "%s\turl\thttp://127.0.0.1:%s/bs_tiny_side.en.srt\t-\t-\t%lld\n",
+             mp4, port, n4, mkv, port, nk, flaky, port, n4, dts, port, nd, two, port, n2,
+             smkv, port, nsk, smp4, port, nsm, side, port, nsk, sidesrt, port, nss);
     kl_remote_files_set(spec);
     ok(kl_remote_is(mp4) && kl_remote_is(mkv), "the placeholders are registered");
     ok(!kl_remote_is(stray), "a file that is not registered stays a file");
@@ -253,6 +324,14 @@ int main(int argc, char **argv) {
         hear_async(mkv, "an MKV's sound opened off the caller's thread");
         tracks(two, "two sound tracks, from the server");
         tracks("tests/data/bs_tiny_2audio.mp4", "and from a file");
+        subs(smkv, "MKV with two SRT tracks, from the server", 2, "eng\t\tSRT", 1,
+             "Subtitle English #1", "English #2\nline two");
+        subs("tests/data/bs_tiny_subs.mkv", "and from a file", 2, "ger\tDeutsch\tSRT", 0,
+             "Untertitel Deutsch #1", "Deutsch #2\nZeile zwei");
+        subs(smp4, "MP4 text track, from the server", 1, "ger\t\tTX3G", 0,
+             "Untertitel Deutsch #1", "Deutsch #2\nZeile zwei");
+        subs(side, "an .srt file beside a film, both on the server (after its own two)", 3,
+             "en\t\tSRT\t0\t1", 2, "Subtitle English #1", "English #2\nline two");
     } else {
         printf("  (no KL_FFMPEG_LIB: MKV and DTS through FFmpeg are skipped)\n");
     }
@@ -261,9 +340,10 @@ int main(int argc, char **argv) {
     unsigned long long bytes = 0;
     kl_remote_stats(&req, &bytes, &res);
     printf("  %lu requests, %llu bytes\n", req, bytes);
-    ok(bytes > 0 && bytes <= (unsigned long long)(3 * n4 + 2 * nk + 5 * nd + 3 * n2) * 2,
+    ok(bytes > 0 && bytes <= (unsigned long long)(3 * n4 + 2 * nk + 5 * nd + 3 * n2 + 6 * nsk + 3 * nsm) * 2,
        "each film read about once, not copied over and over");
 
+    unlink(smkv); unlink(smp4); unlink(side); unlink(sidesrt);
     unlink(two); unlink(dts); unlink(mp4); unlink(mkv); unlink(flaky); unlink(stray); rmdir(dir);
     printf("%s bigscreen films from a server\n", g_fail ? "FAIL" : "PASS");
     return g_fail;

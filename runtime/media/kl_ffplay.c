@@ -30,6 +30,10 @@ static struct {
     // switches nothing.
     int (*audio_tracks)(klff *, char *, int);
     int (*audio_select)(klff *, int);
+    // Optional: a framework built before the Subtitles menu shows none.
+    int (*sub_tracks)(klff *, char *, int);
+    int (*sub_select)(klff *, int);
+    int (*sub_next)(klff *, char *, int, long long *, long long *);
 } ff;
 static pthread_once_t ff_once = PTHREAD_ONCE_INIT;
 static int ff_ok;
@@ -61,6 +65,9 @@ static void ff_load(void) {
     *(void **)&ff.open_io = dlsym(h, "klff_open_io");
     *(void **)&ff.audio_tracks = dlsym(h, "klff_audio_tracks");
     *(void **)&ff.audio_select = dlsym(h, "klff_audio_select");
+    *(void **)&ff.sub_tracks = dlsym(h, "klff_sub_tracks");
+    *(void **)&ff.sub_select = dlsym(h, "klff_sub_select");
+    *(void **)&ff.sub_next = dlsym(h, "klff_sub_next");
     ff_ok = 1;
     fprintf(stderr, "  [ff] %s loaded\n", ff.version());
 }
@@ -462,4 +469,58 @@ int kl_ffaud_seek_us(kl_ffaud *a, long long us) {
     a->frames = a->off = a->last = 0;
     a->eof = 0;
     return rc;
+}
+
+// ---- subtitles ----------------------------------------------------------------
+//
+// One handle per subtitle source: a stream of the film, or a file beside it
+// (Film.srt). Cues come as plain text with their times; the caller paces them
+// against the picture.
+
+struct kl_ffsub { klff *f; };
+
+int kl_ffsub_tracks(const char *path, char *buf, size_t cap) {
+    if (!buf || !cap) return -1;
+    buf[0] = 0;
+    if (!kl_ff_available() || !ff.sub_tracks) return -1;
+    char e[256] = "";
+    klff *f = ff_open(path, KLFF_SUBTITLE, e, (int)sizeof e);
+    if (!f) return 0;           // no subtitle stream (or none FFmpeg reads)
+    int n = ff.sub_tracks(f, buf, cap > 0x7fffffff ? 0x7fffffff : (int)cap);
+    ff.close(f);
+    return n;
+}
+
+kl_ffsub *kl_ffsub_open(const char *path, int nth) {
+    if (!kl_ff_available() || !ff.sub_next || !ff.sub_select) return NULL;
+    char e[256] = "";
+    klff *f = ff_open(path, KLFF_SUBTITLE, e, (int)sizeof e);
+    if (!f) {
+        fprintf(stderr, "  [ff] %s: no subtitles (%s)\n", path, e);
+        return NULL;
+    }
+    if (nth > 0 && ff.sub_select(f, nth) != 0) {
+        fprintf(stderr, "  [ff] %s: no subtitle stream %d\n", path, nth);
+        ff.close(f);
+        return NULL;
+    }
+    kl_ffsub *s = calloc(1, sizeof *s);
+    if (!s) { ff.close(f); return NULL; }
+    s->f = f;
+    return s;
+}
+
+void kl_ffsub_close(kl_ffsub *s) {
+    if (!s) return;
+    ff.close(s->f);
+    free(s);
+}
+
+int kl_ffsub_next(kl_ffsub *s, char *text, size_t cap, long long *start_us, long long *end_us) {
+    if (!s) return -1;
+    return ff.sub_next(s->f, text, cap > 0x7fffffff ? 0x7fffffff : (int)cap, start_us, end_us);
+}
+
+int kl_ffsub_seek_us(kl_ffsub *s, long long us) {
+    return s ? ff.seek(s->f, us) : -1;
 }

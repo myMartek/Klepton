@@ -77,6 +77,11 @@ static int64_t klff_io_seek(void *opaque, int64_t off, int whence) {
     return off;
 }
 
+static enum AVMediaType klff_type(int kind) {
+    return kind == KLFF_VIDEO ? AVMEDIA_TYPE_VIDEO
+         : kind == KLFF_AUDIO ? AVMEDIA_TYPE_AUDIO : AVMEDIA_TYPE_SUBTITLE;
+}
+
 static long long klff_us(klff *f, int64_t ts) {
     if (ts == AV_NOPTS_VALUE) return -1;
     long long us = av_rescale_q(ts, f->st->time_base, AV_TIME_BASE_Q);
@@ -177,12 +182,13 @@ static klff *klff_open_with(klff *f, const char *path, int kind, char *err, int 
     if (rc < 0) { klff_err(err, cap, "cannot open", rc); klff_close(f); return NULL; }
     rc = avformat_find_stream_info(f->fmt, NULL);
     if (rc < 0) { klff_err(err, cap, "cannot read the streams", rc); klff_close(f); return NULL; }
-    enum AVMediaType type = kind == KLFF_VIDEO ? AVMEDIA_TYPE_VIDEO : AVMEDIA_TYPE_AUDIO;
+    enum AVMediaType type = klff_type(kind);
     const AVCodec *codec = NULL;
     f->idx = av_find_best_stream(f->fmt, type, -1, -1, &codec, 0);
     if (f->idx < 0 || !codec) {
         klff_err(err, cap, kind == KLFF_VIDEO ? "no video stream FFmpeg can decode"
-                                              : "no audio stream FFmpeg can decode", f->idx);
+                         : kind == KLFF_AUDIO ? "no audio stream FFmpeg can decode"
+                                              : "no subtitle stream FFmpeg can decode", f->idx);
         klff_close(f);
         return NULL;
     }
@@ -366,6 +372,10 @@ int klff_seek(klff *f, long long us) {
     int64_t ts = us;
     if (f->fmt->start_time != AV_NOPTS_VALUE) ts += f->fmt->start_time;
     int rc = avformat_seek_file(f->fmt, -1, INT64_MIN, ts, ts, 0);
+    // Subtitles: a file's first cue may lie after the target (an .srt or an
+    // MP4 text track sought back to 0 refuses "at or before"); the next cue
+    // is what is wanted then.
+    if (rc < 0 && f->kind == KLFF_SUBTITLE) rc = avformat_seek_file(f->fmt, -1, INT64_MIN, ts, INT64_MAX, 0);
     if (rc < 0) rc = av_seek_frame(f->fmt, -1, ts, AVSEEK_FLAG_BACKWARD);
     avcodec_flush_buffers(f->dec);
     if (f->swr) swr_free(&f->swr);
@@ -376,11 +386,11 @@ int klff_seek(klff *f, long long us) {
 
 // ---- audio tracks (Bigscreen Beta's Audio Tracks menu, 2026-11-27) ----
 
-// The nth audio stream's index in the file, or -1.
-static int klff_nth_audio(klff *f, int nth) {
+// The nth stream of a type, its index in the file, or -1.
+static int klff_nth(klff *f, enum AVMediaType type, int nth) {
     int k = 0;
     for (unsigned i = 0; i < f->fmt->nb_streams; i++) {
-        if (f->fmt->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+        if (f->fmt->streams[i]->codecpar->codec_type != type) continue;
         if (k++ == nth) return (int)i;
     }
     return -1;
@@ -390,13 +400,13 @@ static void klff_clean_field(char *s) {
     for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') *s = ' ';
 }
 
-int klff_audio_tracks(klff *f, char *buf, int cap) {
+static int klff_tracks(klff *f, enum AVMediaType type, char *buf, int cap) {
     if (!f || !buf || cap <= 0) return -1;
     buf[0] = 0;
     int k = 0, len = 0;
     for (unsigned i = 0; i < f->fmt->nb_streams; i++) {
         AVStream *st = f->fmt->streams[i];
-        if (st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+        if (st->codecpar->codec_type != type) continue;
         const AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", NULL, 0);
         const AVDictionaryEntry *title = av_dict_get(st->metadata, "title", NULL, 0);
         char l[16] = "", t[160] = "", c[48] = "";
@@ -413,15 +423,19 @@ int klff_audio_tracks(klff *f, char *buf, int cap) {
         else if (cid == AV_CODEC_ID_EAC3) snprintf(c, sizeof c, "E-AC-3");
         else if (cid == AV_CODEC_ID_TRUEHD) snprintf(c, sizeof c, "TrueHD");
         else if (cid == AV_CODEC_ID_DTS) snprintf(c, sizeof c, "DTS");
+        else if (cid == AV_CODEC_ID_SUBRIP) snprintf(c, sizeof c, "SRT");
+        else if (cid == AV_CODEC_ID_MOV_TEXT) snprintf(c, sizeof c, "TX3G");
         else {
             snprintf(c, sizeof c, "%s", d ? d->name : "?");
             for (char *q = c; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32);
         }
         klff_clean_field(l); klff_clean_field(t); klff_clean_field(c);
-        int n = snprintf(buf + len, (size_t)(cap - len), "%s\t%s\t%s\t%d\t%d\t%d\t%d\n", l, t, c,
-                         st->codecpar->ch_layout.nb_channels,
-                         (st->disposition & AV_DISPOSITION_DEFAULT) ? 1 : 0,
-                         (int)i == f->idx ? 1 : 0, st->id);
+        int text = d && (d->props & AV_CODEC_PROP_TEXT_SUB) ? 1 : 0;
+        int dispo = (st->disposition & AV_DISPOSITION_DEFAULT) ? 1 : 0;
+        if (st->disposition & AV_DISPOSITION_FORCED) dispo |= 2;
+        int n = snprintf(buf + len, (size_t)(cap - len), "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\n", l, t, c,
+                         st->codecpar->ch_layout.nb_channels, dispo,
+                         (int)i == f->idx ? 1 : 0, st->id, text);
         if (n < 0 || n >= cap - len) { buf[len] = 0; break; }
         len += n;
         k++;
@@ -429,9 +443,17 @@ int klff_audio_tracks(klff *f, char *buf, int cap) {
     return k;
 }
 
-int klff_audio_select(klff *f, int nth) {
-    if (!f || f->kind != KLFF_AUDIO) return -1;
-    int idx = klff_nth_audio(f, nth);
+int klff_audio_tracks(klff *f, char *buf, int cap) {
+    return klff_tracks(f, AVMEDIA_TYPE_AUDIO, buf, cap);
+}
+
+int klff_sub_tracks(klff *f, char *buf, int cap) {
+    return klff_tracks(f, AVMEDIA_TYPE_SUBTITLE, buf, cap);
+}
+
+static int klff_select(klff *f, int nth) {
+    enum AVMediaType type = klff_type(f->kind);
+    int idx = klff_nth(f, type, nth);
     if (idx < 0) return -1;
     if (idx == f->idx) return 0;
     AVStream *st = f->fmt->streams[idx];
@@ -452,11 +474,87 @@ int klff_audio_select(klff *f, int nth) {
     f->idx = idx;
     f->st = st;
     if (f->swr) swr_free(&f->swr);
-    int in_rate = dec->sample_rate > 0 ? dec->sample_rate : 48000;
-    f->out_rate = in_rate > 48000 ? 48000 : in_rate;
-    f->out_ch = dec->ch_layout.nb_channels >= 2 ? 2 : 1;
+    if (f->kind == KLFF_AUDIO) {
+        int in_rate = dec->sample_rate > 0 ? dec->sample_rate : 48000;
+        f->out_rate = in_rate > 48000 ? 48000 : in_rate;
+        f->out_ch = dec->ch_layout.nb_channels >= 2 ? 2 : 1;
+    }
     f->eof_sent = 0;
     return 0;
+}
+
+int klff_audio_select(klff *f, int nth) {
+    if (!f || f->kind != KLFF_AUDIO) return -1;
+    return klff_select(f, nth);
+}
+
+int klff_sub_select(klff *f, int nth) {
+    if (!f || f->kind != KLFF_SUBTITLE) return -1;
+    return klff_select(f, nth);
+}
+
+// ---- subtitles (Bigscreen Beta's Subtitles menu, 2026-11-27) ----
+
+// An ASS event line ("ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,
+// Effect,Text", what FFmpeg's text decoders all give) to plain text: the
+// Text field, its {\...} override blocks dropped, \N and \n as line breaks,
+// \h as a space.
+static void klff_ass_plain(const char *ass, char *out, int cap) {
+    const char *p = ass;
+    for (int commas = 0; *p && commas < 8; p++) if (*p == ',') commas++;
+    int n = 0, depth = 0;
+    for (; *p && n < cap - 1; p++) {
+        if (*p == '{') { depth++; continue; }
+        if (*p == '}' && depth) { depth--; continue; }
+        if (depth) continue;
+        if (*p == '\\' && (p[1] == 'N' || p[1] == 'n')) { out[n++] = '\n'; p++; continue; }
+        if (*p == '\\' && p[1] == 'h') { out[n++] = ' '; p++; continue; }
+        if (*p == '\r') continue;
+        out[n++] = *p;
+    }
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == ' ')) n--;
+    out[n] = 0;
+}
+
+int klff_sub_next(klff *f, char *text, int cap, long long *start_us, long long *end_us) {
+    if (!f || f->kind != KLFF_SUBTITLE || !text || cap <= 0) return -1;
+    for (;;) {
+        int rc = av_read_frame(f->fmt, f->pkt);
+        if (rc < 0) return 0;
+        if (f->pkt->stream_index != f->idx) { av_packet_unref(f->pkt); continue; }
+        AVSubtitle sub;
+        int got = 0;
+        rc = avcodec_decode_subtitle2(f->dec, &sub, &got, f->pkt);
+        long long pts = klff_us(f, f->pkt->pts);
+        long long dur = f->pkt->duration > 0
+            ? av_rescale_q(f->pkt->duration, f->st->time_base, AV_TIME_BASE_Q) : 0;
+        av_packet_unref(f->pkt);
+        if (rc < 0 || !got) continue;
+        text[0] = 0;
+        int len = 0;
+        for (unsigned i = 0; i < sub.num_rects; i++) {
+            AVSubtitleRect *r = sub.rects[i];
+            char line[2048] = "";
+            if (r->type == SUBTITLE_ASS && r->ass) klff_ass_plain(r->ass, line, (int)sizeof line);
+            else if (r->type == SUBTITLE_TEXT && r->text) snprintf(line, sizeof line, "%s", r->text);
+            if (!*line) continue;
+            int n = snprintf(text + len, (size_t)(cap - len), "%s%s", len ? "\n" : "", line);
+            if (n < 0 || n >= cap - len) break;
+            len += n;
+        }
+        long long start = pts >= 0 ? pts + (long long)sub.start_display_time * 1000 : -1;
+        long long end = sub.end_display_time && sub.end_display_time != UINT32_MAX
+            ? (pts >= 0 ? pts + (long long)sub.end_display_time * 1000 : -1)
+            : (start >= 0 && dur > 0 ? start + dur : -1);
+        avsubtitle_free(&sub);
+        if (!len || start < 0) continue;            // a bitmap, or a clear
+        if (end <= start) end = start + 3000000;    // no length given: three seconds
+        if (f->skip_to_us >= 0 && end < f->skip_to_us) continue;
+        f->skip_to_us = -1;
+        if (start_us) *start_us = start;
+        if (end_us) *end_us = end;
+        return 1;
+    }
 }
 
 const char *klff_version(void) {
