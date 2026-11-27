@@ -43,6 +43,12 @@ long long kl_ffaud_time_us(kl_ffaud *a);          // -1 at the end
 long      kl_ffaud_read(kl_ffaud *a, unsigned char *buf, unsigned long cap);
 int       kl_ffaud_advance(kl_ffaud *a);
 int       kl_ffaud_seek_us(kl_ffaud *a, long long us);
+// The file's audio streams, one line each (klff.h's klff_audio_tracks): how
+// many, -1 when this FFmpeg build cannot list them.
+int       kl_ffaud_tracks(kl_ffaud *a, char *buf, size_t cap);
+// Read the nth audio stream from now on (seek afterwards); 0 or -1. info
+// then reports the new stream's rate and channels.
+int       kl_ffaud_select(kl_ffaud *a, int nth);
 
 #ifdef __cplusplus
 }

@@ -59,6 +59,19 @@ int klff_audio_next(klff *f, const short **pcm, int *frames, long long *pts_us);
 // To `us` from the start. The next frame given is the first at or after it.
 int klff_seek(klff *f, long long us);
 
+// Every audio stream of the file, one line each in file order:
+// "language\ttitle\tcodec\tchannels\tdefault\tcurrent\tid\n" (id is the
+// container's own track number: an MP4's track ID; language is the
+// file's tag, often ISO 639-2 like "ger"; codec is a profile such as
+// "DTS-HD MA" when there is one). Returns how many, -1 on bad arguments.
+// Since the Audio Tracks menu (2026-11-27); optional, like klff_open_io.
+int klff_audio_tracks(klff *f, char *buf, int cap);
+
+// An audio handle reads the nth audio stream (0-based, the order above)
+// from now on; seek it afterwards. 0, or -1 when there is no such stream or
+// FFmpeg cannot decode it (the handle keeps its stream then).
+int klff_audio_select(klff *f, int nth);
+
 // "FFmpeg 9.0.2", for the log.
 const char *klff_version(void);
 

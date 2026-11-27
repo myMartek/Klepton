@@ -130,3 +130,74 @@ int kl_bsinfo_test_pattern(unsigned char *bgra, int w, int h) {
     }
     return 0;
 }
+
+// ---- TrackInfoList ----
+//
+// Laid out front to back, which FlatBuffers allows as long as every uoffset
+// points forward: root, the list's vtable and table, the tracks vector, each
+// track's vtable and table, then the strings. Every piece is 4-aligned.
+
+static void fb_u16(unsigned char *b, size_t at, unsigned v) {
+    b[at] = (unsigned char)(v & 0xff);
+    b[at + 1] = (unsigned char)(v >> 8);
+}
+static void fb_u32(unsigned char *b, size_t at, uint32_t v) {
+    for (int i = 0; i < 4; i++) b[at + (size_t)i] = (unsigned char)(v >> (8 * i));
+}
+static size_t fb_str_size(const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    return (4 + n + 1 + 3) & ~(size_t)3;
+}
+
+int kl_bstracks_encode(int n, const int *ids, const char *const *langs,
+                       const char *const *labels, unsigned char **out, size_t *len) {
+    if (!out || !len || n < 0 || (n > 0 && !ids)) return -1;
+    enum { LIST_VT = 4, LIST_T = 16, VEC = 32, TRACK = 36 };   // TRACK: 16 vtable + 20 table
+    size_t total = VEC + 4 + 4 * (size_t)n + TRACK * (size_t)n;
+    for (int i = 0; i < n; i++)
+        total += fb_str_size(labels ? labels[i] : NULL) + fb_str_size(langs ? langs[i] : NULL);
+    unsigned char *b = calloc(1, total);
+    if (!b) return -1;
+    fb_u32(b, 0, LIST_T);                       // root -> list table
+    fb_u16(b, LIST_VT + 0, 10);                 // vtable: 3 slots
+    fb_u16(b, LIST_VT + 2, 16);                 // table size
+    fb_u16(b, LIST_VT + 4, 4);                  // count
+    fb_u16(b, LIST_VT + 6, 8);                  // activeTrackId
+    fb_u16(b, LIST_VT + 8, 12);                 // tracks
+    fb_u32(b, LIST_T + 0, LIST_T - LIST_VT);    // soffset: vtable = table - 12
+    fb_u32(b, LIST_T + 4, (uint32_t)n);
+    fb_u32(b, LIST_T + 8, 0);
+    fb_u32(b, LIST_T + 12, VEC - (LIST_T + 12));
+    fb_u32(b, VEC, (uint32_t)n);
+    size_t tracks = VEC + 4 + 4 * (size_t)n;
+    size_t str = tracks + TRACK * (size_t)n;
+    for (int i = 0; i < n; i++) {
+        size_t vt = tracks + TRACK * (size_t)i, t = vt + 16;
+        size_t slot = VEC + 4 + 4 * (size_t)i;
+        fb_u32(b, slot, (uint32_t)(t - slot));
+        fb_u16(b, vt + 0, 16);                  // vtable: 6 slots
+        fb_u16(b, vt + 2, 20);
+        fb_u16(b, vt + 4, 4);                   // id
+        fb_u16(b, vt + 6, 8);                   // format
+        fb_u16(b, vt + 8, 0);
+        fb_u16(b, vt + 10, 0);
+        fb_u16(b, vt + 12, 12);                 // label
+        fb_u16(b, vt + 14, 16);                 // language
+        fb_u32(b, t + 0, 16);
+        fb_u32(b, t + 4, (uint32_t)ids[i]);
+        fb_u32(b, t + 8, 0);
+        const char *pair[2] = { labels ? labels[i] : NULL, langs ? langs[i] : NULL };
+        for (int k = 0; k < 2; k++) {
+            size_t field = t + 12 + 4 * (size_t)k;
+            const char *v = pair[k] ? pair[k] : "";
+            size_t vn = strlen(v);
+            fb_u32(b, field, (uint32_t)(str - field));
+            fb_u32(b, str, (uint32_t)vn);
+            memcpy(b + str + 4, v, vn);          // NUL and padding are calloc's
+            str += fb_str_size(v);
+        }
+    }
+    *out = b;
+    *len = total;
+    return 0;
+}

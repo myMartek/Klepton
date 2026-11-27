@@ -1099,6 +1099,10 @@ static void fourcc_str(AudioFormatID id, char out[8]) {
 }
 
 int kl_avdemux_audio_foreign(kl_avdemux *m) { return m ? m->aforeign : 0; }
+int kl_avdemux_audio_track_id(kl_avdemux *m) {
+    if (!m || !m->atrack) return 0;
+    return (int)((__bridge AVAssetTrack *)m->atrack).trackID;
+}
 
 kl_avdemux *kl_avdemux_open(const char *container, long long offset, long long size) {
     if (!container || !*container) return NULL;

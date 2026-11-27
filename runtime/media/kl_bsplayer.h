@@ -103,6 +103,24 @@ long long kl_bsplayer_audio_position_us(kl_bsplayer *p);
 // How many times the pump has realigned the sound to the picture this session.
 // One per interruption that got through, not one per chunk: a healthy run is 0.
 unsigned long kl_bsplayer_av_realigns(kl_bsplayer *p);
+// The film's sound tracks (Bigscreen's Audio Tracks menu), as FFmpeg lists
+// them — every stream, also one AVFoundation cannot play — one line each:
+// "language\ttitle\tcodec\tchannels\tdefault\tcurrent\tid\n". Returns how
+// many; 0 without FFmpeg or sound. The first call reads the file (FFmpeg
+// opens it once more on the AVFoundation path); later calls are cached. On
+// that path it also puts the sound on the file's own choice (FFmpeg's
+// "current": the default-flagged stream) when AVFoundation plays another
+// one — it never sees a DTS track, so a remux with German DTS (default) and
+// English AAC would otherwise start in English.
+int kl_bsplayer_audio_tracks(kl_bsplayer *p, char *buf, size_t cap);
+// Play the nth of those from where the picture is: the sound moves to
+// FFmpeg reading that stream, and the sink is reopened if its rate or
+// channels change. 0, or -1 (no such track / no FFmpeg; the sound stays).
+int kl_bsplayer_select_audio(kl_bsplayer *p, int nth);
+// The same list without waiting: prefetch reads it on a thread of the
+// player's (joined by close); peek answers -1 until it is there.
+void kl_bsplayer_audio_tracks_prefetch(kl_bsplayer *p);
+int kl_bsplayer_audio_tracks_peek(kl_bsplayer *p, char *buf, size_t cap);
 // Pump once: fire whatever is due (ENDED when the played stream ran out).
 // 0 = ok, -1 = bad player.
 int kl_bsplayer_update(kl_bsplayer *p);

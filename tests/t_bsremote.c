@@ -7,6 +7,9 @@
 //   a link the server refuses once (an expired one) is asked for again,
 //   an MP4 with DTS 5.1 sound (no Apple decoder): picture through
 //   AVFoundation, sound through FFmpeg, from the server and from a file,
+//   an MP4 with two sound tracks (English AAC silence, German DTS tone,
+//   German the default): both listed, German played though AVFoundation
+//   sees only the AAC, and a pick switches the sound,
 //   and nothing is ever read from the placeholder itself.
 //
 // `make bsremote` starts tests/range_server.py and passes its port.
@@ -82,6 +85,7 @@ static void play(const char *path, const char *what) {
 
 // The sound the pump hands a sink while the film plays half a second.
 struct ear { unsigned rate, ch; size_t bytes, loud; };
+static useconds_t g_ear_us = 5000;
 static int ear_open(void *c, unsigned rate, unsigned ch) {
     struct ear *e = c; e->rate = rate; e->ch = ch; return 0;
 }
@@ -90,7 +94,7 @@ static size_t ear_write(void *c, const void *pcm, size_t n) {
     const short *s = pcm;
     for (size_t i = 0; i < n / 2; i++) e->loud += s[i] > 500 || s[i] < -500;
     e->bytes += n;
-    usleep(5000);       // a device takes about real time, not all at once
+    usleep(g_ear_us);   // a device takes about real time, not all at once
     return n;
 }
 static void ear_nop(void *c) { (void)c; }
@@ -116,6 +120,52 @@ static void hear(const char *path, const char *what) {
     kl_bsplayer_close(p);
 }
 
+// Play until the sink got `frames` more stereo frames; how many were loud.
+static double loud_share(kl_bsplayer *p, struct ear *e, size_t frames) {
+    (void)p;
+    size_t b0 = e->bytes, l0 = e->loud;
+    for (int i = 0; i < 200 && e->bytes - b0 < frames * 4; i++) usleep(10000);
+    size_t samples = (e->bytes - b0) / 2;
+    return samples ? (double)(e->loud - l0) / (double)samples : -1;
+}
+
+static void tracks(const char *path, const char *what) {
+    printf("--- %s\n", what);
+    char reason[512] = "";
+    kl_bsplayer *p = kl_bsplayer_open(path, reason, sizeof reason);
+    ok(p != NULL, "opens");
+    if (!p) { printf("    %s\n", reason); return; }
+    char list[2048] = "";
+    int n = kl_bsplayer_audio_tracks(p, list, sizeof list);
+    printf("%s", list);
+    ok(n == 2, "two sound tracks listed (AVFoundation sees one)");
+    ok(!strncmp(list, "eng\t", 4) && strstr(list, "\nger\t") != NULL,
+       "English first, German second, in file order");
+    ok(strstr(list, "\t6\t1\t1\t") != NULL, "German DTS 5.1 is the default and current");
+    g_ear_us = 20000;
+    struct ear e = {0};
+    kl_bsplayer_audio_sink sink = { ear_open, ear_write, ear_nop, ear_nop, ear_nop, ear_nop };
+    kl_bsplayer_set_audio_sink(p, &sink, &e);
+    kl_bsplayer_play(p);
+    double a = loud_share(p, &e, 9600);
+    printf("    German (default): %.2f loud\n", a);
+    ok(a > 0.5, "the default German tone plays");
+    ok(kl_bsplayer_select_audio(p, 0) == 0, "pick track 0 (English)");
+    loud_share(p, &e, 2048);                    // a chunk read before the pick
+    double b = loud_share(p, &e, 7000);
+    printf("    English: %.2f loud\n", b);
+    ok(b >= 0 && b < 0.05, "now the English silence plays");
+    ok(kl_bsplayer_select_audio(p, 1) == 0, "pick track 1 (German) again");
+    loud_share(p, &e, 2048);
+    double c = loud_share(p, &e, 7000);
+    printf("    German again: %.2f loud\n", c);
+    ok(c > 0.5, "the German tone is back");
+    ok(kl_bsplayer_select_audio(p, 5) == -1, "a track that is not there is refused");
+    kl_bsplayer_stop(p);
+    kl_bsplayer_close(p);
+    g_ear_us = 5000;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("=== bigscreen films from a server ===\n");
@@ -126,16 +176,19 @@ int main(int argc, char **argv) {
     const char *port = argv[1];
     char dir[] = "/tmp/kl-bsremote-XXXXXX";
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
-    char mp4[256], mkv[256], flaky[256], stray[256], dts[256];
+    char mp4[256], mkv[256], flaky[256], stray[256], dts[256], two[256];
     snprintf(mp4, sizeof mp4, "%s/Film.mp4", dir);
     snprintf(mkv, sizeof mkv, "%s/Film.mkv", dir);
     snprintf(flaky, sizeof flaky, "%s/Expired.mp4", dir);
     snprintf(stray, sizeof stray, "%s/Local.mp4", dir);
     snprintf(dts, sizeof dts, "%s/Remux-DTS.mp4", dir);
+    snprintf(two, sizeof two, "%s/Two-Tracks.mp4", dir);
     long long n4 = fsize("tests/data/bs_tiny_remote.mp4");
     long long nk = fsize("tests/data/bs_tiny.mkv");
     long long nd = fsize("tests/data/bs_tiny_dts.mp4");
     placeholder(dts, nd);
+    long long n2 = fsize("tests/data/bs_tiny_2audio.mp4");
+    placeholder(two, n2);
     placeholder(mp4, n4);
     placeholder(mkv, nk);
     placeholder(flaky, n4);
@@ -146,8 +199,9 @@ int main(int argc, char **argv) {
              "%s\turl\thttp://127.0.0.1:%s/bs_tiny_remote.mp4\t-\t-\t%lld\n"
              "%s\turl\thttp://127.0.0.1:%s/bs_tiny.mkv\t-\t-\t%lld\n"
              "%s\turl\thttp://127.0.0.1:%s/flaky/bs_tiny_remote.mp4\t-\t-\t%lld\n"
-             "%s\turl\thttp://127.0.0.1:%s/bs_tiny_dts.mp4\t-\t-\t%lld\n",
-             mp4, port, n4, mkv, port, nk, flaky, port, n4, dts, port, nd);
+             "%s\turl\thttp://127.0.0.1:%s/bs_tiny_dts.mp4\t-\t-\t%lld\n"
+             "%s\turl\thttp://127.0.0.1:%s/bs_tiny_2audio.mp4\t-\t-\t%lld\n",
+             mp4, port, n4, mkv, port, nk, flaky, port, n4, dts, port, nd, two, port, n2);
     kl_remote_files_set(spec);
     ok(kl_remote_is(mp4) && kl_remote_is(mkv), "the placeholders are registered");
     ok(!kl_remote_is(stray), "a file that is not registered stays a file");
@@ -171,6 +225,8 @@ int main(int argc, char **argv) {
         play(dts, "MP4 with DTS 5.1 sound: picture through AVFoundation");
         hear(dts, "its sound through FFmpeg, from the server");
         hear("tests/data/bs_tiny_dts.mp4", "and from a file");
+        tracks(two, "two sound tracks, from the server");
+        tracks("tests/data/bs_tiny_2audio.mp4", "and from a file");
     } else {
         printf("  (no KL_FFMPEG_LIB: MKV and DTS through FFmpeg are skipped)\n");
     }
@@ -179,10 +235,10 @@ int main(int argc, char **argv) {
     unsigned long long bytes = 0;
     kl_remote_stats(&req, &bytes, &res);
     printf("  %lu requests, %llu bytes\n", req, bytes);
-    ok(bytes > 0 && bytes <= (unsigned long long)(3 * n4 + nk + 3 * nd) * 2,
+    ok(bytes > 0 && bytes <= (unsigned long long)(3 * n4 + nk + 3 * nd + 3 * n2) * 2,
        "each film read about once, not copied over and over");
 
-    unlink(dts); unlink(mp4); unlink(mkv); unlink(flaky); unlink(stray); rmdir(dir);
+    unlink(two); unlink(dts); unlink(mp4); unlink(mkv); unlink(flaky); unlink(stray); rmdir(dir);
     printf("%s bigscreen films from a server\n", g_fail ? "FAIL" : "PASS");
     return g_fail;
 }

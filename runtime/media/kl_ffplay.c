@@ -26,6 +26,10 @@ static struct {
     // Optional: a framework built before the pCloud locations lacks it and
     // then plays local files only.
     klff *(*open_io)(klff_read_fn, klff_done_fn, void *, long long, const char *, int, char *, int);
+    // Optional: a framework built before the Audio Tracks menu lists and
+    // switches nothing.
+    int (*audio_tracks)(klff *, char *, int);
+    int (*audio_select)(klff *, int);
 } ff;
 static pthread_once_t ff_once = PTHREAD_ONCE_INIT;
 static int ff_ok;
@@ -55,6 +59,8 @@ static void ff_load(void) {
     FF_SYM(version, "klff_version");
 #undef FF_SYM
     *(void **)&ff.open_io = dlsym(h, "klff_open_io");
+    *(void **)&ff.audio_tracks = dlsym(h, "klff_audio_tracks");
+    *(void **)&ff.audio_select = dlsym(h, "klff_audio_select");
     ff_ok = 1;
     fprintf(stderr, "  [ff] %s loaded\n", ff.version());
 }
@@ -418,6 +424,23 @@ int kl_ffaud_advance(kl_ffaud *a) {
     a->off += a->last ? a->last : FFA_CHUNK;
     a->last = 0;
     return ffa_fill(a);
+}
+
+int kl_ffaud_tracks(kl_ffaud *a, char *buf, size_t cap) {
+    if (!a || !buf || !cap || !ff.audio_tracks) return -1;
+    return ff.audio_tracks(a->f, buf, cap > 0x7fffffff ? 0x7fffffff : (int)cap);
+}
+
+int kl_ffaud_select(kl_ffaud *a, int nth) {
+    if (!a || !ff.audio_select) return -1;
+    if (ff.audio_select(a->f, nth) != 0) return -1;
+    char codec[32] = "";
+    ff.info(a->f, NULL, NULL, NULL, NULL, codec, (int)sizeof codec, &a->rate, &a->ch);
+    fprintf(stderr, "  [ff] sound track %d: %s, %d Hz, %d ch\n", nth, codec, a->rate, a->ch);
+    a->buf = NULL;
+    a->frames = a->off = a->last = 0;
+    a->eof = 0;
+    return 0;
 }
 
 int kl_ffaud_seek_us(kl_ffaud *a, long long us) {

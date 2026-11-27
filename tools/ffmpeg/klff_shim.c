@@ -366,6 +366,91 @@ int klff_seek(klff *f, long long us) {
     return rc < 0 ? -1 : 0;
 }
 
+// ---- audio tracks (Bigscreen Beta's Audio Tracks menu, 2026-11-27) ----
+
+// The nth audio stream's index in the file, or -1.
+static int klff_nth_audio(klff *f, int nth) {
+    int k = 0;
+    for (unsigned i = 0; i < f->fmt->nb_streams; i++) {
+        if (f->fmt->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+        if (k++ == nth) return (int)i;
+    }
+    return -1;
+}
+
+static void klff_clean_field(char *s) {
+    for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') *s = ' ';
+}
+
+int klff_audio_tracks(klff *f, char *buf, int cap) {
+    if (!f || !buf || cap <= 0) return -1;
+    buf[0] = 0;
+    int k = 0, len = 0;
+    for (unsigned i = 0; i < f->fmt->nb_streams; i++) {
+        AVStream *st = f->fmt->streams[i];
+        if (st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+        const AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", NULL, 0);
+        const AVDictionaryEntry *title = av_dict_get(st->metadata, "title", NULL, 0);
+        char l[16] = "", t[160] = "", c[48] = "";
+        if (lang) snprintf(l, sizeof l, "%s", lang->value);
+        if (title) snprintf(t, sizeof t, "%s", title->value);
+        // What a menu shows: "AAC", "AC-3", "TrueHD"; DTS by its profile,
+        // which names the kind ("DTS-HD MA", "DTS-HD HRA", "DTS").
+        enum AVCodecID cid = st->codecpar->codec_id;
+        const AVCodecDescriptor *d = avcodec_descriptor_get(cid);
+        const char *prof = cid == AV_CODEC_ID_DTS
+            ? avcodec_profile_name(cid, st->codecpar->profile) : NULL;
+        if (prof) snprintf(c, sizeof c, "%s", prof);
+        else if (cid == AV_CODEC_ID_AC3) snprintf(c, sizeof c, "AC-3");
+        else if (cid == AV_CODEC_ID_EAC3) snprintf(c, sizeof c, "E-AC-3");
+        else if (cid == AV_CODEC_ID_TRUEHD) snprintf(c, sizeof c, "TrueHD");
+        else if (cid == AV_CODEC_ID_DTS) snprintf(c, sizeof c, "DTS");
+        else {
+            snprintf(c, sizeof c, "%s", d ? d->name : "?");
+            for (char *q = c; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32);
+        }
+        klff_clean_field(l); klff_clean_field(t); klff_clean_field(c);
+        int n = snprintf(buf + len, (size_t)(cap - len), "%s\t%s\t%s\t%d\t%d\t%d\t%d\n", l, t, c,
+                         st->codecpar->ch_layout.nb_channels,
+                         (st->disposition & AV_DISPOSITION_DEFAULT) ? 1 : 0,
+                         (int)i == f->idx ? 1 : 0, st->id);
+        if (n < 0 || n >= cap - len) { buf[len] = 0; break; }
+        len += n;
+        k++;
+    }
+    return k;
+}
+
+int klff_audio_select(klff *f, int nth) {
+    if (!f || f->kind != KLFF_AUDIO) return -1;
+    int idx = klff_nth_audio(f, nth);
+    if (idx < 0) return -1;
+    if (idx == f->idx) return 0;
+    AVStream *st = f->fmt->streams[idx];
+    const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!codec) return -1;
+    AVCodecContext *dec = avcodec_alloc_context3(codec);
+    if (!dec || avcodec_parameters_to_context(dec, st->codecpar) < 0) {
+        avcodec_free_context(&dec);
+        return -1;
+    }
+    dec->pkt_timebase = st->time_base;
+    dec->thread_count = 0;
+    if (avcodec_open2(dec, codec, NULL) < 0) { avcodec_free_context(&dec); return -1; }
+    avcodec_free_context(&f->dec);
+    f->dec = dec;
+    f->fmt->streams[f->idx]->discard = AVDISCARD_ALL;
+    st->discard = AVDISCARD_DEFAULT;
+    f->idx = idx;
+    f->st = st;
+    if (f->swr) swr_free(&f->swr);
+    int in_rate = dec->sample_rate > 0 ? dec->sample_rate : 48000;
+    f->out_rate = in_rate > 48000 ? 48000 : in_rate;
+    f->out_ch = dec->ch_layout.nb_channels >= 2 ? 2 : 1;
+    f->eof_sent = 0;
+    return 0;
+}
+
 const char *klff_version(void) {
     static char v[64];
     if (!*v) snprintf(v, sizeof v, "FFmpeg %s", av_version_info());

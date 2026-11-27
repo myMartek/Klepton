@@ -160,7 +160,8 @@ const unsigned char *kl_bigscreen_film_frame(int *w, int *h,
 // message. Observed registrations pass (name, null), replicated verbatim.
 typedef struct { char *go; char *fn; } bs_cb;
 static bs_cb g_cb_success, g_cb_failed, g_cb_ready,
-    g_cb_playing, g_cb_ended, g_cb_error;
+    g_cb_playing, g_cb_ended, g_cb_error, g_cb_atracks;
+static int g_film_tracks_fired;     // AudioTracksChanged sent for this film
 
 static void bs_cb_store(bs_cb *slot, const char *go,
                         const char *fn, const char *what) {
@@ -485,6 +486,11 @@ static void bs_film_open(const char *path) {
     KLJ_LOG("BigMediaPlayerAPI — film session open \"%s\": %s %dx%d, %lld us",
             path, mime ? mime : "?", w, h, dur);
     kl_bsplayer_play(g_film);
+    // The Audio Tracks menu: FFmpeg reads the streams off the Unity thread
+    // (a pCloud film is a few range requests away); the pump below says
+    // AudioTracksChanged once the list is there and the picture is up.
+    g_film_tracks_fired = 0;
+    kl_bsplayer_audio_tracks_prefetch(g_film);
 }
 
 
@@ -502,8 +508,11 @@ static klj_val register_expired_drm_cb(void *env, void *self, const klj_val *a, 
     return (klj_val){0};
 }
 static klj_val register_audio_tracks_cb(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigMediaPlayerCallbacks.RegisterAudioTracksChangedCallback — registration accepted (no media session on this host)");
+    (void)env; (void)self;
+    bs_cb_store(&g_cb_atracks,
+                n > 0 && a[0].l ? klj_str(a[0].l) : NULL,
+                n > 1 && a[1].l ? klj_str(a[1].l) : NULL,
+                "RegisterAudioTracksChangedCallback");
     return (klj_val){0};
 }
 static klj_val register_media_info_failed_cb(void *env, void *self, const klj_val *a, int n) {
@@ -664,6 +673,13 @@ static klj_val update_media_players(void *env, void *self, const klj_val *a, int
         if (g_film_ended) {
             g_film_ended = 0;
             bs_send(env, &g_cb_ended, "", "PlaybackEndedCallback");
+        }
+        // The Java player says this from ExoPlayer's onTracksChanged with an
+        // empty message; the game then asks GetAudioTracks.
+        if (g_film_ready && !g_film_tracks_fired &&
+            kl_bsplayer_audio_tracks_peek(g_film, NULL, 0) >= 0) {
+            g_film_tracks_fired = 1;
+            bs_send(env, &g_cb_atracks, "", "AudioTracksChangedCallback");
         }
     }
     bsinfo_pump(env);
@@ -1022,6 +1038,113 @@ static klj_val webview_exit_fullscreen(void *env, void *self, const klj_val *a, 
     return (klj_val){0};
 }
 
+// ---- Audio Tracks menu (2026-11-27) ----
+//
+// BigMediaPlayer.GetAudioTracks answers a base64 TrackInfoList built from
+// ExoPlayer's formats: ids 0..n-1 in stream order, the language as ExoPlayer
+// normalises it (two letters where there are two), and for audio a label from
+// DebugUtils.buildTrackName (language, channels, bitrate, codec). Here
+// FFmpeg's stream list stands in for ExoPlayer's (kl_bsplayer_audio_tracks),
+// so a DTS track AVFoundation hides is listed and playable too, and
+// SelectAudioTrack(id) plays stream id from where the picture is.
+
+static const struct { const char *b, *t, *two, *name; } bs_langs[] = {
+    {"ger", "deu", "de", "German"},   {"eng", "eng", "en", "English"},
+    {"fre", "fra", "fr", "French"},   {"spa", "spa", "es", "Spanish"},
+    {"ita", "ita", "it", "Italian"},  {"jpn", "jpn", "ja", "Japanese"},
+    {"por", "por", "pt", "Portuguese"}, {"rus", "rus", "ru", "Russian"},
+    {"chi", "zho", "zh", "Chinese"},  {"kor", "kor", "ko", "Korean"},
+    {"dut", "nld", "nl", "Dutch"},    {"pol", "pol", "pl", "Polish"},
+    {"tur", "tur", "tr", "Turkish"},  {"swe", "swe", "sv", "Swedish"},
+    {"dan", "dan", "da", "Danish"},   {"nor", "nor", "no", "Norwegian"},
+    {"fin", "fin", "fi", "Finnish"},  {"cze", "ces", "cs", "Czech"},
+    {"hun", "hun", "hu", "Hungarian"}, {"gre", "ell", "el", "Greek"},
+    {"hin", "hin", "hi", "Hindi"},    {"ara", "ara", "ar", "Arabic"},
+};
+
+// "ger" -> "de", "German"; "und"/"" -> "", NULL; unknown codes pass through.
+static const char *bs_lang(const char *code, const char **name) {
+    *name = NULL;
+    if (!code || !*code || !strcmp(code, "und")) return "";
+    for (size_t i = 0; i < sizeof bs_langs / sizeof bs_langs[0]; i++)
+        if (!strcmp(code, bs_langs[i].b) || !strcmp(code, bs_langs[i].t) ||
+            !strcmp(code, bs_langs[i].two)) {
+            *name = bs_langs[i].name;
+            return bs_langs[i].two;
+        }
+    return code;
+}
+
+static klj_val media_get_audio_tracks(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    enum { MAXT = 32 };
+    static char list[8192];
+    int count = g_film ? kl_bsplayer_audio_tracks_peek(g_film, list, sizeof list) : -1;
+    if (count < 0) { count = 0; list[0] = 0; }
+    if (count > MAXT) count = MAXT;
+    int ids[MAXT];
+    const char *langs[MAXT], *labels[MAXT];
+    static char labbuf[MAXT][200];
+    char *line = list;
+    int k = 0;
+    for (; k < count && line && *line; k++) {
+        char *end = strchr(line, '\n');
+        if (end) *end = 0;
+        char *f[6] = {0};
+        char *q = line;
+        for (int i = 0; i < 6 && q; i++) {
+            f[i] = q;
+            q = strchr(q, '\t');
+            if (q) *q++ = 0;
+        }
+        const char *lname = NULL;
+        langs[k] = bs_lang(f[0], &lname);
+        int ch = f[3] ? atoi(f[3]) : 0;
+        const char *layout = ch == 1 ? "mono" : ch == 2 ? "stereo" : ch == 6 ? "5.1" : ch == 8 ? "7.1" : "";
+        char chbuf[16] = "";
+        if (!*layout && ch > 0) { snprintf(chbuf, sizeof chbuf, "%d ch", ch); layout = chbuf; }
+        const char *codec = f[2] && *f[2] ? f[2] : "";
+        char who[48];
+        if (lname) snprintf(who, sizeof who, "%s", lname);
+        else if (*langs[k]) snprintf(who, sizeof who, "%s", langs[k]);
+        else snprintf(who, sizeof who, "Track %d", k + 1);
+        if (f[1] && *f[1])
+            snprintf(labbuf[k], sizeof labbuf[k], "%s", f[1]);   // the file's own title
+        else
+            snprintf(labbuf[k], sizeof labbuf[k], "%s%s%s%s%s", who,
+                     *codec ? ", " : "", codec, *layout ? ", " : "", layout);
+        labels[k] = labbuf[k];
+        ids[k] = k;
+        line = end ? end + 1 : NULL;
+    }
+    unsigned char *fb = NULL;
+    size_t fbn = 0;
+    char *b64 = NULL;
+    if (kl_bstracks_encode(k, ids, langs, labels, &fb, &fbn) == 0)
+        b64 = kl_bsinfo_base64(fb, fbn);
+    free(fb);
+    KLJ_LOG("BigMediaPlayerAPI.GetAudioTracks — %d track(s)%s%s", k,
+            k ? ", first: " : "", k ? labels[0] : "");
+    klj_val r = {.l = kl_jni_new_string(b64 ? b64 : "")};
+    free(b64);
+    return r;
+}
+
+static klj_val media_select_audio_track(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self;
+    int id = n > 1 ? (int)(int32_t)a[1].j : -1;
+    int rc = g_film ? kl_bsplayer_select_audio(g_film, id) : -1;
+    KLJ_LOG("BigMediaPlayerAPI.SelectAudioTrack — track %d %s", id,
+            rc == 0 ? "playing" : "refused");
+    return (klj_val){0};
+}
+
+static klj_val media_deselect_all_audio_tracks(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    KLJ_LOG_ONCE("BigMediaPlayerAPI.DeselectAllAudioTracks — accepted (the sound keeps its track)");
+    return (klj_val){0};
+}
+
 // The registrations in the order the dex declares them, then the media
 // manager's and web wrapper's calls beside them; the run takes whatever
 // subset it reaches.
@@ -1064,6 +1187,11 @@ static const klj_binding bindings[] = {
     {BIGSCREEN_API, "GetVideoTextureWidth", "(I)I", media_get_video_texture_width},
     {BIGSCREEN_API, "GetVideoTextureHeight", "(I)I", media_get_video_texture_height},
     {BIGSCREEN_API, "RequestMediaInfo", "(Ljava/lang/String;FII)I", media_request_media_info},
+    // The Audio Tracks menu: the list (a base64 TrackInfoList), a pick, and
+    // the "none" the menu can ask for.
+    {BIGSCREEN_API, "GetAudioTracks", "(I)Ljava/lang/String;", media_get_audio_tracks},
+    {BIGSCREEN_API, "SelectAudioTrack", "(II)V", media_select_audio_track},
+    {BIGSCREEN_API, "DeselectAllAudioTracks", "(I)V", media_deselect_all_audio_tracks},
     // The drive surface beside those settings: the seek that ended the run
     // that reached it, the volume and transport controls, the starts in all
     // their spellings, and the shutdown. All void, all accepted once.

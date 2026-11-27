@@ -107,7 +107,7 @@ build_slice() {
   local FW="vendor/out/$D/$NAME.framework"
   [ "$D" = macos ] && FW="$WORK/out-macos/$NAME.framework"
   rm -rf "$FW"; mkdir -p "$FW"
-  printf '_klff_open\n_klff_open_io\n_klff_close\n_klff_info\n_klff_video_next\n_klff_audio_next\n_klff_seek\n_klff_version\n' \
+  printf '_klff_open\n_klff_open_io\n_klff_close\n_klff_info\n_klff_video_next\n_klff_audio_next\n_klff_seek\n_klff_version\n_klff_audio_tracks\n_klff_audio_select\n' \
       > "$B/exports.txt"
   "$CC" -target "$TRIPLE" -isysroot "$SYSROOT" -O2 -fPIC -I"$P/include" \
       -c tools/ffmpeg/klff_shim.c -o "$B/klff_shim.o"

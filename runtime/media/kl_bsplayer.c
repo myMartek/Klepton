@@ -48,6 +48,17 @@ struct kl_bsplayer {
     // the pump then puts the sound where the picture is (see bs_audio_realign).
     int realign_armed;
     unsigned long realigns;         // how many times that was needed
+    // The Audio Tracks menu: the film's path (FFmpeg opens it again for
+    // another track), the list FFmpeg gave once, and a switch the pump must
+    // answer by reopening the sink when the new track's rate or channels
+    // differ (sink_reformat, under amu).
+    char *path;
+    char *tracks;
+    int ntracks;
+    int tracks_done;
+    int sink_reformat;
+    pthread_t tthr;                 // kl_bsplayer_audio_tracks_prefetch
+    int tthr_live;
 };
 
 // One player, two engines: AVFoundation (dec + dm) or FFmpeg (fv + fa).
@@ -164,6 +175,7 @@ kl_bsplayer *kl_bsplayer_open(const char *path, char *reason, size_t cap) {
     p->fv = fv;
     p->fa = fa;
     p->volume = 1.0f;
+    p->path = strdup(path);
     pthread_mutex_init(&p->amu, NULL);
     return p;
 }
@@ -177,6 +189,7 @@ int kl_bsplayer_info(kl_bsplayer *p, int *w, int *h, const char **mime,
 
 void kl_bsplayer_close(kl_bsplayer *p) {
     if (!p) return;
+    if (p->tthr_live) pthread_join(p->tthr, NULL);   // a track list being read
     // Park the audio thread first: it owns sink.close and must not touch
     // the demuxer past this point.
     if (p->arun) {
@@ -190,6 +203,8 @@ void kl_bsplayer_close(kl_bsplayer *p) {
     kl_ffaud_close(p->fa);
     kl_ffvid_close(p->fv);
     pthread_mutex_destroy(&p->amu);
+    free(p->path);
+    free(p->tracks);
     free(p);
 }
 
@@ -308,8 +323,31 @@ static void *bs_audio_thread(void *arg) {
         pthread_mutex_lock(&p->amu);
         int run = p->arun, playing = p->playing, armed = p->realign_armed;
         float vol = p->volume;
+        int reformat = p->sink_reformat;
+        int nrate = 0, nch = 0;
+        if (reformat) {
+            p->sink_reformat = 0;
+            bs_a_info(p, &nrate, &nch);
+        }
         pthread_mutex_unlock(&p->amu);
         if (!run) break;
+        // Another sound track (kl_bsplayer_select_audio): a sink opened for
+        // 44.1 kHz mono would play a 48 kHz stereo track at the wrong speed.
+        if (nrate <= 0) nrate = 44100;
+        if (nch <= 0 || nch > 2) nch = 2;
+        if (reformat && (nrate != rate || nch != ch)) {
+            if (sink.close) sink.close(sctx);
+            rate = nrate;
+            ch = nch;
+            int orc = sink.open(sctx, (unsigned)rate, (unsigned)ch);
+            pthread_mutex_lock(&p->amu);
+            p->sink_open = orc == 0;
+            pthread_mutex_unlock(&p->amu);
+            fprintf(stderr, "  [bs] sound track switch: sink reopened at %d Hz, %d ch%s\n",
+                    rate, ch, orc == 0 ? "" : " (refused)");
+            if (orc != 0) break;
+            if (sink.play) sink.play(sctx);
+        }
         if (!playing) {
             usleep(10000);
             continue;
@@ -581,4 +619,143 @@ int kl_bsplayer_decode_first(kl_bsplayer *p, unsigned char **bgra, int *w,
     bs_frame_unlock(p);
     bs_play(p, 0);
     return rc;
+}
+
+// ---- the Audio Tracks menu ----
+//
+// FFmpeg lists the streams: it sees every one, also the DTS track
+// AVFoundation hides in an MP4. Picking one moves the sound to FFmpeg (if it
+// was not there already) reading that stream, put where the picture is.
+
+int kl_bsplayer_select_audio(kl_bsplayer *p, int nth);
+
+// AVFoundation plays the first sound track it can see; the file may flag
+// another as its default (one AVFoundation cannot see: DTS). FFmpeg's pick
+// is that default, so when its track ID is not AVFoundation's, switch.
+static void bs_follow_file_default(kl_bsplayer *p) {
+    if (!p->dm) return;
+    pthread_mutex_lock(&p->amu);
+    int fa = p->fa != NULL;
+    int avf_id = kl_avdemux_audio_track_id(p->dm);
+    int want = -1, want_id = 0, k = 0;
+    for (const char *l = p->tracks; l && *l; k++) {
+        const char *e = strchr(l, '\n');
+        // fields: lang, title, codec, channels, default, current, id
+        int col = 0, cur = 0, id = 0;
+        for (const char *q = l; q && q < (e ? e : l + strlen(l)); col++) {
+            if (col == 5) cur = atoi(q);
+            if (col == 6) id = atoi(q);
+            q = strchr(q, '\t');
+            if (q) q++;
+        }
+        if (cur) { want = k; want_id = id; }
+        l = e ? e + 1 : NULL;
+    }
+    pthread_mutex_unlock(&p->amu);
+    if (fa || want < 0 || !avf_id || want_id == avf_id) return;
+    fprintf(stderr, "  [bs] %s: the file's default sound is track %d (id %d), "
+                    "AVFoundation plays id %d: switching\n", p->path, want, want_id, avf_id);
+    kl_bsplayer_select_audio(p, want);
+}
+
+int kl_bsplayer_audio_tracks(kl_bsplayer *p, char *buf, size_t cap) {
+    if (!p) return 0;
+    pthread_mutex_lock(&p->amu);
+    int done = p->tracks_done;
+    pthread_mutex_unlock(&p->amu);
+    if (!done) {
+        char *list = malloc(8192);
+        int n = -1;
+        if (list) {
+            list[0] = 0;
+            pthread_mutex_lock(&p->amu);
+            if (p->fa) n = kl_ffaud_tracks(p->fa, list, 8192);
+            pthread_mutex_unlock(&p->amu);
+            if (n < 0 && !p->fa) {
+                // The sound is AVFoundation's: FFmpeg opens the file once
+                // more, outside the pump's lock, only to read its streams.
+                kl_ffaud *t = kl_ffaud_open(p->path);
+                if (t) n = kl_ffaud_tracks(t, list, 8192);
+                kl_ffaud_close(t);
+            }
+        }
+        pthread_mutex_lock(&p->amu);
+        if (!p->tracks_done) {
+            p->tracks_done = 1;
+            p->ntracks = n > 0 ? n : 0;
+            p->tracks = n > 0 ? list : NULL;
+            if (n <= 0) free(list);
+        } else {
+            free(list);
+        }
+        pthread_mutex_unlock(&p->amu);
+        fprintf(stderr, "  [bs] %s: %d sound track(s)\n", p->path, n > 0 ? n : 0);
+        bs_follow_file_default(p);
+    }
+    pthread_mutex_lock(&p->amu);
+    int n = p->ntracks;
+    if (buf && cap) {
+        buf[0] = 0;
+        if (p->tracks) snprintf(buf, cap, "%s", p->tracks);
+    }
+    pthread_mutex_unlock(&p->amu);
+    return n;
+}
+
+int kl_bsplayer_select_audio(kl_bsplayer *p, int nth) {
+    if (!p || nth < 0) return -1;
+    long long pic_us = bs_pos_ms(p) * 1000;    // outside amu, as the pump does
+    pthread_mutex_lock(&p->amu);
+    kl_ffaud *fa = p->fa;
+    int rc = -1;
+    if (fa && kl_ffaud_select(fa, nth) == 0) {
+        rc = 0;
+        bs_a_seek_us(p, pic_us);
+        p->sink_reformat = 1;
+        p->realign_armed = 0;
+    }
+    pthread_mutex_unlock(&p->amu);
+    if (!fa) {
+        kl_ffaud *nfa = kl_ffaud_open(p->path);
+        if (nfa && kl_ffaud_select(nfa, nth) == 0) {
+            kl_ffaud_seek_us(nfa, bs_pos_ms(p) * 1000);
+            pthread_mutex_lock(&p->amu);
+            if (!p->fa) {
+                p->fa = nfa;        // bs_a_* take FFmpeg's sound from now on
+                nfa = NULL;
+                rc = 0;
+                p->sink_reformat = 1;
+                p->realign_armed = 0;
+            }
+            pthread_mutex_unlock(&p->amu);
+        }
+        kl_ffaud_close(nfa);
+    }
+    pthread_mutex_lock(&p->amu);
+    kl_bsplayer_audio_sink sink = p->sink;
+    void *sctx = p->sctx;
+    int open = p->sink_open;
+    pthread_mutex_unlock(&p->amu);
+    if (rc == 0 && sink.flush && open) sink.flush(sctx);
+    fprintf(stderr, "  [bs] %s: sound track %d %s\n", p->path, nth,
+            rc == 0 ? "selected" : "refused");
+    return rc;
+}
+
+static void *bs_tracks_thread(void *arg) {
+    kl_bsplayer_audio_tracks(arg, NULL, 0);
+    return NULL;
+}
+
+void kl_bsplayer_audio_tracks_prefetch(kl_bsplayer *p) {
+    if (!p || p->tthr_live) return;
+    if (pthread_create(&p->tthr, NULL, bs_tracks_thread, p) == 0) p->tthr_live = 1;
+}
+
+int kl_bsplayer_audio_tracks_peek(kl_bsplayer *p, char *buf, size_t cap) {
+    if (!p) return -1;
+    pthread_mutex_lock(&p->amu);
+    int done = p->tracks_done;
+    pthread_mutex_unlock(&p->amu);
+    return done ? kl_bsplayer_audio_tracks(p, buf, cap) : -1;
 }

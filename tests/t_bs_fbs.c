@@ -48,6 +48,61 @@ static int32_t fbs_get(const unsigned char *b, size_t n, int slot, int *found) {
     return v;
 }
 
+
+// TrackInfoList by the spec: root -> table -> field, vector of tables, strings.
+static uint32_t rd32(const unsigned char *b, size_t at) {
+    uint32_t v; memcpy(&v, b + at, 4); return v;
+}
+static uint16_t rd16(const unsigned char *b, size_t at) {
+    uint16_t v; memcpy(&v, b + at, 2); return v;
+}
+// Position of a field of the table at t, or 0 when absent.
+static size_t fb_field(const unsigned char *b, size_t t, int slot) {
+    size_t vt = t - (int32_t)rd32(b, t);
+    uint16_t vsize = rd16(b, vt);
+    if (4 + 2 * (unsigned)slot >= vsize) return 0;
+    uint16_t o = rd16(b, vt + 4 + 2 * (size_t)slot);
+    return o ? t + o : 0;
+}
+static const char *fb_string(const unsigned char *b, size_t field, char *tmp, size_t cap) {
+    size_t s = field + rd32(b, field);
+    uint32_t n = rd32(b, s);
+    snprintf(tmp, cap, "%.*s", (int)n, (const char *)b + s + 4);
+    return tmp;
+}
+
+static void tracks_case(void) {
+    int ids[2] = {0, 1};
+    const char *langs[2] = {"de", "en"};
+    const char *labels[2] = {"German (dts 5.1)", "English, AC-3, 5.1"};
+    unsigned char *b = NULL;
+    size_t n = 0;
+    ok(kl_bstracks_encode(2, ids, langs, labels, &b, &n) == 0 && b, "track list encodes");
+    if (!b) return;
+    ok(n % 4 == 0, "track list is 4-aligned");
+    size_t t = rd32(b, 0);
+    size_t f = fb_field(b, t, 0);
+    ok(f && rd32(b, f) == 2, "count = 2");
+    f = fb_field(b, t, 2);
+    size_t vec = f ? f + rd32(b, f) : 0;
+    ok(vec && rd32(b, vec) == 2, "tracks vector has 2");
+    char tmp[64];
+    for (int i = 0; vec && i < 2; i++) {
+        size_t slot = vec + 4 + 4 * (size_t)i;
+        size_t tt = slot + rd32(b, slot);
+        size_t fid = fb_field(b, tt, 0), flab = fb_field(b, tt, 4), flang = fb_field(b, tt, 5);
+        char what[64];
+        snprintf(what, sizeof what, "track %d: id, label, language", i);
+        ok(fid && (int)rd32(b, fid) == ids[i] && flab && flang &&
+           !strcmp(fb_string(b, flab, tmp, sizeof tmp), labels[i]) &&
+           !strcmp(fb_string(b, flang, tmp, sizeof tmp), langs[i]), what);
+    }
+    free(b);
+    ok(kl_bstracks_encode(0, NULL, NULL, NULL, &b, &n) == 0 && b &&
+       rd32(b, fb_field(b, rd32(b, 0), 0)) == 0, "empty list encodes, count 0");
+    free(b);
+}
+
 int main(void) {
     printf("=== bigscreen mediainfo ===\n");
 
@@ -211,6 +266,7 @@ int main(void) {
         }
     }
 
+    tracks_case();
     printf("%s bigscreen mediainfo\n", g_fail ? "FAIL" : "PASS");
     return g_fail;
 }
