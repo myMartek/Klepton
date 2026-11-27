@@ -64,6 +64,8 @@
 #include "kl_jni_publicdir.h"
 #include "../media/kl_audio.h"
 #include "../media/kl_bsfbs.h"
+#include "../media/kl_web.h"
+#include "kl_glfb.h"
 
 #define BIGSCREEN_CALLBACKS "com/bigscreenvr/bigmediaplayer/BigMediaPlayerCallbacks"
 #define BIGSCREEN_REGISTER  "(Ljava/lang/String;Ljava/lang/String;)V"
@@ -661,6 +663,8 @@ static klj_val media_is_frame_available(void *env, void *self, const klj_val *a,
     }
     return (klj_val){.j = (uint64_t)(avail != 0)};
 }
+static void bs_vuplex_pump(void *env);   // the browser probe, below
+
 static klj_val update_media_players(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
     // The per-frame pump: advance events and latch the newest decoded frame
@@ -715,6 +719,7 @@ static klj_val update_media_players(void *env, void *self, const klj_val *a, int
         }
     }
     bsinfo_pump(env);
+    if (klj_bigscreen_web_probe()) bs_vuplex_pump(env);
     return (klj_val){0};
 }
 
@@ -943,14 +948,32 @@ static klj_val set_webview_context(void *env, void *self, const klj_val *a, int 
     KLJ_LOG_ONCE("BigWebView.SetContext — context received (no browser is embedded on this host)");
     return (klj_val){0};
 }
+// The browser's input goes through this wrapper, not through Vuplex's own
+// pointer calls: each panel's client (CreateBigWebClient) is tied to a web
+// view by SetupClient(client, view.getNativeWebView(), w, h), and the
+// pointer and scroll calls name the client. Below, in the browser section.
+static void bsweb_client_setup(int client, void *native_view, int w, int h);
+static void bsweb_client_input(int client, int kind, int x, int y, int button,
+                               int dx, int dy, int target);
+enum { BSW_MOVE, BSW_DOWN, BSW_DRAG, BSW_UP, BSW_SCROLL, BSW_CANCEL };
+
 static klj_val create_big_web_client(void *env, void *self, const klj_val *a, int n) {
     (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigWebView.CreateBigWebClient — web client handle 0 handed out (nothing renders on this host)");
-    return (klj_val){.j = 0};
+    // One handle per client, as BigWebClient.GetId counts them: the three
+    // panels a room makes must not share one.
+    static int next = 1;
+    int id = __atomic_fetch_add(&next, 1, __ATOMIC_RELAXED);
+    KLJ_LOG("BigWebView.CreateBigWebClient — web client %d", id);
+    return (klj_val){.j = (uint64_t)id};
 }
 static klj_val setup_big_web_client(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigWebView.SetupClient — client accepted (no browser is embedded on this host)");
+    (void)env; (void)self;
+    KLJ_LOG("BigWebView.SetupClient(client %d, %s, %dx%d)",
+            n > 0 ? (int)(int32_t)a[0].j : -1,
+            n > 1 && a[1].l ? (klj_class_name(a[1].l) ? klj_class_name(a[1].l) : "object") : "null",
+            n > 2 ? (int)(int32_t)a[2].j : 0, n > 3 ? (int)(int32_t)a[3].j : 0);
+    if (n >= 4) bsweb_client_setup((int)(int32_t)a[0].j, a[1].l,
+                                   (int)(int32_t)a[2].j, (int)(int32_t)a[3].j);
     return (klj_val){0};
 }
 
@@ -1034,34 +1057,39 @@ static klj_val webview_is_fullscreen(void *env, void *self, const klj_val *a, in
     KLJ_LOG_ONCE("BigWebView.IsFullScreen — false (nothing renders on this host, so nothing is ever fullscreen)");
     return (klj_val){.j = 0};
 }
+// Argument order from the dex: PointerMove(client, x, y, target),
+// PointerDown/Up(client, x, y, button, ?, target), PointerDrag(client, x, y,
+// button, target), Scroll(client, dx, dy, x, y, target), CancelInput(client,
+// button, target). x/y are panel pixels; target picks the panel's web view
+// or its fullscreen view (the latter does not exist here).
 static klj_val webview_pointer_move(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigWebView.PointerMove — pointer accepted (no panel is drawn on this host)");
+    (void)env; (void)self;
+    bsweb_client_input((n > 0 ? (int)(int32_t)a[0].j : 0), BSW_MOVE, (n > 1 ? (int)(int32_t)a[1].j : 0), (n > 2 ? (int)(int32_t)a[2].j : 0), 0, 0, 0, (n > 3 ? (int)(int32_t)a[3].j : 0));
     return (klj_val){0};
 }
 static klj_val webview_pointer_down(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigWebView.PointerDown — pointer accepted (no panel is drawn on this host)");
+    (void)env; (void)self;
+    bsweb_client_input((n > 0 ? (int)(int32_t)a[0].j : 0), BSW_DOWN, (n > 1 ? (int)(int32_t)a[1].j : 0), (n > 2 ? (int)(int32_t)a[2].j : 0), (n > 3 ? (int)(int32_t)a[3].j : 0), (n > 4 ? (int)(int32_t)a[4].j : 0), 0, (n > 5 ? (int)(int32_t)a[5].j : 0));
     return (klj_val){0};
 }
 static klj_val webview_pointer_drag(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigWebView.PointerDrag — pointer accepted (no panel is drawn on this host)");
+    (void)env; (void)self;
+    bsweb_client_input((n > 0 ? (int)(int32_t)a[0].j : 0), BSW_DRAG, (n > 1 ? (int)(int32_t)a[1].j : 0), (n > 2 ? (int)(int32_t)a[2].j : 0), (n > 3 ? (int)(int32_t)a[3].j : 0), 0, 0, (n > 4 ? (int)(int32_t)a[4].j : 0));
     return (klj_val){0};
 }
 static klj_val webview_pointer_up(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigWebView.PointerUp — pointer accepted (no panel is drawn on this host)");
+    (void)env; (void)self;
+    bsweb_client_input((n > 0 ? (int)(int32_t)a[0].j : 0), BSW_UP, (n > 1 ? (int)(int32_t)a[1].j : 0), (n > 2 ? (int)(int32_t)a[2].j : 0), (n > 3 ? (int)(int32_t)a[3].j : 0), (n > 4 ? (int)(int32_t)a[4].j : 0), 0, (n > 5 ? (int)(int32_t)a[5].j : 0));
     return (klj_val){0};
 }
 static klj_val webview_scroll(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigWebView.Scroll — scroll accepted (no panel is drawn on this host)");
+    (void)env; (void)self;
+    bsweb_client_input((n > 0 ? (int)(int32_t)a[0].j : 0), BSW_SCROLL, (n > 3 ? (int)(int32_t)a[3].j : 0), (n > 4 ? (int)(int32_t)a[4].j : 0), 0, (n > 1 ? (int)(int32_t)a[1].j : 0), (n > 2 ? (int)(int32_t)a[2].j : 0), (n > 5 ? (int)(int32_t)a[5].j : 0));
     return (klj_val){0};
 }
 static klj_val webview_cancel_input(void *env, void *self, const klj_val *a, int n) {
-    (void)env; (void)self; (void)a; (void)n;
-    KLJ_LOG_ONCE("BigWebView.CancelInput — cancellation accepted (no panel is drawn on this host)");
+    (void)env; (void)self;
+    bsweb_client_input((n > 0 ? (int)(int32_t)a[0].j : 0), BSW_CANCEL, 0, 0, (n > 1 ? (int)(int32_t)a[1].j : 0), 0, 0, (n > 2 ? (int)(int32_t)a[2].j : 0));
     return (klj_val){0};
 }
 static klj_val webview_exit_fullscreen(void *env, void *self, const klj_val *a, int n) {
@@ -1258,6 +1286,628 @@ static klj_val media_deselect_all_text_tracks(void *env, void *self, const klj_v
     return (klj_val){0};
 }
 
+// ---- Browser: Vuplex 3D WebView on WKWebView (2026-11-27) ----
+//
+// Bigscreen's in-room browser (BigBrowser) is Vuplex 3D WebView on Android:
+// its C# drives com.vuplex.webview.WebView3D through JNI and samples each
+// view's picture from a GL texture its native plugin created. Here every
+// WebView3D is a WKWebView (kl_web.m): the C# calls below land on it, its
+// snapshots are uploaded into the view's texture from render(), and its page
+// events go back to C# the way Vuplex's Java sends them —
+// UnitySendMessage(<view id>, "Handle…", arg) — from the Update pump, which
+// has the guest's JNIEnv. What the game asks for that has no answer yet is
+// logged with its arguments (first 12 calls per method, then every 600th)
+// and answered harmlessly, as the probe before this did.
+//
+// The probe runs (2026-11-27) showed what Bigscreen uses: its own browser UI
+// (https://www.bigscreenvr.com/browser/next), its cloud browser (a page on
+// *.bigscreencloud.com that streams a remote browser, after setCookie with
+// the account's access token), YouTube directly, and the APK's own pages
+// (jar:file:…apk!/assets/web/youtube_busy.html). KL_BS_WEB=0 puts back the
+// old answer: no web view available.
+int klj_bigscreen_web_probe(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *t = kl_driver_target_name();
+        on = t && !strcmp(t, "x2497738113633933") && kl_env_on("KL_BS_WEB", 1) &&
+             kl_env_on("KL_BS_WEB_PROBE", 1);
+    }
+    return on;
+}
+
+// One argument as text, by its type in the signature.
+static const char *probe_arg(const char **sigp, klj_val v, char *buf, size_t cap) {
+    const char *t = *sigp;
+    switch (*t) {
+    case 'Z': snprintf(buf, cap, "%s", (v.j & 0xff) ? "true" : "false"); (*sigp)++; break;
+    case 'B': case 'C': case 'S': case 'I':
+        snprintf(buf, cap, "%d", (int)(int32_t)v.j); (*sigp)++; break;
+    case 'J': snprintf(buf, cap, "%lld", (long long)v.j); (*sigp)++; break;
+    case 'F': case 'D': snprintf(buf, cap, "%g", v.d); (*sigp)++; break;
+    case '[': {
+        const char *e = t;
+        while (*e == '[') e++;
+        if (*e == 'L') { while (*e && *e != ';') e++; }
+        if (*e) e++;
+        snprintf(buf, cap, "%s[%.*s]", v.l ? "" : "null", (int)(e - t), t);
+        *sigp = e;
+        break;
+    }
+    case 'L': {
+        const char *e = strchr(t, ';');
+        size_t len = e ? (size_t)(e - t + 1) : strlen(t);
+        if (!v.l) snprintf(buf, cap, "null");
+        else if (len == 18 && !strncmp(t, "Ljava/lang/String;", 18)) {
+            const char *str = klj_str(v.l);
+            // The cookie carries the account's access token: its value
+            // never reaches the log.
+            if (str && strstr(str, "\"Value\""))
+                snprintf(buf, cap, "\"%.60s…\" (%zu chars)", str, strlen(str));
+            else
+                snprintf(buf, cap, "\"%.300s\"", str ? str : "");
+        } else {
+            const char *cn = klj_class_name(v.l);
+            snprintf(buf, cap, "<%s>", cn ? cn : "object");
+        }
+        *sigp = t + len;
+        break;
+    }
+    default: snprintf(buf, cap, "?"); (*sigp)++; break;
+    }
+    return buf;
+}
+
+static void probe_log(void *self, const char *cls, const char *name, const char *sig,
+                      const klj_val *a, int n, const char *note) {
+    enum { MAXM = 256 };
+    static char *seen[MAXM];
+    static unsigned long count[MAXM];
+    static int nseen;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    char key[256];
+    snprintf(key, sizeof key, "%s.%s%s", cls, name, sig);
+    pthread_mutex_lock(&mu);
+    int i = 0;
+    for (; i < nseen; i++) if (!strcmp(seen[i], key)) break;
+    if (i == nseen && nseen < MAXM) seen[nseen++] = strdup(key);
+    unsigned long c = i < MAXM ? ++count[i] : 0;
+    pthread_mutex_unlock(&mu);
+    if (c > 12 && c % 600 != 0) return;
+    char line[2048];
+    size_t len = 0;
+    const char *p = strchr(sig, '(');
+    p = p ? p + 1 : sig;
+    for (int k = 0; k < n && *p && *p != ')'; k++) {
+        char arg[400];
+        probe_arg(&p, a[k], arg, sizeof arg);
+        int w = snprintf(line + len, sizeof line - len, "%s%s", k ? ", " : "", arg);
+        if (w < 0 || (size_t)w >= sizeof line - len) break;
+        len += (size_t)w;
+    }
+    (void)self;
+    KLJ_LOG("[web] #%lu %s.%s%s (%s)%s%s", c, strrchr(cls, '/') ? strrchr(cls, '/') + 1 : cls,
+            name, sig, len ? line : "", note ? " — " : "", note ? note : "");
+}
+
+// The Vuplex page bridge: a script Vuplex's Java injects after every page
+// load (window.vuplex, focus/keyboard managers, title and URL messages).
+// It is Vuplex's code and ships inside the game's classes.dex as one string
+// constant, so it is read from there rather than carried here.
+static char *g_vx_bundle;
+static int g_vx_bundle_tried;
+
+static const char *vx_bundle(void) {
+    if (g_vx_bundle_tried) return g_vx_bundle;
+    g_vx_bundle_tried = 1;
+    static const char head[] = "if(typeof Object.assign!=\"function\"";
+    for (int k = 1; k <= 9 && !g_vx_bundle; k++) {
+        char name[32];
+        if (k == 1) snprintf(name, sizeof name, "classes.dex");
+        else snprintf(name, sizeof name, "classes%d.dex", k);
+        size_t len = 0;
+        uint8_t *dex = klj_apk_entry(name, &len);
+        if (!dex) { if (k > 1) break; continue; }
+        for (size_t i = 0; i + sizeof head < len; i++) {
+            if (dex[i] != 'i' || memcmp(dex + i, head, sizeof head - 1)) continue;
+            size_t e = i;
+            while (e < len && dex[e]) e++;
+            if (e - i > 1000 && memmem(dex + i, e - i, "_vuplexSystem", 13)) {
+                g_vx_bundle = malloc(e - i + 1);
+                if (g_vx_bundle) { memcpy(g_vx_bundle, dex + i, e - i); g_vx_bundle[e - i] = 0; }
+                KLJ_LOG("[web] Vuplex page bridge read from %s (%zu bytes)", name, e - i);
+                break;
+            }
+        }
+        free(dex);
+    }
+    if (!g_vx_bundle) KLJ_LOG("[web] Vuplex page bridge not found in the APK — pages get no window.vuplex");
+    return g_vx_bundle;
+}
+
+static void *vx_asset(const char *name, size_t *len) { return klj_apk_entry(name, len); }
+
+typedef struct bs_vx {
+    struct bs_vx *next;
+    char id[96];
+    kl_web *web;
+    int tex, w, h;
+    int focus_events;            // setFocusedInputFieldEventsEnabled
+    int init_sent;
+    int px, py;                  // last pointer, for scroll(II)
+    int client;                  // BigWebView client tied to this view (SetupClient)
+    int down;                    // a button is held (from BigWebView input)
+    int media;                   // the page plays video/audio (kl_audio_web_window held)
+    char last_url[1024];
+    // render thread
+    uint64_t seq;
+    uint8_t *buf;
+    size_t cap;
+    int tw, th;                  // size the texture was allocated at
+    unsigned long uploads, renders, no_ctx, no_frame;
+} bs_vx;
+
+static bs_vx *g_vx;
+// Recursive: a callback into the guest from the pump may come straight back
+// with a WebView3D call.
+static pthread_mutex_t g_vx_mu = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
+
+static bs_vx *vx_of(void *self) {
+    klj_object *o = self ? klj_as_object(self) : NULL;
+    bs_vx *v = o ? o->data : NULL;
+    if (!v) return NULL;
+    pthread_mutex_lock(&g_vx_mu);
+    bs_vx *it = g_vx;
+    while (it && it != v) it = it->next;
+    pthread_mutex_unlock(&g_vx_mu);
+    return it;
+}
+
+static bs_vx *vx_valid(bs_vx *p) {
+    if (!p) return NULL;
+    pthread_mutex_lock(&g_vx_mu);
+    bs_vx *it = g_vx;
+    while (it && it != p) it = it->next;
+    pthread_mutex_unlock(&g_vx_mu);
+    return it;
+}
+
+static void bsweb_client_setup(int client, void *native_view, int w, int h) {
+    klj_object *o = native_view ? klj_as_object(native_view) : NULL;
+    bs_vx *v = vx_valid(o ? o->data : NULL);
+    if (!v) {
+        KLJ_LOG("[web] SetupClient(client %d): the native view is not one of ours — input for it is dropped", client);
+        return;
+    }
+    pthread_mutex_lock(&g_vx_mu);
+    for (bs_vx *it = g_vx; it; it = it->next) if (it->client == client) it->client = 0;
+    v->client = client;
+    pthread_mutex_unlock(&g_vx_mu);
+    KLJ_LOG("[web] client %d -> %s (%dx%d panel, view %dx%d)", client, v->id, w, h, v->w, v->h);
+}
+
+static void bsweb_client_input(int client, int kind, int x, int y, int button,
+                               int dx, int dy, int target) {
+    pthread_mutex_lock(&g_vx_mu);
+    bs_vx *v = g_vx;
+    while (v && v->client != client) v = v->next;
+    kl_web *web = v ? v->web : NULL;
+    if (v && kind != BSW_SCROLL && kind != BSW_CANCEL) { v->px = x; v->py = y; }
+    int was_down = v ? v->down : 0;
+    if (v && kind == BSW_DOWN) v->down = 1;
+    if (v && (kind == BSW_UP || kind == BSW_CANCEL)) v->down = 0;
+    pthread_mutex_unlock(&g_vx_mu);
+    static unsigned long logged[6];
+    if (kind >= 0 && kind < 6 && (++logged[kind] <= 6 || logged[kind] % 500 == 0))
+        KLJ_LOG("[web] input %s client %d (%s): x %d y %d button %d d %d,%d target %d #%lu",
+                (const char *[]){"move", "down", "drag", "up", "scroll", "cancel"}[kind], client,
+                v ? v->id : "no view", x, y, button, dx, dy, target, logged[kind]);
+    if (!web) return;
+    // Android's buttons as MotionEvent states: 1 primary, 2 secondary,
+    // 4 tertiary; anything else is the primary.
+    int b = button == 2 ? 2 : button == 4 ? 1 : 0;
+    switch (kind) {
+    case BSW_MOVE: case BSW_DRAG:
+        kl_web_pointer(web, KL_WEB_PTR_MOVE, x, y, b);
+        break;
+    case BSW_DOWN:
+        kl_web_pointer(web, KL_WEB_PTR_DOWN, x, y, b);
+        break;
+    case BSW_UP:
+        kl_web_pointer(web, KL_WEB_PTR_UP, x, y, b);
+        break;
+    case BSW_CANCEL:
+        if (was_down) kl_web_pointer(web, KL_WEB_PTR_UP, v->px, v->py, b);
+        break;
+    case BSW_SCROLL: {
+        // Android scroll axes: notches, positive is up/left. Small values
+        // are notches, larger ones taken as pixels already.
+        int sx = (dx > -16 && dx < 16) ? -dx * 60 : -dx;
+        int sy = (dy > -16 && dy < 16) ? -dy * 60 : -dy;
+        kl_web_scroll(web, sx, sy, x, y);
+        break;
+    }
+    }
+}
+
+static void vx_page_script(bs_vx *v) {
+    const char *b = vx_bundle();
+    if (!b || !v->web) return;
+    size_t n = strlen(b) + 512;
+    char *js = malloc(n);
+    if (!js) return;
+    snprintf(js, n, "%s;window.__initVuplex({ defaultBackgroundEnabled: true, "
+             "overrideViewportMetaTag: false, enableFocusedInputFieldEvents: %s, "
+             "enableInputTypeWorkaround: false, enableSelectElementManager: false, "
+             "removeAnchorTargetAttributes: false });",
+             b, v->focus_events ? "true" : "false");
+    kl_web_set_page_script(v->web, js);
+    free(js);
+}
+
+// JSON string body (no quotes) of s into out.
+static void json_esc(const char *s, char *out, size_t cap) {
+    size_t o = 0;
+    for (; s && *s && o + 7 < cap; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { out[o++] = '\\'; out[o++] = (char)c; }
+        else if (c < 0x20) o += (size_t)snprintf(out + o, cap - o, "\\u%04x", c);
+        else out[o++] = (char)c;
+    }
+    out[o] = 0;
+}
+
+static void vx_send(void *env, bs_vx *v, const char *method, const char *arg) {
+    bs_cb slot = { v->id, (char *)method };
+    bs_send(env, &slot, arg ? arg : "", method);
+}
+
+static void vx_url_changed(void *env, bs_vx *v, const char *url) {
+    if (!url || !strcmp(url, v->last_url)) return;
+    snprintf(v->last_url, sizeof v->last_url, "%s", url);
+    char esc[2400], msg[2600];
+    json_esc(url, esc, sizeof esc);
+    snprintf(msg, sizeof msg, "{\"urlAction\":{\"Type\":\"LOAD\",\"Url\":\"%s\"},"
+             "\"type\":\"vuplex.webview.urlChanged\"}", esc);
+    vx_send(env, v, "HandleMessageEmitted", msg);
+}
+
+static void bs_vuplex_pump(void *env) {
+    pthread_mutex_lock(&g_vx_mu);
+    for (bs_vx *v = g_vx; v; v = v->next) {
+        if (!v->init_sent) {
+            v->init_sent = 1;
+            KLJ_LOG("[web] %s ready -> HandleInitFinished", v->id);
+            vx_send(env, v, "HandleInitFinished", "");
+        }
+        if (!v->web) continue;
+        kl_web_ev k; char *arg; int id;
+        int budget = 64;
+        while (budget-- > 0 && kl_web_next_event(v->web, &k, &arg, &id)) {
+            switch (k) {
+            case KL_WEB_EV_LOAD_STARTED:
+                vx_url_changed(env, v, arg);
+                vx_send(env, v, "HandleLoadStarted", "");
+                break;
+            case KL_WEB_EV_LOAD_PROGRESS:
+                vx_send(env, v, "HandleLoadProgressUpdate", arg);
+                break;
+            case KL_WEB_EV_LOAD_FINISHED:
+                vx_url_changed(env, v, arg);
+                vx_send(env, v, "HandleLoadFinished", "");
+                break;
+            case KL_WEB_EV_LOAD_FAILED:
+                vx_send(env, v, "HandleLoadFailed", arg);
+                break;
+            case KL_WEB_EV_URL_CHANGED:
+                vx_url_changed(env, v, arg);
+                break;
+            case KL_WEB_EV_MESSAGE:
+                vx_send(env, v, "HandleMessageEmitted", arg);
+                break;
+            case KL_WEB_EV_MEDIA: {
+                // A playing video takes the audio session; while it does, the
+                // game's sound waits for the session's own end instead of
+                // taking it back after 1.5 s, which stopped the video after a
+                // second (2026-11-27) — the rule a web window already has.
+                int on = arg && arg[0] == '1';
+                if (on != v->media) { v->media = on; kl_audio_web_window(on); }
+                break;
+            }
+            case KL_WEB_EV_TITLE_CHANGED:
+            case KL_WEB_EV_JS_RESULT:
+                break;    // the page bridge reports the title itself
+            }
+            free(arg);
+        }
+    }
+    pthread_mutex_unlock(&g_vx_mu);
+}
+
+// render(): Vuplex's native plugin calls it on Unity's render thread every
+// frame for every view; the newest snapshot goes into the view's texture.
+// External (OES) textures are 2D ones on this host (klfb_detarget), so a
+// plain TexImage/TexSubImage fills it; the guest's bindings are put back.
+static void vx_upload(bs_vx *v) {
+    if (v->tex <= 0) return;
+    int w = 0, h = 0, got = 0;
+    // Where render() goes, every 900 calls per view: an upload, no GL
+    // context on the calling thread, or no newer snapshot.
+    if (++v->renders % 900 == 0)
+        KLJ_LOG("[web] %s: render #%lu — uploads %lu, no GL context %lu, no new frame %lu (luma %d)",
+                v->id, v->renders, v->uploads, v->no_ctx, v->no_frame, kl_web_frame_luma(v->web));
+    // A frame taken here without a context to upload it in would be lost:
+    // the next one only comes with the next snapshot.
+    if (!kl_egl_current_context()) { v->no_ctx++; return; }
+    if (!v->web) {
+        // KL_BS_WEB_FAKE=1: a test card instead of a page, once per view —
+        // for a run with no WebKit (the Mac host) to see where the browser's
+        // texture lands in the room.
+        if (!kl_env_on("KL_BS_WEB_FAKE", 0) || v->seq) return;
+        w = v->w; h = v->h;
+        v->cap = (size_t)w * h * 4;
+        v->buf = malloc(v->cap);
+        if (!v->buf) { v->cap = 0; return; }
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                uint8_t *p = v->buf + ((size_t)y * w + x) * 4;
+                p[0] = (uint8_t)(x * 255 / w); p[1] = (uint8_t)(y * 255 / h);
+                p[2] = ((x / 64 + y / 64) & 1) ? 255 : 40; p[3] = 255;
+            }
+        v->seq = 1;
+        got = 1;
+    } else {
+        // Also tells kl_web the view is being drawn, which keeps its snapshots on.
+        got = kl_web_frame(v->web, v->buf, v->cap, &w, &h, &v->seq);
+        if (!got && w > 0 && h > 0 && (size_t)w * h * 4 > v->cap) {
+            free(v->buf);
+            v->cap = (size_t)w * h * 4;
+            v->buf = malloc(v->cap);
+            if (!v->buf) { v->cap = 0; return; }
+            got = kl_web_frame(v->web, v->buf, v->cap, &w, &h, &v->seq);
+        }
+    }
+    if (!got) { v->no_frame++; return; }
+    static void (*gl_BindTexture)(uint32_t, uint32_t);
+    static void (*gl_TexImage2D)(uint32_t, int32_t, int32_t, int32_t, int32_t,
+                                 int32_t, uint32_t, uint32_t, const void *);
+    static void (*gl_TexSubImage2D)(uint32_t, int32_t, int32_t, int32_t, int32_t,
+                                    int32_t, uint32_t, uint32_t, const void *);
+    static void (*gl_GetIntegerv)(uint32_t, int32_t *);
+    static void (*gl_PixelStorei)(uint32_t, int32_t);
+    static void (*gl_BindBuffer)(uint32_t, uint32_t);
+    static void (*gl_TexParameteri)(uint32_t, uint32_t, int32_t);
+    static int resolved;
+    if (!resolved) {
+        resolved = 1;
+        gl_BindTexture   = kl_egl_sym("glBindTexture");
+        gl_TexImage2D    = kl_egl_sym("glTexImage2D");
+        gl_TexSubImage2D = kl_egl_sym("glTexSubImage2D");
+        gl_GetIntegerv   = kl_egl_sym("glGetIntegerv");
+        gl_PixelStorei   = kl_egl_sym("glPixelStorei");
+        gl_BindBuffer    = kl_egl_sym("glBindBuffer");
+        gl_TexParameteri = kl_egl_sym("glTexParameteri");
+    }
+    if (!gl_BindTexture || !gl_TexImage2D || !gl_TexSubImage2D || !gl_GetIntegerv) return;
+    if (kl_env_on("KL_BS_WEB_FLIP", 0)) {
+        size_t row = (size_t)w * 4;
+        uint8_t tmp[16384];
+        for (int y = 0; y < h / 2 && row <= sizeof tmp; y++) {
+            uint8_t *a = v->buf + (size_t)y * row, *b = v->buf + (size_t)(h - 1 - y) * row;
+            memcpy(tmp, a, row); memcpy(a, b, row); memcpy(b, tmp, row);
+        }
+    }
+    int32_t prev_tex = 0, prev_pbo = 0, prev_row = 0, prev_align = 4;
+    gl_GetIntegerv(0x8069 /* TEXTURE_BINDING_2D */, &prev_tex);
+    gl_GetIntegerv(0x88EF /* PIXEL_UNPACK_BUFFER_BINDING */, &prev_pbo);
+    gl_GetIntegerv(0x0CF2 /* UNPACK_ROW_LENGTH */, &prev_row);
+    gl_GetIntegerv(0x0CF5 /* UNPACK_ALIGNMENT */, &prev_align);
+    if (prev_pbo && gl_BindBuffer) gl_BindBuffer(0x88EC /* PIXEL_UNPACK_BUFFER */, 0);
+    if (gl_PixelStorei) { gl_PixelStorei(0x0CF2, 0); gl_PixelStorei(0x0CF5, 4); }
+    gl_BindTexture(0x0DE1 /* TEXTURE_2D */, (uint32_t)v->tex);
+    if (v->tw != w || v->th != h) {
+        gl_TexImage2D(0x0DE1, 0, 0x8058 /* RGBA8 */, w, h, 0, 0x1908 /* RGBA */,
+                      0x1401 /* UNSIGNED_BYTE */, v->buf);
+        if (gl_TexParameteri) {
+            gl_TexParameteri(0x0DE1, 0x2801 /* MIN_FILTER */, 0x2601 /* LINEAR */);
+            gl_TexParameteri(0x0DE1, 0x2800 /* MAG_FILTER */, 0x2601);
+            gl_TexParameteri(0x0DE1, 0x2802 /* WRAP_S */, 0x812F /* CLAMP_TO_EDGE */);
+            gl_TexParameteri(0x0DE1, 0x2803 /* WRAP_T */, 0x812F);
+        }
+        KLJ_LOG("[web] %s: texture %d sized %dx%d (luma %d)%s", v->id, v->tex, w, h,
+                kl_web_frame_luma(v->web), v->web ? "" : " — test card");
+        v->tw = w;
+        v->th = h;
+    } else {
+        gl_TexSubImage2D(0x0DE1, 0, 0, 0, w, h, 0x1908, 0x1401, v->buf);
+    }
+    gl_BindTexture(0x0DE1, (uint32_t)prev_tex);
+    if (gl_PixelStorei) { gl_PixelStorei(0x0CF2, prev_row); gl_PixelStorei(0x0CF5, prev_align); }
+    if (prev_pbo && gl_BindBuffer) gl_BindBuffer(0x88EC, (uint32_t)prev_pbo);
+    if (++v->uploads % 600 == 1)
+        KLJ_LOG("[web] %s: upload #%lu into texture %d (luma %d)", v->id, v->uploads, v->tex,
+                kl_web_frame_luma(v->web));
+}
+
+static int arg_i(const klj_val *a, int n, int k) { return k < n ? (int)(int32_t)a[k].j : 0; }
+static int arg_z(const klj_val *a, int n, int k) { return k < n ? (int)(a[k].j & 0xff) : 0; }
+static const char *arg_s(const klj_val *a, int n, int k) {
+    return k < n && a[k].l ? klj_str(a[k].l) : NULL;
+}
+
+klj_val klj_bigscreen_probe_call(void *self, const char *cls, const char *name,
+                                 const char *sig, const klj_val *a, int n) {
+    int is3d = !strcmp(cls, "com/vuplex/webview/WebView3D") || !strcmp(cls, "com/vuplex/webview/WebView");
+    // new WebView3D(String id, int texture, int w, int h, Z, Z, Z, BiConsumer, Object)
+    if (is3d && !strcmp(name, "<init>") && n >= 4 && a[0].l) {
+        bs_vx *v = calloc(1, sizeof *v);
+        if (v) {
+            const char *id = klj_str(a[0].l);
+            snprintf(v->id, sizeof v->id, "%s", id ? id : "");
+            v->tex = arg_i(a, n, 1);
+            v->w = arg_i(a, n, 2);
+            v->h = arg_i(a, n, 3);
+            kl_web_set_asset_reader(vx_asset);
+            char tag[40];
+            snprintf(tag, sizeof tag, "vx-%.8s", v->id[0] == 'W' && strlen(v->id) > 8 ? v->id + 8 : v->id);
+            v->web = kl_web_create(v->w, v->h, tag);
+            if (v->tex > 0) kl_glfb_watch_texture((uint32_t)v->tex, 1);
+            if (v->tex > 0) kl_bigscreen_web_texture((uint32_t)v->tex, 1);
+            vx_page_script(v);
+            pthread_mutex_lock(&g_vx_mu);
+            v->next = g_vx;
+            g_vx = v;
+            pthread_mutex_unlock(&g_vx_mu);
+            probe_log(self, cls, name, sig, a, n, v->web ? "web view made" : "NO web view");
+        }
+        return (klj_val){.l = klj_new_object_data(cls, v)};
+    }
+    if (is3d && !strcmp(name, "setCookie")) {
+        const char *js = arg_s(a, n, 0);
+        probe_log(self, cls, name, sig, a, n, "into the web views' cookie store");
+        if (js) kl_web_set_cookie_json(js);
+        return (klj_val){.j = 1};
+    }
+    if (is3d && !strcmp(name, "render")) {
+        // Render thread, against destroy on the game thread: under the lock.
+        pthread_mutex_lock(&g_vx_mu);
+        bs_vx *rv = vx_of(self);
+        if (rv) vx_upload(rv);
+        pthread_mutex_unlock(&g_vx_mu);
+        if (!rv) probe_log(self, cls, name, sig, a, n, "no view for this object");
+        return (klj_val){0};
+    }
+    bs_vx *v = is3d ? vx_of(self) : NULL;
+    if (v) {
+        const char *note = NULL;
+        int done = 1;
+        if (0) {
+        } else if (!strcmp(name, "loadUrl")) {
+            kl_web_load_url(v->web, arg_s(a, n, 0));
+        } else if (!strcmp(name, "loadHtml")) {
+            kl_web_load_html(v->web, arg_s(a, n, 0), arg_s(a, n, 1));
+        } else if (!strcmp(name, "setUserAgent")) {
+            // (Z): mobile or not; the system's own string serves both here.
+            kl_web_set_user_agent(v->web, sig[1] == 'Z' ? NULL : arg_s(a, n, 0));
+        } else if (!strcmp(name, "resume")) {
+            kl_web_set_active(v->web, 1);
+        } else if (!strcmp(name, "pause")) {
+            kl_web_set_active(v->web, 0);
+        } else if (!strcmp(name, "setFocused")) {
+            int on = arg_z(a, n, 0);
+            kl_web_set_focused(v->web, on);
+            kl_web_eval(v->web, on ? "window._vuplexInternal&&_vuplexInternal.focusManager.setFocused(true);"
+                                   : "window._vuplexInternal&&_vuplexInternal.focusManager.setFocused(false);", 0);
+        } else if (!strcmp(name, "setFocusedInputFieldEventsEnabled")) {
+            v->focus_events = arg_z(a, n, 0);
+            vx_page_script(v);
+        } else if (!strcmp(name, "click")) {
+            v->px = arg_i(a, n, 0); v->py = arg_i(a, n, 1);
+            kl_web_pointer(v->web, KL_WEB_PTR_MOVE, v->px, v->py, 0);
+            kl_web_pointer(v->web, KL_WEB_PTR_DOWN, v->px, v->py, 0);
+            kl_web_pointer(v->web, KL_WEB_PTR_UP, v->px, v->py, 0);
+        } else if (!strcmp(name, "movePointer")) {
+            v->px = arg_i(a, n, 0); v->py = arg_i(a, n, 1);
+            kl_web_pointer(v->web, KL_WEB_PTR_MOVE, v->px, v->py, 0);
+            return (klj_val){0};
+        } else if (!strcmp(name, "pointerDown")) {
+            v->px = arg_i(a, n, 0); v->py = arg_i(a, n, 1);
+            kl_web_pointer(v->web, KL_WEB_PTR_DOWN, v->px, v->py, arg_i(a, n, 2));
+        } else if (!strcmp(name, "pointerUp")) {
+            v->px = arg_i(a, n, 0); v->py = arg_i(a, n, 1);
+            kl_web_pointer(v->web, KL_WEB_PTR_UP, v->px, v->py, arg_i(a, n, 2));
+        } else if (!strcmp(name, "scroll")) {
+            if (n >= 4) kl_web_scroll(v->web, arg_i(a, n, 0), arg_i(a, n, 1), arg_i(a, n, 2), arg_i(a, n, 3));
+            else kl_web_scroll(v->web, arg_i(a, n, 0), arg_i(a, n, 1), v->px, v->py);
+        } else if (!strcmp(name, "sendKey")) {
+            const char *k = arg_s(a, n, 0);
+            if (k) kl_web_key(v->web, k);
+        } else if (!strcmp(name, "goBack")) {
+            kl_web_go_back(v->web);
+        } else if (!strcmp(name, "goForward")) {
+            kl_web_go_forward(v->web);
+        } else if (!strcmp(name, "reload")) {
+            kl_web_reload(v->web);
+        } else if (!strcmp(name, "stopLoad") || !strcmp(name, "stopLoading")) {
+            kl_web_stop(v->web);
+        } else if (!strcmp(name, "resize")) {
+            v->w = arg_i(a, n, 0); v->h = arg_i(a, n, 1);
+            kl_web_resize(v->web, v->w, v->h);
+        } else if (!strcmp(name, "executeJavaScript")) {
+            kl_web_eval(v->web, arg_s(a, n, 0), 0);
+            note = "run; its result is not handed back yet";
+        } else if (!strcmp(name, "destroy")) {
+            pthread_mutex_lock(&g_vx_mu);
+            for (bs_vx **pp = &g_vx; *pp; pp = &(*pp)->next)
+                if (*pp == v) { *pp = v->next; break; }
+            pthread_mutex_unlock(&g_vx_mu);
+            klj_object *o = klj_as_object(self);
+            if (o) o->data = NULL;
+            if (v->media) { v->media = 0; kl_audio_web_window(0); }
+            if (v->tex > 0) kl_glfb_watch_texture((uint32_t)v->tex, 0);
+            if (v->tex > 0) kl_bigscreen_web_texture((uint32_t)v->tex, 0);
+            kl_web_destroy(v->web);
+            probe_log(self, cls, name, sig, a, n, "web view gone");
+            free(v->buf);
+            free(v);
+            return (klj_val){0};
+        } else {
+            done = 0;
+        }
+        if (done) {
+            probe_log(self, cls, name, sig, a, n, note);
+            return (klj_val){0};
+        }
+    }
+    probe_log(self, cls, name, sig, a, n, "not handled");
+    // The answer: harmless and of the right kind.
+    if (!strcmp(name, "<init>")) return (klj_val){.l = kl_jni_new_object(cls)};
+    // BigBrowser hands this to BigWebView.SetupClient: an android.webkit.WebView
+    // (declared Object), so the web wrapper's own family sees its class.
+    // ...carrying the view, so SetupClient can tie its client to it.
+    if (!strcmp(name, "getNativeWebView"))
+        return (klj_val){.l = v ? klj_new_object_data("android/webkit/WebView", v)
+                                : kl_jni_new_object("android/webkit/WebView")};
+    const char *r = strchr(sig, ')');
+    r = r ? r + 1 : "V";
+    if (!strcmp(r, "Ljava/lang/String;")) {
+        if (v && !strcmp(name, "getUrl")) return (klj_val){.l = kl_jni_new_string(v->last_url)};
+        return (klj_val){.l = kl_jni_new_string("")};
+    }
+    if (*r == 'L') {
+        char rcls[256];
+        snprintf(rcls, sizeof rcls, "%.*s", (int)(strlen(r) - 2), r + 1);
+        return (klj_val){.l = kl_jni_new_object(rcls)};
+    }
+    return (klj_val){0};
+}
+
+// UnityPlayer.UnitySendMessage(gameObject, method, message): Unity's own Java
+// helper, which hands the three to the engine's nativeUnitySendMessage. Vuplex's
+// native plugin reports its new texture this way right after the
+// create-texture render event (probe 2, 2026-11-27); answered with nothing,
+// the browser's Init waited forever. Bigscreen only.
+static klj_val bs_unity_send_message(void *env, void *self, const klj_val *a, int n) {
+    (void)self;
+    const char *go = n > 0 && a[0].l ? klj_str(a[0].l) : "";
+    const char *fn = n > 1 && a[1].l ? klj_str(a[1].l) : "";
+    const char *msg = n > 2 && a[2].l ? klj_str(a[2].l) : "";
+    static unsigned long count;
+    if (++count <= 40 || count % 500 == 0)
+        KLJ_LOG("UnityPlayer.UnitySendMessage(\"%s\", \"%s\", \"%.300s\") #%lu", go ? go : "",
+                fn ? fn : "", msg ? msg : "", count);
+    bs_cb slot = { (char *)go, (char *)fn };
+    if (go && *go) bs_send(env, &slot, msg, "UnitySendMessage");
+    return (klj_val){0};
+}
+
+static klj_val probe_is_webview_available(void *env, void *self, const klj_val *a, int n) {
+    (void)env; (void)self; (void)a; (void)n;
+    int yes = klj_bigscreen_web_probe();
+    KLJ_LOG("[web] com/vuplex/webview/WebView3D.isWebViewAvailable() -> %s%s",
+            yes ? "true" : "false", yes ? " (web views are WKWebViews on this host)" : "");
+    return (klj_val){.j = (uint64_t)yes};
+}
+
 // The registrations in the order the dex declares them, then the media
 // manager's and web wrapper's calls beside them; the run takes whatever
 // subset it reaches.
@@ -1336,6 +1986,12 @@ static const klj_binding bindings[] = {
     {BIGSCREEN_WEBVIEW, "SetContext", "(Lcom/unity3d/player/UnityPlayerActivity;)V", set_webview_context},
     {BIGSCREEN_WEBVIEW, "CreateBigWebClient", "()I", create_big_web_client},
     {BIGSCREEN_WEBVIEW, "SetupClient", "(ILandroid/webkit/WebView;II)V", setup_big_web_client},
+    // ...and as BigBrowser calls it, with Vuplex's getNativeWebView() typed as
+    // the Object that method declares (browser probe, Mac run, 2026-11-27).
+    {BIGSCREEN_WEBVIEW, "SetupClient", "(ILjava/lang/Object;II)V", setup_big_web_client},
+    // Unity's reflection spells the class dotted, as with SetContext.
+    {BIGSCREEN_WEBVIEW, "SetupClient", "(ILandroid.webkit.WebView;II)V", setup_big_web_client},
+    {BIGSCREEN_WEBVIEW, "SetupClient", "(ILjava.lang.Object;II)V", setup_big_web_client},
     // The pump, the state question and the input the native library and the
     // game raise as soon as the client exists. Accepted like everything
     // else: nothing is drawn, so nothing is ever fullscreen and no event
@@ -1353,6 +2009,11 @@ static const klj_binding bindings[] = {
     // guest's own GL, handed out by name, and left empty.
     {BIGSCREEN_WEBVIEW, "SetupExternalTexture", "()V", webview_setup_external_texture},
     {BIGSCREEN_WEBVIEW, "GetSharedTextureHandle", "()I", webview_get_shared_texture},
+    // The browser probe's answer to Vuplex's availability question.
+    {"com/vuplex/webview/WebView3D", "isWebViewAvailable", "()Z", probe_is_webview_available},
+    // Unity's Java helper, which Vuplex's native plugin calls into.
+    {"com/unity3d/player/UnityPlayer", "UnitySendMessage",
+     "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", bs_unity_send_message},
     {NULL, NULL, NULL, NULL}
 };
 

@@ -21,7 +21,7 @@ CFLAGS += $(REPRO_FLAGS)
 LDLIBS  := -lz -framework AudioToolbox -framework CoreAudio \
            -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
            -framework CoreFoundation -framework AVFoundation -framework Foundation \
-           -framework Metal
+           -framework Metal -framework WebKit -framework AppKit -framework CoreGraphics -framework ImageIO
 # The host/ship split is a source-list boundary, not a runtime getenv.
 #
 # RUNTIME_SHIP is everything that goes into the visionOS app bundle. It is the
@@ -68,7 +68,7 @@ RUNTIME_SHIP := $(LX_SRC) runtime/guest/kl_linuxproc.c \
            $(RUNTIME_JNI) \
            runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c runtime/xr/kl_hands.c \
            runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_present.c \
-           runtime/xr/kl_ovrplat.c runtime/xr/kl_assetcfg.c runtime/xr/kl_room.c runtime/xr/kl_steamapi.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_vp8.c runtime/media/kl_webm.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_avpro.m runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_bsfbs.c \
+           runtime/xr/kl_ovrplat.c runtime/xr/kl_assetcfg.c runtime/xr/kl_room.c runtime/xr/kl_steamapi.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_vp8.c runtime/media/kl_webm.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_avpro.m runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_bsfbs.c runtime/media/kl_web.m \
            runtime/gfx/kl_vulkan.c runtime/gfx/kl_vk_eyefix.c runtime/gfx/kl_mtl_foveate.m runtime/gfx/kl_mtl_busy.m \
            runtime/guest/kl_nativeactivity.c runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_xashservers.c runtime/guest/kl_sdl2.c \
@@ -504,6 +504,17 @@ build/t_bigscreen_movies: tests/t_bigscreen_movies.c runtime/jni/kl_jni_publicdi
 
 bigscreen_movies: build/t_bigscreen_movies
 	./build/t_bigscreen_movies
+
+# kl_web against a real WKWebView, once with ARC (host builds) and once
+# without (the shipping runtime): page events, bridge message, snapshot
+# colour, click, keys, scroll, eval. Needs a Mac session (WebKit).
+build/t_web: tests/t_web.m runtime/media/kl_web.m runtime/media/kl_web.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -fobjc-arc -o $@ tests/t_web.m runtime/media/kl_web.m -framework WebKit -framework AppKit -framework Foundation -framework CoreGraphics -framework ImageIO
+	$(CC) $(CFLAGS) -fno-objc-arc -o $@-mrc tests/t_web.m runtime/media/kl_web.m -framework WebKit -framework AppKit -framework Foundation -framework CoreGraphics -framework ImageIO
+
+web: build/t_web
+	./build/t_web && ./build/t_web-mrc
 
 build/t_bs_demux: tests/t_bs_demux.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
@@ -1726,6 +1737,7 @@ build/xros/libklepton.dylib: build/xros/libklepton.a
 	   -dynamiclib -o $@ -Wl,-all_load $< -lz -lc++ -framework AudioToolbox \
 	   -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
 	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework Metal $(SC2_FRAMEWORKS) \
+	   -framework WebKit -framework UIKit -framework CoreGraphics -framework ImageIO \
 	   -install_name @rpath/libklepton.dylib
 
 build/xrsim/libklepton.dylib: build/xrsim/libklepton.a
@@ -1733,6 +1745,7 @@ build/xrsim/libklepton.dylib: build/xrsim/libklepton.a
 	   -dynamiclib -o $@ -Wl,-all_load $< -lz -lc++ -framework AudioToolbox \
 	   -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework IOSurface \
 	   -framework CoreFoundation -framework AVFoundation -framework Foundation -framework Metal $(SC2_FRAMEWORKS) \
+	   -framework WebKit -framework UIKit -framework CoreGraphics -framework ImageIO \
 	   -install_name @rpath/libklepton.dylib
 
 xros-device: build/xros/libklepton.dylib

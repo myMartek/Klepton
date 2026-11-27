@@ -1895,6 +1895,16 @@ static klj_val klj_call_common(void *env, void *self, void *mid, char want,
 
     if (klj_drop_sentry(w)) return zero;
 
+    // Bigscreen Beta's browser probe (KL_BS_WEB_PROBE): every call into Vuplex
+    // 3D WebView's Java side is logged with its arguments and answered
+    // harmlessly, so one run with the browser opened lists the whole surface
+    // a WKWebView-backed implementation has to serve. Bigscreen only.
+    if (strncmp(w->cls, "com/vuplex/", 11) == 0 && klj_bigscreen_web_probe()) {
+        klj_val argv[KLJ_MAX_ARGS];
+        int argc = va ? klj_decode_args(w->sig, va, argv) : klj_decode_args_a(w->sig, args, argv);
+        return klj_bigscreen_probe_call(self, w->cls, w->name, w->sig, argv, argc < 0 ? 0 : argc);
+    }
+
     KLJ_LOG("no host implementation for %s.%s%s", w->cls, w->name, w->sig);
     if (!g_permissive && klj_soft_unknown()) {
         KLJ_LOG("  ...answered with zero (KL_JNI_SOFT_UNKNOWN, the profile for untested games)");

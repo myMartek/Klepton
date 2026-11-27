@@ -26,6 +26,7 @@
 #include "kl_ndk.h"
 #include "kl_va.h"
 #include "kl_jni_int.h"
+#include "guest/kl_driver.h"
 
 // ---------------------------------------------------------------- JNIBridge
 //
@@ -270,6 +271,17 @@ static klj_val klj_Method_getDeclaringClass(void *env, void *self, const klj_val
         KLJ_LOG("proxy 0x%llx is disabled — not invoking %s.%s",
                 (unsigned long long)p->native_ptr, iface, name);
         return NULL;
+    }
+    // Bigscreen Beta's proxies come from ReflectionHelper.newProxyInstance(long,
+    // Class), whose long is an il2cpp GCHandle (0x3, 0xb, 0x13 ...), not a
+    // JNIBridge object: JNIBridge.invoke dereferenced 0x1b on the Runnable
+    // BigBrowser passes to runOnUiThread (browser probe, Mac run 2026-11-27).
+    // Such a proxy is Unity's to invoke, through nativeProxyInvoke. Bigscreen
+    // only for now; other titles keep the JNIBridge path they were seen with.
+    if (p->unity_rh && kl_jni_native("com/unity3d/player/ReflectionHelper", "nativeProxyInvoke", NULL)) {
+        const char *t = kl_driver_target_name();
+        if (t && !strcmp(t, "x2497738113633933"))
+            return klj_proxy_invoke_named_args(proxy, iface, name, sig, args);
     }
     // A static native is (JNIEnv*, jclass, args...). The frame pair is the
     // JVM's pop on native return — the method object, the args array, and

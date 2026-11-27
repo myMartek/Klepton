@@ -942,6 +942,9 @@ void *klb_dlopen(const char *path, int flags) {
 
 static void *kl_dl_interpose(const char *name, void *real);
 static void *kl_avpro_interpose(const char *name, void *real);
+static void *kl_vuplex_interpose(const char *name, void *real);
+int klj_bigscreen_web_probe(void);     // runtime/jni/kl_jni_bigscreen.c
+static int g_vx_load_served;           // Vuplex's UnityPluginLoad handed out once
 
 // android_dlopen_ext(path, flags, android_dlextinfo *). With no extension asked
 // for it is dlopen, and that is the only form served. The struct begins with a
@@ -1022,6 +1025,11 @@ static int kl_dl_refuse_crash_candidate(const char *name, void *v) {
     if (strcmp(name, "UnityPluginLoad") != 0) return 0;
     const char *t = kl_driver_target_name();
     if (!t || strcmp(t, "x2497738113633933") != 0) return 0;
+    // While probing, kl_vuplex_interpose serves the first lookup; every later
+    // one is refused as before. A found UnityPluginLoad makes Unity register
+    // the plugin again on the asking thread, and on a worker thread that is
+    // the room crash (libunity+0x53c088, probe 2 on device, 2026-11-27).
+    if (klj_bigscreen_web_probe() && !g_vx_load_served) return 0;
     size_t off = 0;
     const char *img = kl_addr_image(v, &off);
     if (img && strstr(img, "VuplexWebView")) {
@@ -1058,11 +1066,15 @@ void *klb_dlsym(void *handle, const char *name) {
         if (s) { kl_dlsym_log_hit(name, s); return s; }
         s = kl_guest_sym_global(name);
         if (!s) snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
-        else if (kl_dl_refuse_crash_candidate(name, s)) {
+        else {
+            void *w = kl_vuplex_interpose(name, s);
+            if (w) return w;
+        }
+        if (s && kl_dl_refuse_crash_candidate(name, s)) {
             snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
             return klb_dlsym_null(name);
         }
-        else kl_dlsym_log_hit(name, s);
+        else if (s) kl_dlsym_log_hit(name, s);
         return s;
     }
     if (handle == NULL || handle == (void *)-1) {    // RTLD_DEFAULT / RTLD_NEXT
@@ -1078,6 +1090,7 @@ void *klb_dlsym(void *handle, const char *name) {
             // exports up this way, and must get the same wrappers the handle
             // path hands out (kl_avpro_interpose). No other title does.
             if (kl_driver_deovr_avpro()) { void *w = kl_avpro_interpose(name, v); if (w) return w; }
+            { void *w = kl_vuplex_interpose(name, v); if (w) return w; }
             if (kl_dl_refuse_crash_candidate(name, v)) {
                 snprintf(g_dlerr, sizeof g_dlerr, "klepton: undefined symbol: %s", name);
                 return klb_dlsym_null(name);
@@ -1430,7 +1443,125 @@ static void *kl_dl_interpose(const char *name, void *real) {
                                             void *, void *))real;
         return (void *)kl_trace_iplHRTFCreate;
     }
+    { void *w = kl_vuplex_interpose(name, real); if (w) return w; }
     return kl_avpro_interpose(name, real);   // NULL unless DeoVR
+}
+
+// ---------------------------------------------------------------------------
+// Bigscreen's browser probe: Vuplex 3D WebView's native plugin
+// (libVuplexWebViewAndroid.so), 2026-11-27.
+//
+// Its UnityPluginLoad used to be refused (the room crash above): managed code
+// calls it on a worker thread Unity never registered, and the plugin's
+// IUnityInterfaces lookups fault inside Unity. Without it the plugin never
+// learns its renderer, and the browser's Init never finishes. While probing
+// it gets interfaces of our own instead, as DeoVR's AVPro does: IUnityGraphics
+// answers "OpenGL ES 3.0", registers the device callback (and tells it the
+// device is up), and every other interface (Vulkan) is absent, so nothing
+// reaches into Unity from that thread. Every export managed code fetches is
+// named, and the two render-event functions are wrapped so each event it
+// issues on the render thread is logged.
+
+typedef void (*kl_vx_event_fn)(int);
+typedef void (*kl_vx_device_cb)(int);
+
+static void (*g_vx_PluginLoad)(void *);
+static kl_vx_event_fn g_vx_create_tex, g_vx_render;
+static kl_vx_device_cb g_vx_device_cb;
+
+static int kl_vx_GetRenderer(void) { return 11; }   // kUnityGfxRendererOpenGLES30
+static void kl_vx_RegisterDeviceEventCallback(kl_vx_device_cb cb) {
+    g_vx_device_cb = cb;
+    fprintf(stderr, "  [vuplex] RegisterDeviceEventCallback(%p) -> Initialize\n", (void *)cb);
+    if (cb) cb(0);                                   // kUnityGfxDeviceEventInitialize
+}
+static void kl_vx_UnregisterDeviceEventCallback(kl_vx_device_cb cb) { (void)cb; }
+static int kl_vx_ReserveEventIDRange(int count) { (void)count; return 0x5600; }
+static void *g_vx_graphics[4] = {
+    (void *)kl_vx_GetRenderer, (void *)kl_vx_RegisterDeviceEventCallback,
+    (void *)kl_vx_UnregisterDeviceEventCallback, (void *)kl_vx_ReserveEventIDRange };
+
+// IUnityGraphics' GUID, high and low halves (Unity's IUnityGraphics.h).
+#define KL_VX_GFX_HI 0x7CBA0A9CA4DDB544ULL
+#define KL_VX_GFX_LO 0x8C5AD4926EB17B11ULL
+
+// UnityInterfaceGUID is two uint64_t passed BY VALUE: on arm64 in two
+// registers, so GetInterface(guid) and GetInterfaceSplit(hi, lo) are the same
+// call, as are the two Register forms.
+static void *kl_vx_GetInterfaceSplit(uint64_t hi, uint64_t lo) {
+    int gfx = hi == KL_VX_GFX_HI && lo == KL_VX_GFX_LO;
+    fprintf(stderr, "  [vuplex] GetInterface(%016llx-%016llx) -> %s\n",
+            (unsigned long long)hi, (unsigned long long)lo,
+            gfx ? "our IUnityGraphics (GLES 3.0)" : "absent");
+    return gfx ? (void *)g_vx_graphics : NULL;
+}
+static void kl_vx_RegisterInterfaceSplit(uint64_t hi, uint64_t lo, void *ptr) {
+    (void)hi; (void)lo; (void)ptr;
+}
+static void *g_vx_interfaces[4] = {
+    (void *)kl_vx_GetInterfaceSplit, (void *)kl_vx_RegisterInterfaceSplit,
+    (void *)kl_vx_GetInterfaceSplit, (void *)kl_vx_RegisterInterfaceSplit };
+
+static void kl_vx_UnityPluginLoad(void *unity) {
+    fprintf(stderr, "  [vuplex] UnityPluginLoad(%p): handing the plugin our own interfaces\n", unity);
+    if (g_vx_PluginLoad) g_vx_PluginLoad(g_vx_interfaces);
+    fprintf(stderr, "  [vuplex] UnityPluginLoad returned\n");
+}
+
+static void kl_vx_create_tex_event(int id) {
+    static int n;
+    if (n++ < 20) fprintf(stderr, "  [vuplex] create-texture render event %d (#%d)\n", id, n);
+    if (g_vx_create_tex) g_vx_create_tex(id);
+}
+static void kl_vx_render_event(int id) {
+    static unsigned long n;
+    if (n++ < 20 || n % 600 == 0) fprintf(stderr, "  [vuplex] render event %d (#%lu)\n", id, n);
+    if (g_vx_render) g_vx_render(id);
+}
+static void *(*g_vx_get_create_tex)(void), *(*g_vx_get_render)(void);
+static void *kl_vx_getCreateOpenGLTextureFunction(void) {
+    g_vx_create_tex = g_vx_get_create_tex ? (kl_vx_event_fn)g_vx_get_create_tex() : NULL;
+    fprintf(stderr, "  [vuplex] WebView_getCreateOpenGLTextureFunction -> %p (wrapped)\n",
+            (void *)g_vx_create_tex);
+    return g_vx_create_tex ? (void *)kl_vx_create_tex_event : NULL;
+}
+static void *kl_vx_getRenderFunction(void) {
+    g_vx_render = g_vx_get_render ? (kl_vx_event_fn)g_vx_get_render() : NULL;
+    fprintf(stderr, "  [vuplex] WebView_getRenderFunction -> %p (wrapped)\n", (void *)g_vx_render);
+    return g_vx_render ? (void *)kl_vx_render_event : NULL;
+}
+
+static void *kl_vuplex_interpose(const char *name, void *real) {
+    if (!real || !name || !klj_bigscreen_web_probe()) return NULL;
+    size_t off = 0;
+    const char *img = kl_addr_image(real, &off);
+    if (!img || !strstr(img, "VuplexWebView")) return NULL;
+    static char said[64][64];
+    static int nsaid;
+    int known = 0;
+    for (int i = 0; i < nsaid; i++) if (!strcmp(said[i], name)) known = 1;
+    if (!known && nsaid < 64) {
+        snprintf(said[nsaid++], sizeof said[0], "%s", name);
+        fprintf(stderr, "  [vuplex] managed code fetches %s\n", name);
+    }
+    if (!strcmp(name, "UnityPluginLoad")) {
+        if (g_vx_load_served) {
+            fprintf(stderr, "  [vuplex] UnityPluginLoad asked again: refused (served once already)\n");
+            return NULL;                         // kl_dl_refuse_crash_candidate refuses it
+        }
+        g_vx_load_served = 1;
+        g_vx_PluginLoad = (void (*)(void *))real;
+        return (void *)kl_vx_UnityPluginLoad;
+    }
+    if (!strcmp(name, "WebView_getCreateOpenGLTextureFunction")) {
+        g_vx_get_create_tex = (void *(*)(void))real;
+        return (void *)kl_vx_getCreateOpenGLTextureFunction;
+    }
+    if (!strcmp(name, "WebView_getRenderFunction")) {
+        g_vx_get_render = (void *(*)(void))real;
+        return (void *)kl_vx_getRenderFunction;
+    }
+    return NULL;
 }
 
 int klb_dlclose(void *handle) { (void)handle; return 0; }   // images are never unloaded

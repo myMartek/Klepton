@@ -228,6 +228,11 @@ const klj_binding *klj_avpro_table(void);
 // Bigscreen's own JNI table (runtime/jni/kl_jni_bigscreen.c), walked after the
 // shared ones: NULL for every other target.
 const klj_binding *klj_bigscreen_binding(const char *cls, const char *name, const char *sig);
+// Bigscreen's browser probe (kl_jni_bigscreen.c): on for this title while
+// KL_BS_WEB_PROBE is; the call logs one Vuplex call and answers it harmlessly.
+int klj_bigscreen_web_probe(void);
+klj_val klj_bigscreen_probe_call(void *self, const char *cls, const char *name,
+                                 const char *sig, const klj_val *a, int n);
 // The UnityPlayer if a lifecycle call has made it, NULL before — for a caller on
 // another thread, which must not be the one to make it (kl_jni_softinput.c).
 void *klj_unity_player_made(void);
@@ -342,6 +347,8 @@ typedef struct {
 
 // The guest's own paths, set once by the host before any guest code runs.
 extern const char *g_apk_path, *g_assets_dir, *g_native_lib_dir;
+// A whole APK entry, malloc'd and NUL-terminated past *len; NULL when absent.
+void *klj_apk_entry(const char *name, size_t *len);
 const char *klj_abspath(const char *p);
 void        klj_mkdir_p(const char *path);
 
