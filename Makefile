@@ -68,7 +68,7 @@ RUNTIME_SHIP := $(LX_SRC) runtime/guest/kl_linuxproc.c \
            $(RUNTIME_JNI) \
            runtime/gfx/kl_egl.c runtime/media/kl_opensl.c runtime/media/kl_audio.c runtime/xr/kl_ovrp.c runtime/xr/kl_hands.c \
            runtime/xr/kl_ovrp_sret.S runtime/gfx/kl_reproject.c runtime/gfx/kl_present.c \
-           runtime/xr/kl_ovrplat.c runtime/xr/kl_assetcfg.c runtime/xr/kl_room.c runtime/xr/kl_steamapi.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_vp8.c runtime/media/kl_webm.c runtime/media/kl_avdec.m runtime/media/kl_avpro.m runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_bsfbs.c \
+           runtime/xr/kl_ovrplat.c runtime/xr/kl_assetcfg.c runtime/xr/kl_room.c runtime/xr/kl_steamapi.c runtime/xr/kl_openxr.c runtime/media/kl_mediandk.c runtime/media/kl_vtdec.c runtime/media/kl_vp8.c runtime/media/kl_webm.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_avpro.m runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_bsfbs.c \
            runtime/gfx/kl_vulkan.c runtime/gfx/kl_vk_eyefix.c runtime/gfx/kl_mtl_foveate.m runtime/gfx/kl_mtl_busy.m \
            runtime/guest/kl_nativeactivity.c runtime/guest/kl_slink.c runtime/guest/kl_ue4.c runtime/guest/kl_obbmap.c \
            runtime/guest/kl_jkxr.c runtime/guest/kl_native.c runtime/guest/kl_xashservers.c runtime/guest/kl_sdl2.c \
@@ -507,35 +507,35 @@ bigscreen_movies: build/t_bigscreen_movies
 
 build/t_bs_demux: tests/t_bs_demux.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_bs_demux.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_demux.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
 
 bs_demux: build/t_bs_demux
 	./build/t_bs_demux
 
 build/t_bs_decode: tests/t_bs_decode.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_bs_decode.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_decode.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
 
 bs_decode: build/t_bs_decode
 	./build/t_bs_decode
 
 build/t_bs_present: tests/t_bs_present.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_bs_present.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_present.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
 
 bs_present: build/t_bs_present
 	./build/t_bs_present
 
 build/t_bs_transport: tests/t_bs_transport.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_bs_transport.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_transport.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
 
 bs_transport: build/t_bs_transport
 	./build/t_bs_transport
 
 build/t_bs_aplay: tests/t_bs_aplay.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_bs_aplay.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ tests/t_bs_aplay.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
 
 bs_aplay: build/t_bs_aplay
 	./build/t_bs_aplay
@@ -2078,11 +2078,27 @@ $(FF_MAC): tools/ffmpeg_build.sh tools/ffmpeg/klff_shim.c tools/ffmpeg/visionos.
 
 build/t_ffplay: tests/t_ffplay.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_bsplayer.h runtime/media/kl_ffplay.c runtime/media/kl_ffplay.h runtime/media/kl_avdec.m runtime/media/kl_avdec.h runtime/kl_env.c runtime/kl_env.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -o $@ tests/t_ffplay.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ tests/t_ffplay.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
 
 # Not in `make check`: it needs the Mac build of FFmpeg, which takes minutes.
 ffplay: build/t_ffplay $(FF_MAC)
 	KL_FFMPEG_LIB=$(FF_MAC) ./build/t_ffplay
+
+# Bigscreen's films on a server (the pCloud locations, runtime/media/kl_remote.m):
+# tests/range_server.py serves tests/data by byte range on a free port. Built
+# without ARC, as the shipping runtime is (build/xros/libklepton.a). Not in
+# `make check` either (FFmpeg, and a local web server).
+build/t_bsremote: tests/t_bsremote.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_remote.h runtime/media/kl_webm.c runtime/kl_env.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/t_bsremote.c tests/bs_target_stub.c runtime/media/kl_bsplayer.c runtime/media/kl_ffplay.c runtime/media/kl_avdec.m runtime/media/kl_remote.m runtime/media/kl_webm.c runtime/kl_env.c $(LDLIBS)
+
+.PHONY: bsremote
+bsremote: build/t_bsremote $(FF_MAC)
+	@: > build/range_server.port; \
+	  python3 -I tests/range_server.py > build/range_server.port & pid=$$!; \
+	  for i in 1 2 3 4 5 6 7 8 9 10; do [ -s build/range_server.port ] && break; sleep 0.3; done; \
+	  KL_FFMPEG_LIB=$(FF_MAC) ./build/t_bsremote $$(cat build/range_server.port); rc=$$?; \
+	  kill $$pid; exit $$rc
 
 .PHONY: mvk mvk-fetch mvk-retarget mvk-check mvk-status
 mvk-fetch:

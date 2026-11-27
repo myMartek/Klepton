@@ -31,6 +31,8 @@
 #include "kl_webm.h"
 #include "kl_env.h"
 #include "kl_audio.h"
+#include "kl_remote.h"
+#import <objc/runtime.h>
 
 struct kl_avdec {
     char        path[1024];          // the file actually opened (see slice_out)
@@ -132,6 +134,120 @@ static int slice_out(const char *container, long long off, long long len,
     fprintf(stderr, "  [avdec] extracted %lld bytes at %lld of %s -> %s\n",
             len, off, base, out);
     return 1;
+}
+
+
+// ---------------------------------------------------------------------------
+// A film on a server (kl_remote.h: Bigscreen's pCloud locations).
+//
+// The placeholder on disk holds no bytes, so AVFoundation is handed a URL of
+// its own scheme instead and asks for every byte through the resource loader
+// below, which reads it by range from the server (through kl_remote's block
+// cache). Only MP4/MOV/M4V go this way; anything else on a server goes to
+// FFmpeg, which takes the same reads (kl_ffplay.c). Mac-tested: AVAssetReader
+// decodes and seeks through a resource loader as it does from a file.
+
+@interface KLRemoteLoader : NSObject <AVAssetResourceLoaderDelegate>
+@property (nonatomic, assign) kl_remote *remote;
+@property (nonatomic, copy) NSString *type;
+@property (nonatomic, assign) dispatch_queue_t queue;   // the loader's own (never freed): every answer goes there
+@end
+
+@implementation KLRemoteLoader
+- (BOOL)resourceLoader:(AVAssetResourceLoader *)loader
+    shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)req {
+    (void)loader;
+    // The bytes are read on a worker (a read can wait for the server); every
+    // answer to AVFoundation is given on the loader's own queue, as it asks.
+    dispatch_queue_t q = self.queue;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        long long size = kl_remote_size(self.remote);
+        AVAssetResourceLoadingDataRequest *d = req.dataRequest;
+        __block int cancelled = 0;
+        dispatch_sync(q, ^{
+            AVAssetResourceLoadingContentInformationRequest *info = req.contentInformationRequest;
+            if (info) {
+                info.contentType = self.type;
+                info.contentLength = size;
+                info.byteRangeAccessSupported = YES;
+            }
+            if (!d) [req finishLoading];
+            cancelled = req.isCancelled;
+        });
+        if (!d || cancelled) return;
+        long long off = d.requestedOffset;
+        long long end = d.requestsAllDataToEndOfResource ? size : off + d.requestedLength;
+        if (end > size) end = size;
+        enum { PIECE = 256 * 1024 };
+        while (off < end && !cancelled) @autoreleasepool {
+            size_t want = (size_t)(end - off < PIECE ? end - off : PIECE);
+            NSMutableData *piece = [NSMutableData dataWithLength:want];
+            long got = kl_remote_read(self.remote, off, piece.mutableBytes, want);
+            if (got <= 0) {
+                dispatch_sync(q, ^{
+                    if (!req.isCancelled)
+                        [req finishLoadingWithError:[NSError errorWithDomain:NSURLErrorDomain
+                                                                        code:NSURLErrorCannotLoadFromNetwork
+                                                                    userInfo:nil]];
+                });
+                return;
+            }
+            piece.length = (NSUInteger)got;
+            dispatch_sync(q, ^{
+                cancelled = req.isCancelled;
+                if (!cancelled) [d respondWithData:piece];
+            });
+            off += got;
+        }
+        dispatch_sync(q, ^{ if (!req.isCancelled) [req finishLoading]; });
+    });
+    return YES;
+}
+// This file is built without ARC for the headset (build/xros/libklepton.a)
+// and with it for some host tests, so the release is spelled out for the first.
+- (void)dealloc {
+    kl_remote_close(_remote);
+#if !__has_feature(objc_arc)
+    [_type release];
+    [super dealloc];
+#endif
+}
+@end
+
+static const void *kRemoteLoaderKey = &kRemoteLoaderKey;
+
+// The asset for `path`: the file itself, or, for a registered placeholder, the
+// server's copy through the loader (kept alive by the asset). nil for a
+// placeholder of a type AVFoundation does not take.
+static AVURLAsset *kl_av_asset(const char *path) {
+    if (!kl_remote_is(path)) {
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        return [AVURLAsset URLAssetWithURL:url options:nil];
+    }
+    NSString *ext = [@(path) pathExtension].lowercaseString;
+    NSString *type = [ext isEqualToString:@"mov"] ? @"com.apple.quicktime-movie"
+                   : [ext isEqualToString:@"m4v"] ? @"com.apple.m4v-video"
+                   : [ext isEqualToString:@"mp4"] ? @"public.mpeg-4" : nil;
+    if (!type) return nil;
+    kl_remote *r = kl_remote_open(path);
+    if (!r) return nil;
+    KLRemoteLoader *l = [KLRemoteLoader new];
+    l.remote = r;
+    l.type = type;
+    NSString *name = [[@(path) lastPathComponent]
+        stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet] ?: @"film.mp4";
+    AVURLAsset *a = [AVURLAsset URLAssetWithURL:[NSURL URLWithString:[@"klremote://film/" stringByAppendingString:name]]
+                                        options:nil];
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("klepton.remote.loader", DISPATCH_QUEUE_SERIAL); });
+    l.queue = q;
+    [a.resourceLoader setDelegate:l queue:q];
+    objc_setAssociatedObject(a, kRemoteLoaderKey, l, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+#if !__has_feature(objc_arc)
+    [l release];       // the asset holds it now
+#endif
+    return a;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,8 +410,8 @@ static void *decode_thread(void *arg) {
     @autoreleasepool {
         NSURL *url = [NSURL fileURLWithPath:
                           [NSString stringWithUTF8String:d->path]];
-        AVAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
-        AVAssetTrack *track = first_video_track(asset);
+        AVAsset *asset = kl_av_asset(d->path);
+        AVAssetTrack *track = asset ? first_video_track(asset) : nil;
         if (!track) return NULL;
         track = hev1_as_hvc1(url, track, &asset);
 
@@ -418,9 +534,8 @@ static int avdec_sound(void) {
 static void *audio_decode_thread(void *arg) {
     kl_avdec *d = arg;
     @autoreleasepool {
-        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:d->path]];
-        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
-        AVAssetTrack *track = first_track_of(asset, AVMediaTypeAudio);
+        AVURLAsset *asset = kl_av_asset(d->path);
+        AVAssetTrack *track = asset ? first_track_of(asset, AVMediaTypeAudio) : nil;
         if (!track) return NULL;
 
         kl_audio_open_src(d, "cutscene", (unsigned)d->audio_rate, (unsigned)d->audio_channels, 16);
@@ -567,9 +682,8 @@ kl_avdec *kl_avdec_open(const char *path, long long offset, long long size) {
     __block long long dur = 0;
     __block int has_aud = 0, aud_rate = 0, aud_ch = 0;
     @autoreleasepool {
-        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:real]];
-        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
-        AVAssetTrack *t = first_video_track(asset);
+        AVURLAsset *asset = kl_av_asset(real);
+        AVAssetTrack *t = asset ? first_video_track(asset) : nil;
         if (!t) {
             // Named, because "there is no video track" and "the file is not
             // there" are the same NULL to the caller and a completely
@@ -961,7 +1075,8 @@ static int demux_start_reader(kl_avdemux *m, CMTime from) {
 
 kl_avdemux *kl_avdemux_open(const char *container, long long offset, long long size) {
     if (!container || !*container) return NULL;
-    kl_webm *webm = kl_webm_open_range(container, offset, size);
+    // A placeholder of a film on a server holds no bytes to sniff.
+    kl_webm *webm = kl_remote_is(container) ? NULL : kl_webm_open_range(container, offset, size);
     if (webm) {
         kl_avdemux *m = calloc(1, sizeof *m);
         if (!m) { kl_webm_close(webm); return NULL; }
@@ -983,9 +1098,8 @@ kl_avdemux *kl_avdemux_open(const char *container, long long offset, long long s
     m->nal_len_size = 4;
 
     @autoreleasepool {
-        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:real]];
-        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
-        AVAssetTrack *t = first_video_track(asset);
+        AVURLAsset *asset = kl_av_asset(real);
+        AVAssetTrack *t = asset ? first_video_track(asset) : nil;
         if (!t) {
             fprintf(stderr, "  [avdemux] %s carries no video track\n", real);
             free(m); return NULL;

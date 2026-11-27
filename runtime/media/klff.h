@@ -29,6 +29,17 @@ enum { KLFF_VIDEO = 0, KLFF_AUDIO = 1 };
 klff *klff_open(const char *path, int kind, char *err, int cap);
 void  klff_close(klff *f);
 
+// The same, reading through the caller instead of a file: a film on a server
+// (runtime/media/kl_remote.h). `read` gives up to n bytes at off (short only
+// at the end, -1 on an error); `size` is the file's length; `name` is only a
+// hint for the container ("Film.mkv"). `done(ctx)`, if set, is called once
+// by klff_close (also when the open fails). Since the pCloud locations
+// (2026-11-27); a framework without it plays local files only.
+typedef long (*klff_read_fn)(void *ctx, long long off, void *buf, unsigned long n);
+typedef void (*klff_done_fn)(void *ctx);
+klff *klff_open_io(klff_read_fn read, klff_done_fn done, void *ctx, long long size,
+                   const char *name, int kind, char *err, int cap);
+
 // What the stream is. `codec` gets FFmpeg's codec name ("hevc", "ac3").
 // For audio, rate and channels are those of the PCM klff_audio_next gives.
 // Returns 1.

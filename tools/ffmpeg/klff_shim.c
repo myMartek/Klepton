@@ -45,7 +45,37 @@ struct klff {
     long long skip_to_us;      // after a seek: drop what lies before this
     int eof_sent;              // the demuxer ran out and the decoder was told
     int last_hw;
+    // klff_open_io: the caller's reads instead of a file.
+    AVIOContext *avio;
+    klff_read_fn io_read;
+    klff_done_fn io_done;
+    void *io_ctx;
+    long long io_size, io_pos;
 };
+
+static int klff_io_packet(void *opaque, uint8_t *buf, int n) {
+    klff *f = opaque;
+    if (f->io_pos >= f->io_size) return AVERROR_EOF;
+    long got = f->io_read(f->io_ctx, f->io_pos, buf, (unsigned long)n);
+    if (got < 0) return AVERROR(EIO);
+    if (got == 0) return AVERROR_EOF;
+    f->io_pos += got;
+    return (int)got;
+}
+
+static int64_t klff_io_seek(void *opaque, int64_t off, int whence) {
+    klff *f = opaque;
+    switch (whence & ~AVSEEK_FORCE) {
+    case AVSEEK_SIZE: return f->io_size;
+    case SEEK_SET: break;
+    case SEEK_CUR: off += f->io_pos; break;
+    case SEEK_END: off += f->io_size; break;
+    default: return AVERROR(EINVAL);
+    }
+    if (off < 0) return AVERROR(EINVAL);
+    f->io_pos = off;
+    return off;
+}
 
 static long long klff_us(klff *f, int64_t ts) {
     if (ts == AV_NOPTS_VALUE) return -1;
@@ -83,15 +113,56 @@ void klff_close(klff *f) {
     avcodec_free_context(&f->dec);
     av_buffer_unref(&f->hw);
     avformat_close_input(&f->fmt);
+    if (f->avio) {
+        av_freep(&f->avio->buffer);
+        avio_context_free(&f->avio);
+    }
+    if (f->io_done) f->io_done(f->io_ctx);
     free(f->bgra);
     free(f->pcm);
     free(f);
 }
 
+static klff *klff_open_with(klff *f, const char *path, int kind, char *err, int cap);
+
 klff *klff_open(const char *path, int kind, char *err, int cap) {
     av_log_set_level(AV_LOG_ERROR);
     klff *f = calloc(1, sizeof *f);
     if (!f) { klff_err(err, cap, "out of memory", 0); return NULL; }
+    return klff_open_with(f, path, kind, err, cap);
+}
+
+klff *klff_open_io(klff_read_fn read, klff_done_fn done, void *ctx, long long size,
+                   const char *name, int kind, char *err, int cap) {
+    av_log_set_level(AV_LOG_ERROR);
+    klff *f = calloc(1, sizeof *f);
+    if (!f) {
+        if (done) done(ctx);
+        klff_err(err, cap, "out of memory", 0);
+        return NULL;
+    }
+    f->io_read = read;
+    f->io_done = done;
+    f->io_ctx = ctx;
+    f->io_size = size;
+    // 256 KiB a read: a server answers a range per read that misses its cache.
+    enum { IOBUF = 256 * 1024 };
+    unsigned char *buf = av_malloc(IOBUF);
+    f->avio = buf ? avio_alloc_context(buf, IOBUF, 0, f, klff_io_packet, NULL, klff_io_seek) : NULL;
+    f->fmt = f->avio ? avformat_alloc_context() : NULL;
+    if (!f->avio || !f->fmt) {
+        if (!f->avio) av_free(buf);
+        klff_err(err, cap, "out of memory", 0);
+        klff_close(f);
+        return NULL;
+    }
+    f->avio->seekable = AVIO_SEEKABLE_NORMAL;
+    f->fmt->pb = f->avio;
+    f->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+    return klff_open_with(f, name && *name ? name : "film", kind, err, cap);
+}
+
+static klff *klff_open_with(klff *f, const char *path, int kind, char *err, int cap) {
     f->kind = kind;
     f->skip_to_us = -1;
     int rc = avformat_open_input(&f->fmt, path, NULL, NULL);

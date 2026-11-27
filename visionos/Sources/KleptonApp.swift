@@ -1191,6 +1191,14 @@ struct BootView: View {
                     .disabled(!canMeasureRoom || started || roomFlow.active)
                     if running { ProgressView() }
                 }
+                // Bigscreen: the places its films come from, and the way to manage them (the owner, 2026-11-27).
+                if KLBigscreenFolders.offered {
+                    BigscreenLocationsLine {
+                        KLSettingsNav.next = .locations
+                        showSettings = true
+                    }
+                    .disabled(roomFlow.active)
+                }
                 // Room scale / stationary / off, and wall / fade out, without going into Settings.
                 // Stays in place once Start is pressed, greyed out, so nothing jumps.
                 RoomQuickSettings()

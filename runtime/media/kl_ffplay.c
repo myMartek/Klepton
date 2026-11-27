@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "kl_env.h"
+#include "kl_remote.h"
 
 // ---- the framework ----------------------------------------------------------
 
@@ -22,6 +23,9 @@ static struct {
     int (*audio_next)(klff *, const short **, int *, long long *);
     int (*seek)(klff *, long long);
     const char *(*version)(void);
+    // Optional: a framework built before the pCloud locations lacks it and
+    // then plays local files only.
+    klff *(*open_io)(klff_read_fn, klff_done_fn, void *, long long, const char *, int, char *, int);
 } ff;
 static pthread_once_t ff_once = PTHREAD_ONCE_INIT;
 static int ff_ok;
@@ -50,6 +54,7 @@ static void ff_load(void) {
     FF_SYM(seek, "klff_seek");
     FF_SYM(version, "klff_version");
 #undef FF_SYM
+    *(void **)&ff.open_io = dlsym(h, "klff_open_io");
     ff_ok = 1;
     fprintf(stderr, "  [ff] %s loaded\n", ff.version());
 }
@@ -57,6 +62,25 @@ static void ff_load(void) {
 int kl_ff_available(void) {
     pthread_once(&ff_once, ff_load);
     return ff_ok;
+}
+
+// A film on a server (kl_remote.h) is read through FFmpeg's I/O callbacks;
+// any other path opens as the file it is.
+static long ff_remote_read(void *ctx, long long off, void *buf, unsigned long n) {
+    return kl_remote_read(ctx, off, buf, n);
+}
+static void ff_remote_done(void *ctx) { kl_remote_close(ctx); }
+
+static klff *ff_open(const char *path, int kind, char *e, int cap) {
+    if (!kl_remote_is(path)) return ff.open(path, kind, e, cap);
+    if (!ff.open_io) {
+        snprintf(e, (size_t)cap, "this FFmpeg build cannot read from a server");
+        return NULL;
+    }
+    kl_remote *r = kl_remote_open(path);
+    if (!r) { snprintf(e, (size_t)cap, "not registered"); return NULL; }
+    return ff.open_io(ff_remote_read, ff_remote_done, r, kl_remote_size(r),
+                      kl_remote_name(r), kind, e, cap);
 }
 
 static long long ff_now_ms(void) {
@@ -196,7 +220,7 @@ kl_ffvid *kl_ffvid_open(const char *path, char *err, size_t cap) {
         return NULL;
     }
     char e[256] = "";
-    klff *f = ff.open(path, KLFF_VIDEO, e, (int)sizeof e);
+    klff *f = ff_open(path, KLFF_VIDEO, e, (int)sizeof e);
     if (!f) {
         if (err && cap) snprintf(err, cap, "FFmpeg: %s", e);
         return NULL;
@@ -328,7 +352,7 @@ struct kl_ffaud {
 kl_ffaud *kl_ffaud_open(const char *path) {
     if (!kl_ff_available()) return NULL;
     char e[256] = "";
-    klff *f = ff.open(path, KLFF_AUDIO, e, (int)sizeof e);
+    klff *f = ff_open(path, KLFF_AUDIO, e, (int)sizeof e);
     if (!f) {
         fprintf(stderr, "  [ff] %s: no sound (%s)\n", path, e);
         return NULL;
