@@ -18,7 +18,8 @@ struct kl_bsplayer {
     kl_avdemux *dm;
     // ...or, for a file AVFoundation refuses (MKV, AVI, WebM, TS, WMV, OGV),
     // the same two halves through FFmpeg (kl_ffplay.h). fv set = this path;
-    // fa NULL there = a film without sound FFmpeg decodes.
+    // fa NULL there = a film without sound FFmpeg decodes. fa without fv: the
+    // picture through AVFoundation, the sound (DTS, TrueHD) through FFmpeg.
     kl_ffvid *fv;
     kl_ffaud *fa;
     kl_bsplayer_upload_fn upload;
@@ -79,23 +80,28 @@ static int bs_info(kl_bsplayer *p, int *w, int *h, const char **mime,
                  : kl_avdemux_info(p->dm, w, h, mime, dur_us, fps);
 }
 static int bs_a_info(kl_bsplayer *p, int *rate, int *ch) {
-    if (p->fv) return p->fa ? kl_ffaud_info(p->fa, rate, ch) : 0;
+    if (p->fa) return kl_ffaud_info(p->fa, rate, ch);
+    if (p->fv) return 0;
     return kl_avdemux_audio_info(p->dm, rate, ch);
 }
 static long long bs_a_time_us(kl_bsplayer *p) {
-    if (p->fv) return p->fa ? kl_ffaud_time_us(p->fa) : -1;
+    if (p->fa) return kl_ffaud_time_us(p->fa);
+    if (p->fv) return -1;
     return kl_avdemux_audio_time_us(p->dm);
 }
 static long bs_a_read(kl_bsplayer *p, unsigned char *buf, unsigned long cap) {
-    if (p->fv) return p->fa ? kl_ffaud_read(p->fa, buf, cap) : -1;
+    if (p->fa) return kl_ffaud_read(p->fa, buf, cap);
+    if (p->fv) return -1;
     return kl_avdemux_audio_read(p->dm, buf, cap);
 }
 static int bs_a_advance(kl_bsplayer *p) {
-    if (p->fv) return p->fa ? kl_ffaud_advance(p->fa) : 0;
+    if (p->fa) return kl_ffaud_advance(p->fa);
+    if (p->fv) return 0;
     return kl_avdemux_audio_advance(p->dm);
 }
 static int bs_a_seek_us(kl_bsplayer *p, long long us) {
-    if (p->fv) return p->fa ? kl_ffaud_seek_us(p->fa, us) : -1;
+    if (p->fa) return kl_ffaud_seek_us(p->fa, us);
+    if (p->fv) return -1;
     return kl_avdemux_audio_seek_us(p->dm, us);
 }
 
@@ -132,6 +138,17 @@ kl_bsplayer *kl_bsplayer_open(const char *path, char *reason, size_t cap) {
             return NULL;
         }
         fa = kl_ffaud_open(path);
+    } else if (!kl_avdemux_audio_info(dm, NULL, NULL)) {
+        // Picture through AVFoundation, sound through FFmpeg: an MP4/MOV
+        // whose sound no Apple decoder takes (a Blu-ray remux with DTS,
+        // DTS-HD MA or TrueHD). AVFoundation does not even list a DTS track
+        // in an MP4 ('mp4a' object type 0xA9), so any film it finds silent
+        // is asked of FFmpeg, which reads the file a second time for the
+        // sound and folds it to stereo. A truly silent film costs one probe.
+        fa = kl_ffaud_open(path);
+        if (fa || kl_avdemux_audio_foreign(dm))
+            fprintf(stderr, "  [bsplayer] %s: sound through FFmpeg%s\n", path,
+                    fa ? "" : " failed, the film plays silent");
     }
     kl_bsplayer *p = calloc(1, sizeof *p);
     if (!p) {

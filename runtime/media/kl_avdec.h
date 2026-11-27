@@ -115,6 +115,9 @@ int  kl_avdemux_seek_us(kl_avdemux *m, long long us);
 // PCM (at most two channels) and served in chunks of 1024 frames, the same
 // current-sample shape as the video above. info is 0 for a clip without sound.
 int       kl_avdemux_audio_info(kl_avdemux *m, int *rate, int *channels);
+// 1 = the film has a sound track no Apple decoder takes (DTS, TrueHD); the
+// audio_* calls then report no sound and the caller may decode it elsewhere.
+int       kl_avdemux_audio_foreign(kl_avdemux *m);
 long long kl_avdemux_audio_time_us(kl_avdemux *m);     // -1 at end of stream
 long      kl_avdemux_audio_read(kl_avdemux *m, unsigned char *buf, unsigned long cap);
 int       kl_avdemux_audio_advance(kl_avdemux *m);

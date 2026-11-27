@@ -18,6 +18,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
+#import <AudioToolbox/AudioToolbox.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -936,6 +937,11 @@ struct kl_avdemux {
     void          *atrack, *areader, *aout;
     int            arate, ach;
     int            astarted, aeos;
+    // A sound track is listed but no Apple decoder takes it (DTS in a MOV,
+    // TrueHD): atrack stays NULL. kl_bsplayer.c then asks FFmpeg for the
+    // sound, as it does for an MP4 whose DTS track AVFoundation hides.
+    int            aforeign;
+    char           acodec[8];
     unsigned char *apcm;             // the current decoded sample buffer
     size_t         apcm_len, apos;
     long long      apcm_pts_us;      // presentation time of apcm[0]
@@ -1073,6 +1079,27 @@ static int demux_start_reader(kl_avdemux *m, CMTime from) {
     return 1;
 }
 
+// Is there an Apple decoder for this sound format? PCM always; anything else
+// only when AudioToolbox lists a decoder for it. DTS ('dtsc', 'dtsh', 'dtsl',
+// 'dtse') and Dolby TrueHD ('mlpa') have none on visionOS or macOS.
+static int demux_can_decode(AudioFormatID id) {
+    if (id == kAudioFormatLinearPCM) return 1;
+    UInt32 size = 0;
+    OSStatus st = AudioFormatGetPropertyInfo(kAudioFormatProperty_Decoders,
+                                             sizeof id, &id, &size);
+    return st == noErr && size > 0;
+}
+
+static void fourcc_str(AudioFormatID id, char out[8]) {
+    for (int i = 0; i < 4; i++) {
+        char c = (char)((id >> (24 - 8 * i)) & 0xff);
+        out[i] = (c >= 32 && c < 127) ? c : '?';
+    }
+    out[4] = 0;
+}
+
+int kl_avdemux_audio_foreign(kl_avdemux *m) { return m ? m->aforeign : 0; }
+
 kl_avdemux *kl_avdemux_open(const char *container, long long offset, long long size) {
     if (!container || !*container) return NULL;
     // A placeholder of a film on a server holds no bytes to sniff.
@@ -1129,7 +1156,12 @@ kl_avdemux *kl_avdemux_open(const char *container, long long offset, long long s
             ? (__bridge CMAudioFormatDescriptionRef)at.formatDescriptions.firstObject : NULL;
         const AudioStreamBasicDescription *asbd =
             afmt ? CMAudioFormatDescriptionGetStreamBasicDescription(afmt) : NULL;
-        if (asbd && asbd->mSampleRate > 0 && asbd->mChannelsPerFrame > 0) {
+        if (asbd && !demux_can_decode(asbd->mFormatID)) {
+            m->aforeign = 1;
+            fourcc_str(asbd->mFormatID, m->acodec);
+            fprintf(stderr, "  [avdemux] %s: sound '%s' has no Apple decoder\n",
+                    real, m->acodec);
+        } else if (asbd && asbd->mSampleRate > 0 && asbd->mChannelsPerFrame > 0) {
             m->arate = (int)(asbd->mSampleRate + 0.5);
             // Down to stereo: a guest that mixes the clip in plays it in a
             // stereo mixer, and AVFoundation folds the rest in properly.
