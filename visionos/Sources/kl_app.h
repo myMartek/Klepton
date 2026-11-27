@@ -287,6 +287,11 @@ typedef struct {
 // relative to external storage ("/Movies/iCloud Drive"); NULL clears the list.
 // Implemented in runtime/libc/kl_libc.c, which says how paths are served.
 void kl_guest_dir_aliases_set(const char *spec);
+// ...and its pCloud locations: one "<placeholder path>\t<kind>\t<a>\t<b>\t<c>\t<size>\n"
+// line per film on a server (kind "pcloud": API host, link code, file id), so
+// that the film plays from there instead of the placeholder. NULL clears it.
+// Implemented in runtime/media/kl_remote.m, which says how films are read.
+void kl_remote_files_set(const char *spec);
 
 // Half-Life: Alyx's console, for the app's cheat menu (runtime/linux/kl_lx_netcon.c,
 // which also says what it is): with KL_LX_NETCON=<port> the engine's net console

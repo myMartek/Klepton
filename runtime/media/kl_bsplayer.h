@@ -20,6 +20,13 @@ typedef struct kl_bsplayer kl_bsplayer;
 // cap > 0) if the file is missing, unreadable, or carries no AVFoundation
 // video track. Opening reads the header only, never the whole file.
 kl_bsplayer *kl_bsplayer_open(const char *path, char *reason, size_t cap);
+// The same with flags. KL_BS_NO_SOUND: no sound is opened (a thumbnail).
+// KL_BS_SOUND_ASYNC: a sound only FFmpeg gives (an MKV's, an MP4's DTS) is
+// opened on a thread of the player's; until it is in, audio_info says
+// silent and the pump waits for it. For a caller on the game's thread with
+// a film on a server (pCloud), where that open is network-bound.
+enum { KL_BS_NO_SOUND = 1, KL_BS_SOUND_ASYNC = 2 };
+kl_bsplayer *kl_bsplayer_open2(const char *path, int flags, char *reason, size_t cap);
 // Track facts off the asset (`mime` is "video/avc"/"video/hevc", static).
 // Any out-param may be NULL. 0 = ok, -1 = bad player.
 int kl_bsplayer_info(kl_bsplayer *p, int *w, int *h, const char **mime,
@@ -103,6 +110,40 @@ long long kl_bsplayer_audio_position_us(kl_bsplayer *p);
 // How many times the pump has realigned the sound to the picture this session.
 // One per interruption that got through, not one per chunk: a healthy run is 0.
 unsigned long kl_bsplayer_av_realigns(kl_bsplayer *p);
+// The film's sound tracks (Bigscreen's Audio Tracks menu), as FFmpeg lists
+// them — every stream, also one AVFoundation cannot play — one line each:
+// "language\ttitle\tcodec\tchannels\tdefault\tcurrent\tid\n". Returns how
+// many; 0 without FFmpeg or sound. The first call reads the file (FFmpeg
+// opens it once more on the AVFoundation path); later calls are cached. On
+// that path it also puts the sound on the file's own choice (FFmpeg's
+// "current": the default-flagged stream) when AVFoundation plays another
+// one — it never sees a DTS track, so a remux with German DTS (default) and
+// English AAC would otherwise start in English.
+int kl_bsplayer_audio_tracks(kl_bsplayer *p, char *buf, size_t cap);
+// Play the nth of those from where the picture is: the sound moves to
+// FFmpeg reading that stream, and the sink is reopened if its rate or
+// channels change. 0, or -1 (no such track / no FFmpeg; the sound stays).
+int kl_bsplayer_select_audio(kl_bsplayer *p, int nth);
+// The same list without waiting: prefetch reads it on a thread of the
+// player's (joined by close); peek answers -1 until it is there.
+void kl_bsplayer_audio_tracks_prefetch(kl_bsplayer *p);
+int kl_bsplayer_audio_tracks_peek(kl_bsplayer *p, char *buf, size_t cap);
+
+// Subtitles (Bigscreen's Subtitles menu), text only: the film's own text
+// streams, then files beside it named like it (Film.srt, Film.de.srt,
+// Film.en.forced.ass, Film.vtt). One line each:
+// "language\ttitle\tcodec\tflags\tfile\n" (flags: 1 default, 2 forced; file:
+// 1 for a file beside the film). Returns how many. The first call reads the
+// film (the prefetch thread does it); peek answers -1 until then.
+int kl_bsplayer_text_tracks(kl_bsplayer *p, char *buf, size_t cap);
+int kl_bsplayer_text_tracks_peek(kl_bsplayer *p, char *buf, size_t cap);
+// Show the nth of those (-1: none). Off until a pick. 0, or -1 for no such.
+int kl_bsplayer_select_text(kl_bsplayer *p, int nth);
+// The next cue due at the picture's position: 1 with its text (lines split
+// by '\n') and its times in the film, 0 when none is due. Cues that ended
+// before the picture are dropped. Call it every frame.
+int kl_bsplayer_sub_poll(kl_bsplayer *p, char *text, size_t cap, long long *start_us,
+                         long long *end_us);
 // Pump once: fire whatever is due (ENDED when the played stream ran out).
 // 0 = ok, -1 = bad player.
 int kl_bsplayer_update(kl_bsplayer *p);

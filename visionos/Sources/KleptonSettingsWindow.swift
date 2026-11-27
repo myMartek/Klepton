@@ -359,8 +359,19 @@ enum KLHelp {
                                textEN: "The language the game is told the headset speaks. Many games choose their text and voices from it.",
                                textDE: "Die Sprache, die dem Spiel als Sprache des Headsets gemeldet wird. Viele Spiele wählen danach Texte und Stimmen.",
                                noteEN: nextStartEN, noteDE: nextStartDE)
+        case "bigscreen.locations":
+            return KLHelpEntry(en: "Locations", de: "Orte",
+                               textEN: "The places Bigscreen lists your own films from, beside its own folder Movies: folders of the Files app and pCloud links. Each appears in the game's local films as a folder inside Movies.",
+                               textDE: "Die Orte, aus denen Bigscreen deine eigenen Filme zeigt, neben seinem eigenen Ordner Movies: Ordner der Dateien-App und pCloud-Links. Jeder erscheint in den lokalen Filmen des Spiels als Ordner in Movies.",
+                               noteEN: nextStartEN, noteDE: nextStartDE)
+        case "bigscreen.pcloud":
+            return KLHelpEntry(en: "pCloud links", de: "pCloud-Links",
+                               textEN: "Paste the public link of a pCloud folder (Share › Share link in pCloud). No account and no sign-in: the folder and the folders in it appear in Bigscreen like a folder of the headset. A film you choose plays straight from pCloud while it is watched; it is not copied to the headset.",
+                               textDE: "Füge den öffentlichen Link eines pCloud-Ordners ein (in pCloud: Teilen › Link teilen). Kein Konto und keine Anmeldung: Der Ordner und die Ordner darin erscheinen in Bigscreen wie ein Ordner des Headsets. Ein Film, den du wählst, wird beim Ansehen direkt von pCloud abgespielt und nicht aufs Headset kopiert.",
+                               noteEN: "Needs the internet while a film plays. The folder is read again at every start, so new films appear then. " + nextStartEN,
+                               noteDE: "Braucht Internet, während ein Film läuft. Der Ordner wird bei jedem Start neu gelesen, neue Filme erscheinen dann. " + nextStartDE)
         case "bigscreen.folders":
-            return KLHelpEntry(en: "Films from the Files app", de: "Filme aus der Dateien-App",
+            return KLHelpEntry(en: "Folders of the Files app", de: "Ordner der Dateien-App",
                                textEN: "Folders you choose here appear in Bigscreen's local films as folders inside Movies, beside the films in the game's own folder. Choose \"On My Apple Vision Pro\", iCloud Drive or any folder in them. The game plays the films where they are; nothing is copied.",
                                textDE: "Ordner, die du hier wählst, erscheinen in Bigscreens lokalen Filmen als Ordner in Movies, neben den Filmen im eigenen Ordner des Spiels. Wähle „Auf meiner Apple Vision Pro“, iCloud Drive oder einen Ordner darin. Das Spiel spielt die Filme dort ab, wo sie liegen; nichts wird kopiert.",
                                noteEN: "A film in iCloud Drive that is not on the headset yet is downloaded when the game first reads it, which can take a while. " + nextStartEN,
@@ -686,7 +697,13 @@ struct KLToggleRow: View {
 // MARK: - The window
 
 enum KLSettingsPageID: String, Hashable, CaseIterable {
-    case presets, steamCloud, picture, motion, immersion, controls, room, game, cheats, advanced, diagnostics
+    case presets, steamCloud, picture, motion, immersion, controls, room, game, locations, cheats, advanced, diagnostics
+}
+
+/// A page to open the settings window on, asked for from outside it (the start
+/// window's "Manage Locations"). Taken once, when the window appears.
+@MainActor enum KLSettingsNav {
+    static var next: KLSettingsPageID?
 }
 
 struct KleptonSettingsWindow<Diagnostics: View>: View {
@@ -700,6 +717,7 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
     @ObservedObject private var state = KLSettingsState.shared
     @ObservedObject private var rendering = KleptonRendering.shared
     @ObservedObject private var metalfx = KleptonMetalFX.shared
+    @ObservedObject private var locations = KLBigscreenFolders.shared
     /// A scripted launch can open a page and an explanation (KL_SETTINGS_PAGE=<page>, KL_SETTINGS_HELP=<key>; with
     /// KL_START_SETTINGS=1), to photograph them without a hand to tap.
     @State private var selection: KLSettingsPageID? =
@@ -735,6 +753,10 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
                     row(.room, klT("Play area", "Spielbereich"), "square.dashed")
                     row(.game, isAlyx ? klT("Language", "Sprache") : klT("Game", "Spiel"),
                         "character.bubble")
+                    // Bigscreen's films: a page of its own (the owner, 2026-11-27), no longer on the game page.
+                    if KLBigscreenFolders.offered {
+                        row(.locations, klT("Locations", "Orte"), "folder", "\(locations.count)")
+                    }
                     if isAlyx {
                         row(.cheats, "Cheats", "wand.and.stars", cheatsValue)
                     }
@@ -761,6 +783,12 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
                 .background { KLFollowChanges(active: selection != .presets) }
         }
         .environmentObject(focus)
+        .onAppear {
+            if let p = KLSettingsNav.next {
+                selection = p
+                KLSettingsNav.next = nil
+            }
+        }
     }
 
     private var pictureValue: String {
@@ -825,6 +853,10 @@ struct KleptonSettingsWindow<Diagnostics: View>: View {
             KLSettingsPage(title: isAlyx ? klT("Language", "Sprache") : klT("Game", "Spiel"),
                            help: isAlyx ? "alyx.language" : "game") {
                 KLGamePage()
+            }
+        case .locations:
+            KLSettingsPage(title: klT("Locations", "Orte"), help: "bigscreen.locations") {
+                BigscreenLocationsView()
             }
         case .cheats:
             KLSettingsPage(title: "Cheats", help: "alyx.cheats") {
@@ -1412,11 +1444,6 @@ struct KLGamePage: View {
             KLSection(title: klT("Player", "Spieler")) { PlayerNameView() }
         }
         WalkaboutUnlockView()
-        if KLBigscreenFolders.offered {
-            KLSection(title: klT("Films from the Files app", "Filme aus der Dateien-App")) {
-                BigscreenFoldersView()
-            }.klHelp("bigscreen.folders")
-        }
         ModCreditsView()
         if micUpFront { KLSection(title: klT("Microphone", "Mikrofon")) { MicView() } }
     }

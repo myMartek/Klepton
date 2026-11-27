@@ -22,12 +22,23 @@ extern "C" {
 
 typedef struct klff klff;
 
-enum { KLFF_VIDEO = 0, KLFF_AUDIO = 1 };
+enum { KLFF_VIDEO = 0, KLFF_AUDIO = 1, KLFF_SUBTITLE = 2 };
 
 // NULL and a reason in `err` when the file cannot be read or has no stream of
 // that kind.
 klff *klff_open(const char *path, int kind, char *err, int cap);
 void  klff_close(klff *f);
+
+// The same, reading through the caller instead of a file: a film on a server
+// (runtime/media/kl_remote.h). `read` gives up to n bytes at off (short only
+// at the end, -1 on an error); `size` is the file's length; `name` is only a
+// hint for the container ("Film.mkv"). `done(ctx)`, if set, is called once
+// by klff_close (also when the open fails). Since the pCloud locations
+// (2026-11-27); a framework without it plays local files only.
+typedef long (*klff_read_fn)(void *ctx, long long off, void *buf, unsigned long n);
+typedef void (*klff_done_fn)(void *ctx);
+klff *klff_open_io(klff_read_fn read, klff_done_fn done, void *ctx, long long size,
+                   const char *name, int kind, char *err, int cap);
 
 // What the stream is. `codec` gets FFmpeg's codec name ("hevc", "ac3").
 // For audio, rate and channels are those of the PCM klff_audio_next gives.
@@ -47,6 +58,31 @@ int klff_audio_next(klff *f, const short **pcm, int *frames, long long *pts_us);
 
 // To `us` from the start. The next frame given is the first at or after it.
 int klff_seek(klff *f, long long us);
+
+// Every audio stream of the file, one line each in file order:
+// "language\ttitle\tcodec\tchannels\tdefault\tcurrent\tid\ttext\n" (id is the
+// container's own track number: an MP4's track ID; language is the
+// file's tag, often ISO 639-2 like "ger"; codec is a profile such as
+// "DTS-HD MA" when there is one). Returns how many, -1 on bad arguments.
+// Since the Audio Tracks menu (2026-11-27); optional, like klff_open_io.
+int klff_audio_tracks(klff *f, char *buf, int cap);
+
+// An audio handle reads the nth audio stream (0-based, the order above)
+// from now on; seek it afterwards. 0, or -1 when there is no such stream or
+// FFmpeg cannot decode it (the handle keeps its stream then).
+int klff_audio_select(klff *f, int nth);
+
+// The same for subtitle streams, with an eighth field: 1 = text (SRT, ASS,
+// WebVTT, MP4 text), 0 = pictures (PGS, VobSub) that klff_sub_next skips.
+// In both lists "default" is 1 for the default flag, | 2 for forced.
+int klff_sub_tracks(klff *f, char *buf, int cap);
+// A KLFF_SUBTITLE handle reads the nth subtitle stream from now on.
+int klff_sub_select(klff *f, int nth);
+// The next cue of a KLFF_SUBTITLE handle as plain text (lines split by \n,
+// styling dropped), with its start and end in us: 1, 0 at the end, -1 on
+// bad arguments. After klff_seek, cues that ended before the target are
+// skipped. Since the Subtitles menu (2026-11-27); optional.
+int klff_sub_next(klff *f, char *text, int cap, long long *start_us, long long *end_us);
 
 // "FFmpeg 9.0.2", for the log.
 const char *klff_version(void);

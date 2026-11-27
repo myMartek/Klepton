@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "kl_env.h"
+#include "kl_remote.h"
 
 // ---- the framework ----------------------------------------------------------
 
@@ -22,6 +23,17 @@ static struct {
     int (*audio_next)(klff *, const short **, int *, long long *);
     int (*seek)(klff *, long long);
     const char *(*version)(void);
+    // Optional: a framework built before the pCloud locations lacks it and
+    // then plays local files only.
+    klff *(*open_io)(klff_read_fn, klff_done_fn, void *, long long, const char *, int, char *, int);
+    // Optional: a framework built before the Audio Tracks menu lists and
+    // switches nothing.
+    int (*audio_tracks)(klff *, char *, int);
+    int (*audio_select)(klff *, int);
+    // Optional: a framework built before the Subtitles menu shows none.
+    int (*sub_tracks)(klff *, char *, int);
+    int (*sub_select)(klff *, int);
+    int (*sub_next)(klff *, char *, int, long long *, long long *);
 } ff;
 static pthread_once_t ff_once = PTHREAD_ONCE_INIT;
 static int ff_ok;
@@ -50,6 +62,12 @@ static void ff_load(void) {
     FF_SYM(seek, "klff_seek");
     FF_SYM(version, "klff_version");
 #undef FF_SYM
+    *(void **)&ff.open_io = dlsym(h, "klff_open_io");
+    *(void **)&ff.audio_tracks = dlsym(h, "klff_audio_tracks");
+    *(void **)&ff.audio_select = dlsym(h, "klff_audio_select");
+    *(void **)&ff.sub_tracks = dlsym(h, "klff_sub_tracks");
+    *(void **)&ff.sub_select = dlsym(h, "klff_sub_select");
+    *(void **)&ff.sub_next = dlsym(h, "klff_sub_next");
     ff_ok = 1;
     fprintf(stderr, "  [ff] %s loaded\n", ff.version());
 }
@@ -57,6 +75,25 @@ static void ff_load(void) {
 int kl_ff_available(void) {
     pthread_once(&ff_once, ff_load);
     return ff_ok;
+}
+
+// A film on a server (kl_remote.h) is read through FFmpeg's I/O callbacks;
+// any other path opens as the file it is.
+static long ff_remote_read(void *ctx, long long off, void *buf, unsigned long n) {
+    return kl_remote_read(ctx, off, buf, n);
+}
+static void ff_remote_done(void *ctx) { kl_remote_close(ctx); }
+
+static klff *ff_open(const char *path, int kind, char *e, int cap) {
+    if (!kl_remote_is(path)) return ff.open(path, kind, e, cap);
+    if (!ff.open_io) {
+        snprintf(e, (size_t)cap, "this FFmpeg build cannot read from a server");
+        return NULL;
+    }
+    kl_remote *r = kl_remote_open(path);
+    if (!r) { snprintf(e, (size_t)cap, "not registered"); return NULL; }
+    return ff.open_io(ff_remote_read, ff_remote_done, r, kl_remote_size(r),
+                      kl_remote_name(r), kind, e, cap);
 }
 
 static long long ff_now_ms(void) {
@@ -196,7 +233,7 @@ kl_ffvid *kl_ffvid_open(const char *path, char *err, size_t cap) {
         return NULL;
     }
     char e[256] = "";
-    klff *f = ff.open(path, KLFF_VIDEO, e, (int)sizeof e);
+    klff *f = ff_open(path, KLFF_VIDEO, e, (int)sizeof e);
     if (!f) {
         if (err && cap) snprintf(err, cap, "FFmpeg: %s", e);
         return NULL;
@@ -328,7 +365,19 @@ struct kl_ffaud {
 kl_ffaud *kl_ffaud_open(const char *path) {
     if (!kl_ff_available()) return NULL;
     char e[256] = "";
-    klff *f = ff.open(path, KLFF_AUDIO, e, (int)sizeof e);
+    // How long the open took and what it fetched from a server: a 4K film
+    // on pCloud held the game ~8 s here (2026-11-27), cause not yet seen.
+    long long t0 = ff_now_ms();
+    unsigned long rq0 = 0, rs0 = 0;
+    unsigned long long by0 = 0;
+    kl_remote_stats(&rq0, &by0, &rs0);
+    klff *f = ff_open(path, KLFF_AUDIO, e, (int)sizeof e);
+    unsigned long rq1 = 0, rs1 = 0;
+    unsigned long long by1 = 0;
+    kl_remote_stats(&rq1, &by1, &rs1);
+    if (kl_remote_is(path))
+        fprintf(stderr, "  [ff] sound open: %lld ms, %lu request(s), %.1f MB from the server\n",
+                ff_now_ms() - t0, rq1 - rq0, (double)(by1 - by0) / 1e6);
     if (!f) {
         fprintf(stderr, "  [ff] %s: no sound (%s)\n", path, e);
         return NULL;
@@ -396,6 +445,23 @@ int kl_ffaud_advance(kl_ffaud *a) {
     return ffa_fill(a);
 }
 
+int kl_ffaud_tracks(kl_ffaud *a, char *buf, size_t cap) {
+    if (!a || !buf || !cap || !ff.audio_tracks) return -1;
+    return ff.audio_tracks(a->f, buf, cap > 0x7fffffff ? 0x7fffffff : (int)cap);
+}
+
+int kl_ffaud_select(kl_ffaud *a, int nth) {
+    if (!a || !ff.audio_select) return -1;
+    if (ff.audio_select(a->f, nth) != 0) return -1;
+    char codec[32] = "";
+    ff.info(a->f, NULL, NULL, NULL, NULL, codec, (int)sizeof codec, &a->rate, &a->ch);
+    fprintf(stderr, "  [ff] sound track %d: %s, %d Hz, %d ch\n", nth, codec, a->rate, a->ch);
+    a->buf = NULL;
+    a->frames = a->off = a->last = 0;
+    a->eof = 0;
+    return 0;
+}
+
 int kl_ffaud_seek_us(kl_ffaud *a, long long us) {
     if (!a) return -1;
     int rc = ff.seek(a->f, us);
@@ -403,4 +469,58 @@ int kl_ffaud_seek_us(kl_ffaud *a, long long us) {
     a->frames = a->off = a->last = 0;
     a->eof = 0;
     return rc;
+}
+
+// ---- subtitles ----------------------------------------------------------------
+//
+// One handle per subtitle source: a stream of the film, or a file beside it
+// (Film.srt). Cues come as plain text with their times; the caller paces them
+// against the picture.
+
+struct kl_ffsub { klff *f; };
+
+int kl_ffsub_tracks(const char *path, char *buf, size_t cap) {
+    if (!buf || !cap) return -1;
+    buf[0] = 0;
+    if (!kl_ff_available() || !ff.sub_tracks) return -1;
+    char e[256] = "";
+    klff *f = ff_open(path, KLFF_SUBTITLE, e, (int)sizeof e);
+    if (!f) return 0;           // no subtitle stream (or none FFmpeg reads)
+    int n = ff.sub_tracks(f, buf, cap > 0x7fffffff ? 0x7fffffff : (int)cap);
+    ff.close(f);
+    return n;
+}
+
+kl_ffsub *kl_ffsub_open(const char *path, int nth) {
+    if (!kl_ff_available() || !ff.sub_next || !ff.sub_select) return NULL;
+    char e[256] = "";
+    klff *f = ff_open(path, KLFF_SUBTITLE, e, (int)sizeof e);
+    if (!f) {
+        fprintf(stderr, "  [ff] %s: no subtitles (%s)\n", path, e);
+        return NULL;
+    }
+    if (nth > 0 && ff.sub_select(f, nth) != 0) {
+        fprintf(stderr, "  [ff] %s: no subtitle stream %d\n", path, nth);
+        ff.close(f);
+        return NULL;
+    }
+    kl_ffsub *s = calloc(1, sizeof *s);
+    if (!s) { ff.close(f); return NULL; }
+    s->f = f;
+    return s;
+}
+
+void kl_ffsub_close(kl_ffsub *s) {
+    if (!s) return;
+    ff.close(s->f);
+    free(s);
+}
+
+int kl_ffsub_next(kl_ffsub *s, char *text, size_t cap, long long *start_us, long long *end_us) {
+    if (!s) return -1;
+    return ff.sub_next(s->f, text, cap > 0x7fffffff ? 0x7fffffff : (int)cap, start_us, end_us);
+}
+
+int kl_ffsub_seek_us(kl_ffsub *s, long long us) {
+    return s ? ff.seek(s->f, us) : -1;
 }

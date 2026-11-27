@@ -58,10 +58,12 @@ if [ ! -f "$SRC/.klepton-patched" ]; then
   touch "$SRC/.klepton-patched"
 fi
 
-DEMUXERS="matroska,mov,avi,mpegts,mpegps,asf,ogg,flv,m4v,mpegvideo,h264,hevc,wav,flac,mp3,aac,ac3,eac3,dts,truehd"
+DEMUXERS="matroska,mov,avi,mpegts,mpegps,asf,ogg,flv,m4v,mpegvideo,h264,hevc,wav,flac,mp3,aac,ac3,eac3,dts,truehd,srt,ass,webvtt"
 VIDEO="h264,hevc,av1,vp8,vp9,mpeg1video,mpeg2video,mpeg4,msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,wmv1,wmv2,wmv3,vc1,theora,mjpeg,prores"
 AUDIO="aac,aac_latm,ac3,eac3,dca,truehd,mlp,opus,vorbis,flac,mp3,mp2,mp1,alac,wmav1,wmav2,wmapro,wmalossless"
 PCM="pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8,pcm_bluray,pcm_dvd"
+# Text subtitles only (Bigscreen shows text cues, no pictures).
+SUBS="subrip,ass,ssa,webvtt,movtext,text"
 PARSERS="h264,hevc,av1,vp8,vp9,mpegvideo,mpeg4video,vc1,aac,aac_latm,ac3,dca,mlp,opus,vorbis,flac,mpegaudio,h263,mjpeg"
 HWACCELS="h264_videotoolbox,hevc_videotoolbox,av1_videotoolbox,vp9_videotoolbox,mpeg1_videotoolbox,mpeg2_videotoolbox,mpeg4_videotoolbox,h263_videotoolbox"
 
@@ -93,7 +95,7 @@ build_slice() {
       --enable-swscale --enable-swresample \
       --enable-protocol=file \
       --enable-demuxer="$DEMUXERS" \
-      --enable-decoder="$VIDEO,$AUDIO,$PCM" \
+      --enable-decoder="$VIDEO,$AUDIO,$PCM,$SUBS" \
       --enable-parser="$PARSERS" \
       --enable-hwaccel="$HWACCELS" > "$B/configure.out" ) || {
         tail -20 "$B/configure.out"; tail -40 "$B/ffbuild/config.log" 2>/dev/null; exit 1; }
@@ -107,7 +109,7 @@ build_slice() {
   local FW="vendor/out/$D/$NAME.framework"
   [ "$D" = macos ] && FW="$WORK/out-macos/$NAME.framework"
   rm -rf "$FW"; mkdir -p "$FW"
-  printf '_klff_open\n_klff_close\n_klff_info\n_klff_video_next\n_klff_audio_next\n_klff_seek\n_klff_version\n' \
+  printf '_klff_open\n_klff_open_io\n_klff_close\n_klff_info\n_klff_video_next\n_klff_audio_next\n_klff_seek\n_klff_version\n_klff_audio_tracks\n_klff_audio_select\n_klff_sub_tracks\n_klff_sub_select\n_klff_sub_next\n' \
       > "$B/exports.txt"
   "$CC" -target "$TRIPLE" -isysroot "$SYSROOT" -O2 -fPIC -I"$P/include" \
       -c tools/ffmpeg/klff_shim.c -o "$B/klff_shim.o"

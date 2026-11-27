@@ -16,6 +16,21 @@
 int kl_bsinfo_encode(int request_id, long long duration_ms, int media_w,
                      int media_h, int tex_w, int tex_h, int tex_id,
                      unsigned char **out, size_t *len);
+// The Audio Tracks menu's answer (BigMediaPlayerAPI.GetAudioTracks): table
+// TrackInfoList { 0 count:int, 1 activeTrackId:int, 2 tracks:[TrackInfo] }
+// with TrackInfo { 0 id:int, 1 format:int, 4 label:string, 5 language:string }
+// (startObject(3) and startObject(6) in the dex; the Java side writes format
+// and activeTrackId as 0). `langs`/`labels` may hold NULL for "". mallocs
+// `*out`; 0 = ok, -1 = bad args.
+int kl_bstracks_encode(int n, const int *ids, const char *const *langs,
+                       const char *const *labels, unsigned char **out, size_t *len);
+// One subtitle cue (BigMediaPlayerCallbacks.SubtitleCueCallback): table
+// SubtitleCue { 0 id, 1 kind, 2 startTime:int ms, 3 duration:int ms, 4-9
+// styling, 10 lines:[string] } (startObject(11) in the dex); the Java side
+// writes the cue's whole text as one line, its start and its length, and
+// leaves the styling unset. mallocs `*out`; 0 = ok, -1 = bad args.
+int kl_bscue_encode(int start_ms, int duration_ms, const char *text,
+                    unsigned char **out, size_t *len);
 // Base64 (padded) of `n` bytes; malloc'd, caller frees. NULL on bad args.
 char *kl_bsinfo_base64(const unsigned char *b, size_t n);
 
