@@ -4307,7 +4307,13 @@ static void klfb_ShaderSource(uint32_t shader, int32_t count,
                     inv = kl_env_on("KL_GLFB_INVARIANT", t && (strcmp(t, "doom3quest") == 0 ||
                                                              strcmp(t, "x2933720383334150") == 0 ||
                                                              strcmp(t, "x3688751474502123") == 0 ||
-                                                             strcmp(t, "x3652037328256745") == 0));
+                                                             strcmp(t, "x3652037328256745") == 0 ||
+                                                             // I Expect You To Die 2 (Unity 2019.4,
+                                                             // multiview): flickering polygons on
+                                                             // the world's surfaces in the menu
+                                                             // scene (owner on the headset,
+                                                             // 2026-11-26).
+                                                             strcmp(t, "x2970998659623177") == 0));
                 }
                 if (inv && klfb_shader_type(shader) == 0x8B31 /* GL_VERTEX_SHADER */ &&
                     strncmp(buf, "#version 3", 10) == 0 && !strstr(buf, "invariant gl_Position")) {
