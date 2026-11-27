@@ -11174,6 +11174,20 @@ static int klovrp_bsfilm_ineye_on(void) {
     if (on < 0) on = kl_env_on("KL_BS_FILM_INEYE", 0);
     return on;
 }
+static uint32_t g_bsweb_tex[16];
+void kl_bigscreen_web_texture(uint32_t tex, int on) {
+    for (int i = 0; i < 16; i++) {
+        uint32_t cur = __atomic_load_n(&g_bsweb_tex[i], __ATOMIC_RELAXED);
+        if (on && !cur) { __atomic_store_n(&g_bsweb_tex[i], tex, __ATOMIC_RELAXED); return; }
+        if (!on && cur == tex) { __atomic_store_n(&g_bsweb_tex[i], 0, __ATOMIC_RELAXED); return; }
+    }
+}
+int kl_bigscreen_overlay_is_web(unsigned long long tex) {
+    if (!tex || tex >= 0x100000u) return 0;
+    for (int i = 0; i < 16; i++)
+        if (__atomic_load_n(&g_bsweb_tex[i], __ATOMIC_RELAXED) == (uint32_t)tex) return 1;
+    return 0;
+}
 int kl_bigscreen_hide_film(int shape, int head_locked) {
     if (shape != 0 || head_locked) return 0;
     if (!__atomic_load_n(&g_bsfilm_alive, __ATOMIC_RELAXED)) return 0;

@@ -1300,7 +1300,13 @@ final class KleptonCompositor {
             if Self.filmUnderlay {
                 odesc.colorAttachments[0].sourceRGBBlendFactor = .oneMinusDestinationAlpha
                 odesc.colorAttachments[0].destinationRGBBlendFactor = .one
-                odesc.colorAttachments[0].sourceAlphaBlendFactor = .zero
+                // ...and an underlay fills the hole it lands in (its alpha goes
+                // into the destination's), so one drawn after it, farther back,
+                // adds nothing there. With the hole left open, Bigscreen's two
+                // browser underlays — the near panel and the screen behind it —
+                // were summed where they overlap in view (2026-11-27). The eye
+                // pass's alpha is put back to 1 after the underlays anyway.
+                odesc.colorAttachments[0].sourceAlphaBlendFactor = .oneMinusDestinationAlpha
                 odesc.colorAttachments[0].destinationAlphaBlendFactor = .one
                 underlayPipeline = try? device.makeRenderPipelineState(descriptor: odesc)
                 let adesc = MTLRenderPipelineDescriptor()
@@ -4808,6 +4814,11 @@ final class KleptonCompositor {
             if let depthState { enc.setDepthStencilState(depthState) }
         }
         pipe = round == 0 ? (underlayPipeline ?? overPipe) : overPipe
+        // Underlays front to back, in submit order: OVROverlay files a smaller
+        // compositionDepth first and means it IN FRONT, and an underlay fills
+        // the hole it is drawn into (underlayPipeline), so the first drawn
+        // wins where two overlap — Bigscreen's near browser panel over the
+        // screen behind it.
         for i in 0..<n {
             var ov = kl_ovrp_overlay()
             guard kl_ovrp_overlay_get(Int32(i), &ov) != 0 else { continue }
@@ -4864,7 +4875,14 @@ final class KleptonCompositor {
             // the film quad stays down and the in-eye mesh carries the picture,
             // so the menu draws over it. DRM guard lives in the predicate:
             // dead in-eye mesh never hides.
-            if kl_probe_bigscreen() != 0 && kl_bigscreen_hide_film(ov.shape, ov.head_locked) != 0 {
+            // A browser panel names a web view's texture and is never the film.
+            if kl_probe_bigscreen() != 0 && kl_bigscreen_overlay_is_web(ov.tex) == 0
+                && kl_bigscreen_hide_film(ov.shape, ov.head_locked) != 0 {
+                if !loggedOverlayMiss.contains(ov.layer_id) {
+                    loggedOverlayMiss.insert(ov.layer_id)
+                    NSLog("[cp] overlay layer \(ov.layer_id) (tex \(ov.tex)) hidden as the film "
+                          + "while a Bigscreen menu is open")
+                }
                 continue
             }
             // One uniform per amplified view, exactly as the eye pass does — the
@@ -5808,7 +5826,8 @@ final class KleptonCompositor {
         for i in 0..<n {
             var ov = kl_ovrp_overlay()
             guard kl_ovrp_overlay_get(Int32(i), &ov) != 0 else { continue }
-            if Self.isUnderlay(ov) && kl_bigscreen_hide_film(ov.shape, ov.head_locked) == 0 { return true }
+            if Self.isUnderlay(ov) && (kl_bigscreen_overlay_is_web(ov.tex) != 0
+                || kl_bigscreen_hide_film(ov.shape, ov.head_locked) == 0) { return true }
         }
         return false
     }

@@ -19,6 +19,8 @@ int  kl_glfb_compute_tf(void);
 int  kl_glfb_ssbo_tex(void);
 int  kl_glfb_init(void);
 void kl_glfb_set_size(int w, int h);
+// Log binds of this texture name (diagnostics; up to 16 names).
+void kl_glfb_watch_texture(uint32_t name, int on);
 
 // The flat door's zero-readback storage. Requested BEFORE ANGLE comes up
 // (view_run does, for a flat Steam Link door), the root surface becomes a

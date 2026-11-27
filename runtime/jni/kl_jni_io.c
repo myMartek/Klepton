@@ -167,6 +167,48 @@ static int klj_zip_data_off(const klj_zip *z, const klj_zent *e, uint64_t *out) 
     return 0;
 }
 
+// One whole entry of the game's own APK, malloc'd (NULL when absent). For the
+// host side reading what the guest ships besides its code: Bigscreen's browser
+// pages (assets/web/) and the Vuplex page bridge inside classes.dex. The
+// archive is opened once and kept.
+void *klj_apk_entry(const char *name, size_t *len) {
+    static klj_zip z;
+    static int opened;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    if (len) *len = 0;
+    if (!name || !g_apk_path || !*g_apk_path) return NULL;
+    pthread_mutex_lock(&mu);
+    if (!opened) {
+        opened = klj_zip_open(&z, g_apk_path) == 0 ? 1 : -1;
+    }
+    void *out = NULL;
+    const klj_zent *e = opened > 0 ? klj_zip_find(&z, name) : NULL;
+    uint64_t off;
+    if (e && klj_zip_data_off(&z, e, &off) == 0 && e->size < (512u << 20)) {
+        uint8_t *cbuf = malloc((size_t)e->csize ? (size_t)e->csize : 1);
+        uint8_t *buf = malloc((size_t)e->size + 1);
+        if (cbuf && buf && fseeko(z.f, (off_t)off, SEEK_SET) == 0 &&
+            fread(cbuf, 1, (size_t)e->csize, z.f) == (size_t)e->csize) {
+            if (e->method == 0 && e->csize == e->size) {
+                memcpy(buf, cbuf, (size_t)e->size);
+                out = buf;
+            } else if (e->method == 8) {
+                z_stream zs; memset(&zs, 0, sizeof zs);
+                zs.next_in = cbuf; zs.avail_in = (uInt)e->csize;
+                zs.next_out = buf; zs.avail_out = (uInt)e->size;
+                int rc = inflateInit2(&zs, -MAX_WBITS);
+                if (rc == Z_OK) { rc = inflate(&zs, Z_FINISH); inflateEnd(&zs); }
+                if (rc == Z_STREAM_END) out = buf;
+            }
+        }
+        free(cbuf);
+        if (out) { ((uint8_t *)out)[e->size] = 0; if (len) *len = (size_t)e->size; }
+        else free(buf);
+    }
+    pthread_mutex_unlock(&mu);
+    return out;
+}
+
 // Whether `new ZipFile(<missing>)` THROWS, as Java's does, or only answers
 // null, as this file always has. Pistol Whip's Unity reads the main OBB's GUID,
 // then tries patch.<code>.<package>.obb and keeps that one's GUID unless the

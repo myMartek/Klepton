@@ -164,6 +164,12 @@ int kl_ovrp_layer_lifecycle_selftest(void);
 void kl_bigscreen_menu_set(int open, int ineye_alive);
 int kl_bigscreen_menu_open(void);
 int kl_bigscreen_hide_film(int shape, int head_locked);
+// Bigscreen's browser panels (Vuplex web views) are world-locked quads too,
+// submitted like the film quad (flags 0x44) but naming a web view's texture:
+// those are never "the film" to hide behind a menu. The JNI side registers
+// each web view's texture; the compositor asks by the overlay's texL.
+void kl_bigscreen_web_texture(uint32_t tex, int on);
+int  kl_bigscreen_overlay_is_web(unsigned long long tex);
 int kl_bigscreen_menu_selftest(void);
 
 // Local-file film texture (Bigscreen x2497738113633933): the decoded BGRA

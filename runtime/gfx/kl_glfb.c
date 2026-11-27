@@ -13112,6 +13112,7 @@ static void (*g_real_CopyImageSubData)(uint32_t, uint32_t, int32_t, int32_t, int
 // pushed them the AAPCS64 way: one 8-byte slot each. Apple's arm64 ABI packs
 // 32-bit stack arguments into 4 bytes, so they are taken as int64_t here (the
 // same fixup as the compressed-upload thunks) and narrowed.
+static void klfb_watch_note(uint32_t n, const char *what, uint32_t t);   // below
 static void klfb_CopyImageSubData_impl(uint32_t src, uint32_t stgt, int32_t slevel,
                                        int32_t sx, int32_t sy, int32_t sz,
                                        uint32_t dst, uint32_t dtgt, int32_t dlevel,
@@ -13132,6 +13133,7 @@ static void klfb_CopyImageSubData_impl(uint32_t src, uint32_t stgt, int32_t slev
                                        int32_t dx, int32_t dy, int32_t dz,
                                        int32_t w, int32_t h, int32_t d) {
     static unsigned long copies, compressed, viafbo, passed;
+    if (src) klfb_watch_note(src, "copied from (CopyImageSubData)", stgt);
     // Not emulating: the call goes on to ANGLE, with its stack arguments now
     // read the way the guest pushed them — which is what this thunk is handed
     // out for even then.
@@ -15172,9 +15174,37 @@ static void klfb_EGLImageTargetTexture2DOES(uint32_t target, void *image) {
 
 static void (*g_real_BindTexture)(uint32_t, uint32_t);
 static void (*g_real_BindSampler)(uint32_t, uint32_t);
+// Watched textures (kl_glfb_watch_texture): a bind of one is logged, the
+// first few and then every 3000th, with the target and unit — for "does the
+// guest ever sample this texture?" (Bigscreen's browser textures, which the
+// host fills and the game should draw from).
+static uint32_t g_watch_tex[16];
+static unsigned long g_watch_binds[16];
+void kl_glfb_watch_texture(uint32_t name, int on) {
+    for (int i = 0; i < 16; i++) {
+        if (on && !g_watch_tex[i]) { g_watch_tex[i] = name; g_watch_binds[i] = 0; return; }
+        if (!on && g_watch_tex[i] == name) { g_watch_tex[i] = 0; return; }
+    }
+}
+static void klfb_watch_note(uint32_t n, const char *what, uint32_t t) {
+    for (int i = 0; i < 16; i++) {
+        if (g_watch_tex[i] != n) continue;
+        unsigned long c = ++g_watch_binds[i];
+        if (c <= 4 || c % 3000 == 0)
+            fprintf(stderr, "  [glfb] watched texture %u: %s target 0x%x unit %d (#%lu)\n",
+                    n, what, t, g_tb_active_unit, c);
+        return;
+    }
+}
+
 static void klfb_BindTexture(uint32_t t, uint32_t n) {
     if (a_glGetError) while (a_glGetError()) {}
     klfb_tn_bind(n);
+    if (n && g_watch_tex[0] | g_watch_tex[1] | g_watch_tex[2] | g_watch_tex[3] |
+             g_watch_tex[4] | g_watch_tex[5] | g_watch_tex[6] | g_watch_tex[7] |
+             g_watch_tex[8] | g_watch_tex[9] | g_watch_tex[10] | g_watch_tex[11] |
+             g_watch_tex[12] | g_watch_tex[13] | g_watch_tex[14] | g_watch_tex[15])
+        klfb_watch_note(n, "bound", t);
     if (g_real_BindTexture) g_real_BindTexture(klfb_detarget(t), n);
     // A buffer texture has no sampler state: whatever sampler object sits on
     // its unit is ignored. The 2D texture standing in for it is NOT exempt — a
